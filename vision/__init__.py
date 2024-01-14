@@ -75,24 +75,10 @@ app_conf = CustConf.from_dict(defaults)
 # working directory
 work_dir = "./working_dir"
 log_dir = "./logs"
-key_frames = os.path.join(work_dir, "key_frames")
-preproc = os.path.join(work_dir, "pre_proc")
-intermediate = os.path.join(work_dir, "intermediate")
-
-# intermediate representations
-intermediate_template = os.path.join(intermediate, "templated")
-intermediate_scaled = os.path.join(intermediate, "scaled")
-intermediate_comparison = os.path.join(intermediate, "comparison")
 
 # build directory
 os.makedirs(work_dir, exist_ok=True)
 os.makedirs(log_dir, exist_ok=True)
-os.makedirs(key_frames, exist_ok=True)
-os.makedirs(preproc, exist_ok=True)
-os.makedirs(intermediate, exist_ok=True)
-os.makedirs(intermediate_template, exist_ok=True)
-os.makedirs(intermediate_scaled, exist_ok=True)
-os.makedirs(intermediate_comparison, exist_ok=True)
 
 # init log file
 log_filepath = app_conf.get("logging.output_full_path")
