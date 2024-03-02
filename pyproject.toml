@@ -1,15 +1,11 @@
-[tool.isort]
+[tools.isort]
 profile = "black"
 skip_gitignore = true
 known_first_party = [
-    "dataset",
-    "models",
-    "pipeline",
-    "config",
+    "service"
 ]
 
 [tool.pytest.ini_options]
-addopts = "--cov --cov-report term --cov-report xml:coverage.xml --show-capture=all -vvv -ra"
 env_files = ["tests/.env"]
 python_files = "*_tests.py"
 testpaths = ["tests"]
@@ -19,8 +15,7 @@ timeout = 30
 branch = true
 source = ["."]
 omit = [
-    # ignore tests
-    "tests/**",
+    "tests/**"
 ]
 
 [tool.coverage.report]

@@ -5,7 +5,7 @@ import logging
 
 from pyconfs import Configuration
 
-from vision import app_conf as config
+from service.config import app_conf as config
 
 
 class Base:
@@ -16,5 +16,5 @@ class Base:
     def __init__(self, conf: Configuration = config):
         self._app_config = conf
         self._logger = conf.init_logger(
-            self, name=self.__class__.__name__, log_lib=logging
+            self, name=self.__class__.__name__,
         )

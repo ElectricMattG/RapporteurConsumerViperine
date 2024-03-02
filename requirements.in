@@ -1,13 +1,21 @@
-transformers
-torch
-torchvision
-datasets
-pillow
-matplotlib
-scikit-learn
-katna
-diffusers
-accelerate
-adjustText
-super-image
+fastapi
+uvicorn
 pyconfs
+requests # tutorial
+torch # tutorial
+transformers # tutorial
+ipykernel
+ipywidgets
+pyopenssl
+pyarrow
+starlette
+pillow
+fastapi
+cryptography
+aiohttp
+tokenizers
+ray
+ray[serve]
+ray[data]
+ray[client]
+ray[default]
