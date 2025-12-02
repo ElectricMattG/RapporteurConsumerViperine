@@ -27,6 +27,43 @@ defaults = {
         "level": 10,
         "output_full_path": "./logs/logfile.log",
     },
+    "gemini": {
+        # GCP Gemini configuration (alternative to local LLM)
+        "project_id": None,  # Set via PROJECT_ID env var or config
+        "location": "us-central1",  # GCP region for Vertex AI
+        "model_name": "gemini-2.5-pro",  # Stable model with better rate limits (was gemini-2.0-flash-exp)
+        "timeout": 300,  # Request timeout for Gemini API
+        # Note: Uses llm.* settings for temperature, top_p, max_length, etc.
+    },
+    "embedding_service": {
+        # Embedding service configuration
+        "url": "http://localhost:8080",  # Base URL for embedding service
+        "api_key": None,  # Set via EMBEDDING_SERVICE_API_KEY env var or config
+        "timeout": 360.0,  # Request timeout in seconds (6 minutes)
+        "max_retries": 3,  # Maximum number of retry attempts
+        "retry_delay": 1.0,  # Initial delay between retries in seconds
+        "max_connections": 20,  # Maximum number of concurrent connections
+        "max_keepalive_connections": 10,  # Maximum number of keepalive connections
+        "max_texts_per_request": 64,  # Maximum texts to embed in a single request
+        "include_segment_embeddings": False,  # Include per-segment embeddings in response
+    },
+    "azure_blob": {
+        # Azure Blob Storage configuration for search index download
+        "connection_string": None,  # Set via AZURE_STORAGE_CONNECTION_STRING env var
+        "container_name": "indices",  # Container name for search indices
+        "index_blob_url": "https://rapporteurappstorage.blob.core.windows.net/indices/enriched_chunks_with_embeddings_combined.jsonl",  # Full URL to index file (deprecated - use indices)
+        "chunks_blob_name": "enriched_chunks_with_embeddings_combined.jsonl",  # Blob name for chunks file (deprecated - use indices)
+        "citations_blob_name": "citations.jsonl",  # Blob name for citations file
+        "cache_dir": "./cache",  # Local cache directory
+        "download_on_startup": True,  # Download indices on service startup
+        "check_updates_interval": 3600,  # Check for updates every N seconds (0 to disable)
+        # Multi-index configuration: dict of {name: blob_url}
+        # Note: URLs can also be local file paths for testing (e.g., "file:///path/to/index.jsonl")
+        "indices": {
+            "primary": "https://rapporteurappstorage.blob.core.windows.net/indices/enriched_chunks_with_embeddings_combined.jsonl",
+            "qa_pairs": "https://rapporteurappstorage.blob.core.windows.net/indices/enriched_qa_pairs_with_embeddings_combined.jsonl",
+        },
+    },
 }
 
 
