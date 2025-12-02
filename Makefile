@@ -2,7 +2,7 @@ VIRTUALENV_NAME := $(shell basename $(CURDIR))
 
 PIP_COMPILE_ARGS = -v -U --no-emit-index-url --no-emit-trusted-host --strip-extras --resolver=backtracking
 
-PYTHON_VERSION = 3.10.12 # keep minor versions syncd
+PYTHON_VERSION = 3.12 # keep minor versions syncd
 
 
 .PHONY: _python_version

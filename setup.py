@@ -3,13 +3,14 @@ from setuptools import find_packages, setup
 version = open("version").read().strip()
 
 setup_args = {
-    "name": 'template service',
+    "name": 'Scrape linked web sources',
     "version": version,
-    "description": 'a template fastapi kuberay service',
+    "description": 'Scrape linked web sources',
     "author": 'Matt Gerhold',
     "author_email": '',
-    "python_requires": '>=3.10',  # Specify the minimum Python version required
-    "packages": find_packages(["template*"]),  # Automatically find all packages in the project
+    "python_requires": '>=3.11',  # Specify the minimum Python version required
+    "packages": find_packages(),  # Automatically find all packages in the project
+    "package_dir": {"": "."},  # Package root is the current directory
 }
 
 if __name__ == "__main__":

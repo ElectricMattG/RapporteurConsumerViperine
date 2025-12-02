@@ -2,7 +2,6 @@ fastapi
 uvicorn
 pyconfs
 requests # tutorial
-torch # tutorial
 transformers # tutorial
 ipykernel
 ipywidgets
@@ -14,8 +13,3 @@ fastapi
 cryptography
 aiohttp
 tokenizers
-ray
-ray[serve]
-ray[data]
-ray[client]
-ray[default]
