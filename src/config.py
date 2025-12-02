@@ -64,6 +64,48 @@ defaults = {
             "qa_pairs": "https://rapporteurappstorage.blob.core.windows.net/indices/enriched_qa_pairs_with_embeddings_combined.jsonl",
         },
     },
+    "image_downloader": {
+        # Output configuration
+        "default_output_dir": "downloaded_images",  # Default output directory
+        "images_subdir": "images",                  # Subdirectory for image files
+        "metadata_subdir": "metadata",              # Subdirectory for metadata files
+        
+        # Image filtering settings
+        "min_size": 100,              # Minimum image dimension (width or height) in pixels
+        "max_size": 5000,             # Maximum image dimension to avoid huge files
+        "max_images_per_run": 15,     # Default maximum images to download per run
+        
+        # Download behavior
+        "request_timeout": 10,        # HTTP request timeout in seconds
+        "request_delay": 0.5,         # Delay between downloads in seconds
+        "max_file_size": 10485760,    # Maximum file size in bytes (10MB)
+        
+        # Filtering keywords for icons/small images
+        "icon_keywords": [
+            "icon", "logo", "avatar", "close", "menu", "arrow", "button",
+            "expand", "collapse", "search", "play", "pause", "stop",
+            "social", "facebook", "twitter", "linkedin", "youtube",
+            "placeholder", "loading", "spinner"
+        ],
+        
+        # URL patterns to filter
+        "icon_url_patterns": [
+            "icon", "logo", "/static/", "/assets/icons/", "favicon"
+        ],
+        
+        # HTTP headers
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        
+        # Content type validation
+        "allowed_content_types": [
+            "image/jpeg", "image/jpg", "image/png", "image/gif", 
+            "image/webp", "image/svg+xml", "image/bmp"
+        ],
+        
+        # Debug and logging
+        "debug_downloads": False,     # Enable detailed download logging
+        "save_failed_urls": True,     # Save list of failed download URLs
+    },
 }
 
 
