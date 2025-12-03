@@ -4,7 +4,8 @@ config is inherited through sub-classing Base.
 import logging
 
 from pyconfs import Configuration
-from service.config import app_conf as config
+
+from src.config import app_conf as config
 
 
 class Base:

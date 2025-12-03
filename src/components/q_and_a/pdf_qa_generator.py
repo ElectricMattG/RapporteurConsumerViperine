@@ -26,13 +26,13 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-# Import Base class for configuration and logging
-sys.path.append(str(Path(__file__).parent.parent))
-from config_handler import Base
+# Add src to path for imports
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../..'))
 
 # Import LLM client
-sys.path.append(str(Path(__file__).parent.parent / '__clients'))
-from llm_gcp_client import GeminiLLMClient
+from clients.llm_gcp_client import GeminiLLMClient
+# Import Base class for configuration and logging
+from config_handler import Base
 
 
 class PDFQAGenerator(Base):

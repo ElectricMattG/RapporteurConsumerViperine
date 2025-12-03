@@ -18,14 +18,14 @@ from bs4 import BeautifulSoup
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
-from document_websearcher import DocumentWebSearcher  # Same directory
+from src.clients._ import GeminiLLMClient
+from src.clients.llm_client import SimpleLLMClient
+from src.components.document_websearcher import DocumentWebSearcher
+from src.config import app_conf
+from src.config_handler import Base
+from src.models.tree_search import SearchNode, TreeSearchStats
 
-from components.__clients.llm_client import SimpleLLMClient
-from components.__clients.llm_gcp_client import GeminiLLMClient
-from config import app_conf
-from config_handler import Base
-from models.tree_search import SearchNode, TreeSearchStats
-from utils.merge_content import _is_valid_content
+# from src.utils.merge_content import _is_valid_content  # TODO: Create this module
 
 
 class SimpleTreeSearch(Base):
@@ -45,12 +45,12 @@ class SimpleTreeSearch(Base):
         super().__init__()
         self._logger.info("🌳 Initializing SimpleTreeSearch with original algorithm")
 
-        # Use config values as defaults, allow override via parameters
-        self.use_llm = use_llm if use_llm is not None else app_conf.get("tree_search.use_llm")
-        self.text_chunk_size = text_chunk_size if text_chunk_size is not None else app_conf.get("tree_search.text_chunk_size")
-        self.extract_markdown = extract_markdown if extract_markdown is not None else app_conf.get("tree_search.extract_markdown")
+        # Use config values as defaults with fallbacks, allow override via parameters
+        self.use_llm = use_llm if use_llm is not None else (app_conf.get("tree_search.use_llm") or False)
+        self.text_chunk_size = text_chunk_size if text_chunk_size is not None else (app_conf.get("tree_search.text_chunk_size") or 500)
+        self.extract_markdown = extract_markdown if extract_markdown is not None else (app_conf.get("tree_search.extract_markdown") if app_conf.get("tree_search.extract_markdown") is not None else True)
         self.llm_provider = llm_provider if llm_provider is not None else 'gcp'  # Default to GCP
-        self.linked_batch_size = app_conf.get("tree_search.linked_batch_size")  # Batch size for linked content processing
+        self.linked_batch_size = app_conf.get("tree_search.linked_batch_size") or 10  # Batch size for linked content processing
 
         # Use DocumentWebSearcher for modern web search capabilities
         self.searcher = DocumentWebSearcher()
@@ -59,7 +59,7 @@ class SimpleTreeSearch(Base):
         if storage_dir is None:
             # Get workspace root (go up from src/components to project root)
             workspace_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            config_storage_dir = app_conf.get("tree_search.base_storage_dir") + "/" + query
+            config_storage_dir = (app_conf.get("tree_search.base_storage_dir") or "working_dir") + "/" + query
             self.storage_dir = os.path.join(workspace_root, config_storage_dir)
         else:
             self.storage_dir = storage_dir
@@ -695,7 +695,7 @@ class SimpleTreeSearch(Base):
         unique_links.sort(key=lambda x: (x["type"] != "internal", len(x["text"]) == 0))
 
         # Get max links limit from config
-        max_links = self._app_config.get("tree_search.max_links_per_page")
+        max_links = self._app_config.get("tree_search.max_links_per_page") or 100
 
         return unique_links[:max_links]  # Limit to configured max links per page
 
@@ -776,7 +776,7 @@ class SimpleTreeSearch(Base):
         unique_images.sort(key=lambda x: (len(x["alt"]) == 0, x["width"] == "", x["height"] == ""))
 
         # Get max images limit from config
-        max_images = self._app_config.get("tree_search.max_images_per_page")
+        max_images = self._app_config.get("tree_search.max_images_per_page") or 50
 
         return unique_images[:max_images]  # Limit to configured max images per page
 
@@ -873,11 +873,16 @@ class SimpleTreeSearch(Base):
         if any(url_lower.endswith(ext) for ext in media_extensions):
             return (True, f"media_file_{url_lower.split('.')[-1]}")
 
-        # Use shared binary content validation from merge_content utility
-        # Note: _is_valid_content returns (is_valid, reason), we need (should_filter, reason)
-        is_valid, reason = _is_valid_content(content)
-        if not is_valid:
-            return (True, reason)  # Should filter if not valid
+        # Simple binary content validation
+        # Check if content looks like text (has printable characters)
+        if content:
+            try:
+                # Try to count printable vs non-printable characters
+                printable_count = sum(1 for c in content[:1000] if c.isprintable() or c.isspace())
+                if printable_count < 500:  # Less than 50% printable in first 1000 chars
+                    return (True, "binary_content_detected")
+            except:
+                return (True, "content_validation_error")
 
         return (False, "")
 

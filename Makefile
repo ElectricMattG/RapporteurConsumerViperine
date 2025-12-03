@@ -77,3 +77,39 @@ install: requirements.txt dev-requirements.txt
 test: | install
 	@echo "$(YELLOW)$(BOLD)Running tests$(RESET)"
 	pytest
+
+
+.PHONY: gcp_gemini
+gcp_gemini: ## Setup GCP authentication and environment for Gemini API
+	@echo "$(YELLOW)$(BOLD)Setting up GCP Gemini environment$(RESET)"
+	@echo "Checking GCP authentication..."
+	@if ! gcloud auth application-default print-access-token > /dev/null 2>&1; then \
+		echo "Setting up Application Default Credentials..."; \
+		gcloud auth application-default login --no-launch-browser; \
+	else \
+		echo "✓ Already authenticated with Application Default Credentials"; \
+	fi
+	@echo ""
+	@echo "Checking GCP project..."
+	@if [ -z "$${PROJECT_ID}" ]; then \
+		PROJECT_ID=$$(gcloud config get-value project 2>/dev/null); \
+		if [ -z "$${PROJECT_ID}" ]; then \
+			echo "ERROR: No PROJECT_ID set. Please set it with:"; \
+			echo "  export PROJECT_ID=your-project-id"; \
+			exit 1; \
+		fi; \
+	fi; \
+	echo "✓ Project ID: $${PROJECT_ID}"
+	@echo ""
+	@echo "Enabling required APIs..."
+	@gcloud services enable aiplatform.googleapis.com generativelanguage.googleapis.com --project=$${PROJECT_ID:-$$(gcloud config get-value project)} 2>/dev/null || true
+	@echo "✓ APIs enabled"
+	@echo ""
+	@echo "$(GREEN)$(BOLD)GCP Gemini setup complete!$(RESET)"
+	@echo ""
+	@echo "Export these environment variables in your shell:"
+	@echo "  export PROJECT_ID=$${PROJECT_ID:-$$(gcloud config get-value project 2>/dev/null)}"
+	@echo "  export LOCATION=us-central1"
+	@echo ""
+	@echo "Or run commands with them:"
+	@echo "  PROJECT_ID=$${PROJECT_ID:-$$(gcloud config get-value project 2>/dev/null)} LOCATION=us-central1 python3 your_script.py"

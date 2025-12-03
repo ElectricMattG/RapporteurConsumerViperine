@@ -13,3 +13,12 @@ fastapi
 cryptography
 aiohttp
 tokenizers
+# Kafka dependencies
+confluent-kafka
+# Additional dependencies for URL resolution and scraping
+curl-cffi  # For advanced browser impersonation
+beautifulsoup4
+brotli
+python-dateutil
+# Google AI SDK (for GeminiLLMClient)
+google-generativeai

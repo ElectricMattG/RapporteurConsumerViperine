@@ -22,7 +22,7 @@ try:
 except ImportError:
     # Fallback import path
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
-    from src.config_handler import Base
+    from config_handler import Base
 
 
 class GeminiLLMClient(Base):
@@ -47,7 +47,7 @@ class GeminiLLMClient(Base):
         # WHEN: We set up the Gemini client configuration
         self.project_id = project_id or os.getenv('PROJECT_ID') or self._app_config.get('gemini.project_id')
         self.location = location or os.getenv('LOCATION') or self._app_config.get('gemini.location') or 'us-central1'
-        self.model_name = model_name or self._app_config.get('gemini.model_name') or 'gemini-1.5-flash-002'
+        self.model_name = model_name or self._app_config.get('gemini.model_name') or 'gemini-2.5-pro'
 
         # LLM generation parameters from config (compatible with SimpleLLMClient)
         self.max_length = self._app_config.get('llm.max_length') or 500
@@ -128,7 +128,7 @@ class GeminiLLMClient(Base):
 
     async def generate_content(self, prompt: str, temperature: Optional[float] = None,
                         max_tokens: Optional[int] = None, enable_search: bool = False,
-                        return_grounding_metadata: bool = False, model_override: Optional[str] = None) -> str:
+                        return_grounding_metadata: bool = False) -> str:
         """Generate content using Gemini with specified parameters (async).
 
         Args:
@@ -164,35 +164,16 @@ class GeminiLLMClient(Base):
                 **config_params
             )
 
-            # Use model override if provided, otherwise use default
-            model_to_use = model_override if model_override else self.model_name
-
-            # Log model override if different from default
-            if model_override and model_override != self.model_name:
-                self._logger.info(f"🔄 Model override: using {model_override} instead of {self.model_name}")
-
             # Gemini API is synchronous, but we wrap it in async for consistency
             # This allows for future async implementation or concurrent processing
             response = self.client.models.generate_content(
-                model=model_to_use,
+                model=self.model_name,
                 contents=prompt,
                 config=config
             )
 
             # Extract text and optional grounding metadata
             text = response.text
-
-            # Check if response has text
-            if text is None or text == "":
-                self._logger.warning(f"⚠️ Gemini returned empty response. Response: {response}")
-                # Check for safety/blocking issues
-                if hasattr(response, 'candidates') and response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'finish_reason'):
-                        self._logger.warning(f"Finish reason: {candidate.finish_reason}")
-                    if hasattr(candidate, 'safety_ratings'):
-                        self._logger.warning(f"Safety ratings: {candidate.safety_ratings}")
-                return None
 
             # If search was enabled and metadata requested, return full response
             if return_grounding_metadata and enable_search:
@@ -241,63 +222,6 @@ class GeminiLLMClient(Base):
 
         except Exception as e:
             self._logger.error(f"❌ Gemini generation failed: {e}")
-            raise
-
-    async def generate_content_stream(self, prompt: str, temperature: Optional[float] = None,
-                                     max_tokens: Optional[int] = None,
-                                     token_size: int = 5, model_override: Optional[str] = None):
-        """Generate content using Gemini with streaming (async generator).
-
-        Args:
-            prompt: Input prompt for generation
-            temperature: Generation temperature (0.0-1.0). If None, uses default.
-            max_tokens: Maximum tokens to generate. If None, uses default max_length.
-            token_size: Approximate number of characters per token for splitting (default: 5)
-
-        Yields:
-            Text chunks as they're generated (split into smaller token-like pieces)
-
-        Raises:
-            Exception: If generation fails
-        """
-        try:
-            config_params = {
-                'temperature': temperature if temperature is not None else self.temperature,
-                'top_p': self.top_p,
-                'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
-            }
-
-            config = types.GenerateContentConfig(**config_params)
-
-            # Use model override if provided, otherwise use default
-            model_to_use = model_override if model_override else self.model_name
-
-            # Log model override if different from default
-            if model_override and model_override != self.model_name:
-                self._logger.info(f"🔄 Model override: using {model_override} instead of {self.model_name}")
-
-            # Use streaming API
-            import asyncio
-
-            # Create the generator
-            gen = self.client.models.generate_content_stream(
-                model=model_to_use,
-                contents=prompt,
-                config=config
-            )
-
-            # Iterate through chunks and split them into smaller token-like pieces
-            for chunk in gen:
-                if chunk.text:
-                    # Split chunk into smaller pieces for smoother streaming
-                    text = chunk.text
-                    for i in range(0, len(text), token_size):
-                        piece = text[i:i + token_size]
-                        yield piece
-                        await asyncio.sleep(0)  # Yield control to event loop
-
-        except Exception as e:
-            self._logger.error(f"❌ Gemini streaming failed: {e}")
             raise
 
     async def generate_queries(self, root_query, text_content: str, num_queries: int = 5,

@@ -31,14 +31,15 @@ defaults = {
         # GCP Gemini configuration (alternative to local LLM)
         "project_id": None,  # Set via PROJECT_ID env var or config
         "location": "us-central1",  # GCP region for Vertex AI
-        "model_name": "gemini-2.5-pro",  # Stable model with better rate limits (was gemini-2.0-flash-exp)
+        "model_name": "gemini-2.5-flash",  # Fast model with good performance
         "timeout": 300,  # Request timeout for Gemini API
+        "api_key": None,  # Set via GOOGLE_API_KEY env var or config (for direct API, not Vertex AI)
         # Note: Uses llm.* settings for temperature, top_p, max_length, etc.
     },
     "embedding_service": {
         # Embedding service configuration
-        "url": "http://localhost:8080",  # Base URL for embedding service
-        "api_key": None,  # Set via EMBEDDING_SERVICE_API_KEY env var or config
+        "url": "https://embeddings.rapporteur.ai",  # Base URL for embedding service
+        "api_key": "H5J1Hd3P7HpJQ2YyGnEDtvz2wOuV5wSbIr4cVV/b/oU=",  # Set via EMBEDDING_SERVICE_API_KEY env var or config
         "timeout": 360.0,  # Request timeout in seconds (6 minutes)
         "max_retries": 3,  # Maximum number of retry attempts
         "retry_delay": 1.0,  # Initial delay between retries in seconds
@@ -105,6 +106,177 @@ defaults = {
         # Debug and logging
         "debug_downloads": False,     # Enable detailed download logging
         "save_failed_urls": True,     # Save list of failed download URLs
+    },
+    "kafka": {
+        # Kafka consumer configuration
+        "bootstrap_servers": None,  # Set via KAFKA_BOOTSTRAP_SERVERS env var (e.g., "localhost:9092")
+        "group_id": "web-scraper-consumer",  # Consumer group ID for web scraper
+        "auto_offset_reset": "earliest",  # Start from earliest message if no offset
+        "enable_auto_commit": True,  # Auto-commit offsets
+        "session_timeout_ms": 30000,  # Session timeout (30 seconds)
+        "max_poll_records": 10,  # Maximum records to poll at once
+
+        # Topic configuration
+        "input_topic": "web-scrape-requests",  # Topic to consume messages from (web scraper input)
+        "output_topic": "content-extracted",   # Topic to publish extracted content to (chunker & summarizer input)
+
+        # Security configuration (optional)
+        "security_protocol": "PLAINTEXT",  # PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL
+        "sasl_mechanism": None,  # PLAIN, SCRAM-SHA-256, SCRAM-SHA-512
+        "sasl_username": None,  # Set via KAFKA_SASL_USERNAME env var
+        "sasl_password": None,  # Set via KAFKA_SASL_PASSWORD env var
+    },
+    "summarizer": {
+        # Summarizer consumer configuration
+        "consumer_group_id": "summarizer-consumer",  # Consumer group ID for summarizer
+        "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini' (Gemini has native web grounding)
+        "summary_word_count": 100,  # Target word count for summaries
+    },
+    "chunker": {
+        # Document chunker consumer configuration
+        "consumer_group_id": "document-chunker-consumer",  # Consumer group ID for chunker
+        "input_topic": "content-extracted",  # Input topic to consume from (web scraper output)
+        "output_topic": "citation-extraction",  # Output topic for chunked documents
+        "cache_directory": "cache/web_scrapes",  # Directory for cached chunks
+        "max_chunk_words": 350,  # Maximum words per chunk before splitting at sentence boundary
+    },
+    "citation_extractor": {
+        # Citation extraction consumer configuration
+        "consumer_group_id": "citation-extractor-consumer",  # Consumer group ID for citation extractor
+        "input_topic": "citation-extraction",  # Topic to consume chunks from
+        "output_topic": "chunk-embedding",  # Send enriched chunks to embedding consumer
+        "cache_directory": "cache/citations",  # Directory for cached citations
+        "min_citation_length": 10,  # Minimum characters for a valid citation
+        "max_citations_per_chunk": 50,  # Maximum citations to extract per chunk
+    },
+    "chunk_embedder": {
+        # Chunk embedding consumer configuration
+        "consumer_group_id": "chunk-embedder-consumer",  # Consumer group ID for chunk embedder
+        "input_topic": "chunk-embedding",  # Topic to consume enriched chunks from
+        "output_topic": "qa-generation",  # Topic to publish embedded chunks to
+        "cache_directory": "cache/embeddings",  # Directory for cached embeddings
+        "batch_size": 50,  # Batch size for embedding generation
+        "hierarchy_separator": " > ",  # Separator for section hierarchy
+        "min_chunk_length": 20,  # Minimum chunk length to embed (chars)
+        "max_chunk_size": 7500,  # Maximum chunk size before sub-chunking (chars)
+    },
+    "qa_generator": {
+        # QA generation consumer configuration
+        "consumer_group_id": "qa-generator-consumer",  # Consumer group ID for QA generator
+        "input_topic": "qa-generation",  # Topic to consume embedded chunks from
+        "cache_directory": "cache/qa_pairs",  # Directory for cached QA pairs
+        "pairs_per_chunk": 3,  # Target number of QA pairs per chunk
+        "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini'
+        "min_chunk_length": 50,  # Minimum chunk length to generate QA pairs
+        "max_chunk_length": 10000,  # Maximum chunk length for QA generation
+    },
+    "dead_letter": {
+        # Dead letter queue consumer configuration
+        "consumer_group_id": "dead-letter-consumer",  # Consumer group ID for DLQ
+        "input_topic": "dead-letter-queue",  # Topic to consume failed messages from
+        "output_directory": "cache/failures",  # Directory for failure logs
+    },
+    "qa_generation": {
+        # Core LLM settings
+        "llm_url": "http://localhost:8001",
+        "llm_timeout": 300,
+
+        # Batching configuration
+        "enable_batching": True,  # Enable batch processing for multiple chunks
+        "batch_size": 10,  # Number of chunks to process in a single LLM request
+        "batch_delay": .5,  # Delay between batch requests (seconds) - increased for rate limiting
+
+        # Text chunking parameters
+        "chunk_size": 2000,  # Size of text chunks for processing
+        "overlap_size": 200,  # Overlap between consecutive chunks
+        "prompt_context_size": 2000,  # Max chars from chunk to include in LLM prompt
+
+        # Web scraping input files
+        "default_web_jsonl_files": [
+            "merged_content.jsonl"
+        ],
+
+        # Retry and error handling
+        "max_retries": 3,
+        "retry_delays": [0.6, 1.0, 1.4],  # Progressive delays in seconds
+        "temperature_progression": [0.6, 0.8, 1.0],  # Temperature escalation for retries
+
+        # LLM generation parameters
+        "max_length_base": 1200,
+        "top_p": 0.6,
+        "max_qa_pairs_per_chunk": 5,
+
+        # Session and file naming
+        "session_timestamp_format": "%Y%m%d_%H%M%S",
+        "output_file_patterns": {
+            "chunks": "chunks_{identifier}_{timestamp}.jsonl",
+            "qa_pairs": "qa_pairs_{identifier}_{timestamp}.jsonl",
+            "stats": "stats_{identifier}_{timestamp}.json",
+            "errors": "errors_{identifier}_{timestamp}.jsonl"
+        }
+    },
+    "citation_research": {
+        # Citation research and summary generation
+        "summary_word_count": 100,  # Target word count for summaries
+        "reasoning_effort": "medium",  # OpenAI reasoning effort: low, medium, high
+        "verbosity": 1,  # Verbosity level: 0 (concise), 1 (normal), 2 (detailed)
+        "max_urls": 5,  # Maximum URLs to process per citation
+        "enable_web_search": True,  # Enable web search grounding for OpenAI
+    },
+    "openai": {
+        # OpenAI API configuration
+        "api_key": None,  # Set via OPENAI_API_KEY env var
+        "organization": None,  # Set via OPENAI_ORG_ID env var
+        "model": "gpt-4o",  # Model to use for generation
+        "model_name": "gpt-4o",  # Specific model name for citation research (faster than gpt-5.1)
+        "timeout": 180,  # Request timeout in seconds
+        "max_tokens": 16000,  # Maximum tokens in response (includes reasoning + output)
+        "temperature": 0.7,  # Temperature for generation
+        "reasoning_effort": "medium",  # Reasoning effort: low, medium, high
+        "verbosity": "medium",  # Verbosity level: low, medium, high
+    },
+    "llm": {
+        # Generic LLM configuration (used by Gemini client)
+        "max_length": 500,  # Maximum output length
+        "temperature": 0.7,  # Temperature for generation
+        "top_p": 0.9,  # Nucleus sampling parameter
+        "max_retries": 3,  # Maximum retry attempts
+        "retry_delay": 1.0,  # Delay between retries in seconds
+        "max_context_chars": 8000,  # Maximum context characters
+    },
+    "web_scraper": {
+        # Web scraping and URL resolution configuration
+        "cache_dir": "./cache/web_scrapes",  # Directory for cached scrapes
+        "max_redirects": 10,  # Maximum redirect hops to follow
+        "request_timeout": 15,  # Request timeout in seconds
+        "max_urls_per_message": 50,  # Maximum URLs to extract per message
+        "retry_attempts": 3,  # Number of retry attempts for failed requests
+        "retry_delay": 2.0,  # Delay between retries in seconds
+
+        # URL resolution
+        "follow_redirects": True,  # Follow HTTP redirects
+        "verify_ssl": True,  # Verify SSL certificates
+
+        # Content extraction
+        "extract_links": True,  # Extract links from scraped pages
+        "extract_images": False,  # Extract images from scraped pages
+        "max_depth": 1,  # Maximum depth for link following (0 = no following)
+    },
+    "tree_search": {
+        "max_depth": 2,
+        "max_queries_per_depth": 5,
+        "min_results_per_query": 3,
+        "text_chunk_size": 1000,
+        "llm_base_url": "http://localhost:8001",
+        "use_llm": True,
+        "stop_on_no_growth": True,
+        "base_storage_dir": "tree_search_data",  # Base directory for all tree searches
+        "query_subdir_format": "{query}",         # How to format query subdirectory names
+        "normalize_query_name": True,             # Whether to normalize query names for filesystem
+        "extract_markdown": True,                 # Whether to extract markdown from HTML content using docling
+        "max_links_per_page": 150,                 # Maximum links to extract from each page (increase for more relevant documents)
+        "max_images_per_page": 50,                # Maximum images to extract from each page
+        "linked_batch_size": 50,                  # Batch size for linked content URL processing
     },
 }
 

@@ -1,0 +1,17 @@
+Traceback (most recent call last):
+  File "/home/electric/workspace/ScrapeLinkedWebSources/src/consumers/kafka_web_scraper.py", line 37, in <module>
+    from ..config_handler import Base
+  File "/home/electric/workspace/ScrapeLinkedWebSources/src/config_handler.py", line 7, in <module>
+    from service.config import app_conf as config
+ModuleNotFoundError: No module named 'service'
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/home/electric/workspace/ScrapeLinkedWebSources/src/consumers/run_kafka_consumer.py", line 23, in <module>
+    from src.consumers.kafka_web_scraper import KafkaWebScraperConsumer
+  File "/home/electric/workspace/ScrapeLinkedWebSources/src/consumers/kafka_web_scraper.py", line 42, in <module>
+    from config_handler import Base
+  File "/home/electric/workspace/ScrapeLinkedWebSources/src/consumers/../config_handler.py", line 7, in <module>
+    from service.config import app_conf as config
+ModuleNotFoundError: No module named 'service'

@@ -33,14 +33,16 @@ sys.path.insert(0, str(src_dir))
 from config_handler import Base
 
 # Import PDFTextExtractor using importlib to handle folder name with number
-pdf_extractor_path = src_dir / "components" / "4_pdf_extractor" / "pdf_text_extractor.py"
-spec = importlib.util.spec_from_file_location(
-    "pdf_text_extractor",
-    str(pdf_extractor_path)
-)
-pdf_extractor_module = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(pdf_extractor_module)
-PDFTextExtractor = pdf_extractor_module.PDFTextExtractor
+# NOTE: Commented out for web scraping use case - not needed for web content
+# pdf_extractor_path = src_dir / "components" / "4_pdf_extractor" / "pdf_text_extractor.py"
+# spec = importlib.util.spec_from_file_location(
+#     "pdf_text_extractor",
+#     str(pdf_extractor_path)
+# )
+# pdf_extractor_module = importlib.util.module_from_spec(spec)
+# spec.loader.exec_module(pdf_extractor_module)
+# PDFTextExtractor = pdf_extractor_module.PDFTextExtractor
+PDFTextExtractor = None  # Placeholder for web scraping use case
 
 
 class SegmentType(Enum):
@@ -944,11 +946,14 @@ class DocumentChunkingUtility(Base):
         self.max_chunk_words = max_chunk_words
         self.parser = MarkdownParser()
 
-        # Initialize PDF extractor for cache access
-        self.pdf_extractor = PDFTextExtractor(
-            download_dir=str(self.cache_dir.parent / "downloads" if self.cache_dir.parent else "downloads"),
-            cache_dir=str(self.cache_dir)
-        )
+        # Initialize PDF extractor for cache access (optional - only for PDF processing)
+        if PDFTextExtractor is not None:
+            self.pdf_extractor = PDFTextExtractor(
+                download_dir=str(self.cache_dir.parent / "downloads" if self.cache_dir.parent else "downloads"),
+                cache_dir=str(self.cache_dir)
+            )
+        else:
+            self.pdf_extractor = None
 
         # Processing state
         self.results: List[Dict[str, Any]] = []
@@ -1135,18 +1140,30 @@ class DocumentChunkingUtility(Base):
             classification_reasoning = cached_data.get('classification_reasoning')
             content_hash = cached_data.get('content_hash')
         else:
-            # Fall back to nested metadata structure
+            # Fall back to nested metadata structure (web scraping format)
             metadata = cached_data.get('metadata', {})
             doc_id = self.generate_document_id(source_url)
-            actual_url = source_url
-            title = metadata.get('title')
+            actual_url = cached_data.get('url', source_url)
+
+            # Web scraping metadata format
+            title = cached_data.get('title') or metadata.get('title')
             author = metadata.get('author')
             language = metadata.get('language')
             file_size = metadata.get('file_size')
             total_pages = metadata.get('pages')
-            creation_date = metadata.get('creation_date')
-            modification_date = metadata.get('modification_date')
+            # Handle both 'creation_date' and 'published_date' formats
+            creation_date = metadata.get('creation_date') or metadata.get('published_date')
+            modification_date = metadata.get('modification_date') or metadata.get('modified_date')
             pdf_version = metadata.get('pdf_version')
+
+            # Additional web metadata
+            publisher = metadata.get('publisher')
+            description = metadata.get('description')
+            keywords = metadata.get('keywords')
+
+            # Store publisher in a metadata field if available
+            if publisher and not author:
+                author = publisher
 
         return DocumentMetadata(
             document_id=doc_id,
@@ -1623,6 +1640,10 @@ class DocumentChunkingUtility(Base):
 
     def load_from_cache(self, source_url: str) -> Optional[Dict[str, Any]]:
         """Load cached extraction data for a URL."""
+        if self.pdf_extractor is None:
+            self._logger.warning("⚠️  PDF extractor not available - cannot load from cache")
+            return None
+
         try:
             cached_data = self.pdf_extractor.get_cached_extraction(source_url)
             if cached_data and cached_data.get('success'):

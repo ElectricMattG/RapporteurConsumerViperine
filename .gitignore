@@ -141,3 +141,5 @@ dmypy.json
 
 # Dev files
 dev
+
+cache/
