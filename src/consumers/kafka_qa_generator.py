@@ -252,7 +252,7 @@ class KafkaQAGeneratorConsumer(Base):
             result['qa_file'] = qa_file
             result['stats'] = stats
 
-            # Publish to output topic if configured
+            # Publish to output topic if configured (for Q&A embedding consumer)
             if self.output_topic and self.producer:
                 try:
                     output_message = {
@@ -260,8 +260,8 @@ class KafkaQAGeneratorConsumer(Base):
                         'session_id': session_id,
                         'document_id': document_id,
                         'source_url': source_url,
-                        'qa_file': qa_file,
-                        'qa_pairs_count': len(qa_pairs),
+                        'qa_pairs_file': qa_file,  # Path to Q&A pairs JSONL file
+                        'qa_count': len(qa_pairs),
                         'chunks_processed': stats.get('chunks_processed', 0),
                         'processing_time': stats.get('duration_minutes', 0)
                     }

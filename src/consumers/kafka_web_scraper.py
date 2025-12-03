@@ -55,11 +55,15 @@ except ImportError:
 
 # Import components
 try:
+    from youtube_transcript_api import YouTubeTranscriptApi
+
     from ..components.document_websearcher import DocumentWebSearcher
     from ..components.url_resolver import URLResolver
     from ..config_handler import Base
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from youtube_transcript_api import YouTubeTranscriptApi
+
     from components.document_websearcher import DocumentWebSearcher
     from components.url_resolver import URLResolver
     from config_handler import Base
@@ -81,6 +85,9 @@ class KafkaWebScraperConsumer(Base):
 
         # Initialize web searcher for content extraction
         self.web_searcher = DocumentWebSearcher()
+
+        # Initialize YouTube transcript API
+        self.youtube_api = YouTubeTranscriptApi()
 
         # Initialize Kafka consumer and producer
         self.consumer = None
@@ -262,8 +269,30 @@ class KafkaWebScraperConsumer(Base):
                 final_url = uri
                 result['resolved_urls'] = [uri]
 
-            # Step 2: Extract content directly from the resolved URL
-            self._logger.info("📍 Step 2: Extracting content from resolved URL...")
+            # Step 2: Check if this is a YouTube URL and extract transcript if available
+            is_youtube = 'youtube.com/watch' in final_url or 'youtu.be/' in final_url
+
+            if is_youtube:
+                self._logger.info("📹 Detected YouTube URL - attempting transcript extraction...")
+                transcript_result = self._extract_youtube_transcript(final_url, request_dir, session_id, request_id, uri, title)
+                print(f"TRANSCRIPT: {transcript_result}")
+
+                if transcript_result['success']:
+                    self._logger.info(f"   ✅ Successfully extracted YouTube transcript")
+                    self._publish_to_kafka(transcript_result['extraction_result'])
+
+                    result['scraped_content'] = [transcript_result['extraction_result']]
+                    result['content_count'] = 1
+                    result['success'] = True
+                    result['extraction_method'] = 'youtube_transcript'
+
+                    return result
+                else:
+                    self._logger.warning(f"   ⚠️ YouTube transcript extraction failed: {transcript_result['error']}")
+                    self._logger.info("   📄 Falling back to standard web scraping...")
+
+            # Step 3: Extract content directly from the resolved URL (non-YouTube or fallback)
+            self._logger.info("📍 Step 3: Extracting content from resolved URL...")
 
             # Determine extraction strategy based on URL
             # Priority: 1. Cloudscraper (best for Cloudflare), 2. Playwright (JS-heavy sites), 3. curl_cffi (fallback)
@@ -419,6 +448,275 @@ class KafkaWebScraperConsumer(Base):
 
         self._logger.info("=" * 80)
         return result
+
+    def _extract_youtube_transcript(
+        self,
+        youtube_url: str,
+        request_dir: Path,
+        session_id: str,
+        request_id: str,
+        original_uri: str,
+        title: str
+    ) -> Dict[str, Any]:
+        """
+        Extract YouTube video transcript using youtube-transcript-api.
+
+        Args:
+            youtube_url: YouTube video URL
+            request_dir: Request-specific directory for storing files
+            session_id: Session ID
+            request_id: Request ID
+            original_uri: Original URI from the message
+            title: Video title
+
+        Returns:
+            Dict with 'success', 'error', and optionally 'extraction_result'
+        """
+        try:
+            # Extract video ID from URL
+            import re
+            video_id = None
+
+            # Match youtube.com/watch?v=VIDEO_ID or youtu.be/VIDEO_ID
+            match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})', youtube_url)
+            if match:
+                video_id = match.group(1)
+
+            if not video_id:
+                return {
+                    'success': False,
+                    'error': 'Could not extract video ID from YouTube URL'
+                }
+
+            self._logger.info(f"   📹 Video ID: {video_id}")
+
+            # Get rich metadata from yt-dlp
+            self._logger.info("   📊 Fetching video metadata via yt-dlp...")
+            import json
+            import subprocess
+
+            try:
+                result = subprocess.run(
+                    ['yt-dlp', '--dump-json', '--no-download', youtube_url],
+                    capture_output=True,
+                    text=True,
+                    timeout=30
+                )
+                if result.returncode == 0:
+                    yt_metadata = json.loads(result.stdout)
+                    # Extract key fields
+                    title = yt_metadata.get('title', title or 'YouTube Video')
+                    channel = yt_metadata.get('channel', 'Unknown')
+                    upload_date = yt_metadata.get('upload_date', '')
+                    duration = yt_metadata.get('duration', 0)
+                    view_count = yt_metadata.get('view_count', 0)
+                    description = yt_metadata.get('description', '')
+
+                    # Format upload date if available (YYYYMMDD -> YYYY-MM-DD)
+                    if upload_date and len(upload_date) == 8:
+                        upload_date = f"{upload_date[:4]}-{upload_date[4:6]}-{upload_date[6:]}"
+
+                    self._logger.info(f"   ✅ Retrieved metadata: {title} by {channel}")
+                else:
+                    self._logger.warning(f"   ⚠️ yt-dlp metadata fetch failed, using basic metadata")
+                    channel = 'Unknown'
+                    upload_date = ''
+                    duration = 0
+                    view_count = 0
+                    description = ''
+            except Exception as e:
+                self._logger.warning(f"   ⚠️ Could not fetch yt-dlp metadata: {e}")
+                title = title or 'YouTube Video'
+                channel = 'Unknown'
+                upload_date = ''
+                duration = 0
+                view_count = 0
+                description = ''
+
+            # Fetch transcript using youtube-transcript-api
+            self._logger.info("   ⬇️ Fetching transcript via YouTube Transcript API...")
+
+            try:
+                transcript = self.youtube_api.fetch(video_id, languages=['en', 'en-US', 'en-GB'])
+                snippets = transcript.snippets
+
+                if not snippets:
+                    return {
+                        'success': False,
+                        'error': 'No transcript snippets found'
+                    }
+
+                self._logger.info(f"   ✅ Retrieved {len(snippets)} transcript segments")
+
+            except Exception as e:
+                self._logger.warning(f"   ⚠️ Could not fetch transcript: {e}")
+                return {
+                    'success': False,
+                    'error': f'Transcript not available: {str(e)}'
+                }
+
+            # Convert transcript to markdown
+            self._logger.info("   📝 Converting transcript to markdown...")
+            transcript_text = self._convert_transcript_to_markdown(
+                snippets, video_id, title, channel, upload_date, duration
+            )
+
+            if not transcript_text:
+                return {
+                    'success': False,
+                    'error': 'Failed to convert transcript to markdown'
+                }
+
+            self._logger.info(f"   📄 Generated {len(transcript_text)} characters of transcript")
+
+            # Create metadata with rich YouTube information
+            metadata = {
+                'title': title,
+                'url': youtube_url,
+                'video_id': video_id,
+                'channel': channel,
+                'upload_date': upload_date,
+                'duration': duration,
+                'view_count': view_count,
+                'description': description[:500] if description else '',  # Limit description length
+                'source': 'YouTube',
+                'language': transcript.language_code,
+                'is_generated': transcript.is_generated,
+                'segment_count': len(snippets),
+                'extraction_method': 'youtube_transcript_api'
+            }
+
+            # Create extraction result
+            extraction_result = {
+                'url': youtube_url,
+                'original_url': original_uri,
+                'text': transcript_text,
+                'metadata': metadata,
+                'extracted_at': datetime.now().isoformat(),
+                'session_id': session_id,
+                'request_id': request_id,
+                'extraction_method': 'youtube_transcript_api'
+            }
+
+            # Save to output file
+            output_file = request_dir / "extracted_linked_text.jsonl"
+            self._save_extraction(extraction_result, output_file)
+
+            return {
+                'success': True,
+                'extraction_result': extraction_result
+            }
+
+        except Exception as e:
+            self._logger.error(f"   ❌ YouTube transcript extraction error: {e}")
+            return {
+                'success': False,
+                'error': str(e)
+            }
+
+    def _convert_transcript_to_markdown(self, snippets, video_id: str, title: str,
+                                       channel: str = '', upload_date: str = '',
+                                       duration: int = 0) -> str:
+        """
+        Convert YouTube transcript snippets to clean, readable text.
+
+        Args:
+            snippets: List of transcript snippets from youtube-transcript-api
+            video_id: YouTube video ID
+            title: Video title
+            channel: Channel name
+            upload_date: Upload date
+            duration: Video duration in seconds
+
+        Returns:
+            Clean, formatted transcript text suitable for indexing and search
+        """
+        self._logger.error(f"🚨🚨🚨 _convert_transcript_to_markdown CALLED with {len(snippets)} snippets 🚨🚨🚨")
+        import re
+
+        # Collect all text segments
+        text_segments = []
+
+        # Log first few raw snippets for debugging
+        self._logger.info(f"   📝 Raw transcript snippets (first 5):")
+        for i, snippet in enumerate(snippets[:5]):
+            self._logger.info(f"      [{i}] {repr(snippet.text)}")
+
+        for snippet in snippets:
+            # Get the raw text
+            text = snippet.text
+
+            # Remove music notation symbols (♪)
+            text = text.replace('♪', '')
+
+            # Remove VTT-style tags and formatting
+            text = re.sub(r'<[^>]+>', '', text)
+
+            # Remove extra whitespace and newlines within segments
+            text = re.sub(r'\s+', ' ', text)
+
+            # Strip leading/trailing whitespace
+            text = text.strip()
+
+            if text:
+                text_segments.append(text)
+
+        # Log first few processed segments
+        self._logger.info(f"   📝 Processed segments (first 5):")
+        for i, seg in enumerate(text_segments[:5]):
+            self._logger.info(f"      [{i}] {repr(seg)}")
+
+        # Join all segments with spaces
+        full_text = ' '.join(text_segments)
+        self._logger.info(f"   📝 Joined text (first 500 chars): {repr(full_text[:500])}")
+
+        # # Clean up the joined text
+        # # Fix spacing around punctuation
+        # full_text = re.sub(r'\s+([.,!?;:])', r'\1', full_text)
+
+        # self._logger.info(f"   📝 After punctuation fix (first 500 chars): {repr(full_text[:500])}")
+
+        # # Ensure proper sentence spacing
+        # full_text = re.sub(r'([.!?])\s*', r'\1 ', full_text)
+
+        # self._logger.info(f"   📝 After sentence spacing (first 500 chars): {repr(full_text[:500])}")
+
+        # # Remove any remaining multiple spaces
+        # full_text = re.sub(r'\s+', ' ', full_text)
+
+        # # Remove special brackets like [♪♪♪]
+        # full_text = re.sub(r'\[[^\]]*\]', '', full_text)
+
+        # # Clean up any double spaces created by removals
+        # full_text = re.sub(r'\s+', ' ', full_text).strip()
+
+        self._logger.info(f"   📝 Final cleaned text (first 500 chars): {repr(full_text[:500])}")
+
+        # Add header with rich metadata
+        header = f"# YouTube Video Transcript\n\n"
+        header += f"**Title:** {title}\n\n"
+        if channel:
+            header += f"**Channel:** {channel}\n\n"
+        if upload_date:
+            header += f"**Upload Date:** {upload_date}\n\n"
+        if duration:
+            # Format duration as MM:SS or HH:MM:SS
+            hours = duration // 3600
+            minutes = (duration % 3600) // 60
+            seconds = duration % 60
+            if hours > 0:
+                duration_str = f"{hours}:{minutes:02d}:{seconds:02d}"
+            else:
+                duration_str = f"{minutes}:{seconds:02d}"
+            header += f"**Duration:** {duration_str}\n\n"
+        header += f"**Video ID:** {video_id}\n\n"
+        header += f"**Source:** YouTube Transcript API\n\n"
+        header += "---\n\n"
+
+        final_markdown = header + full_text
+        self._logger.info(f"   📄 Final markdown (first 800 chars): {repr(final_markdown[:800])}")
+
+        return final_markdown
 
     def _is_cloudflare_bot_page(self, text_content: str, title: str) -> bool:
         """

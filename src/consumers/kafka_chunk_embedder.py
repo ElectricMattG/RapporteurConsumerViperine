@@ -263,11 +263,9 @@ class KafkaChunkEmbedderConsumer(Base):
         for chunk_idx, chunk in enumerate(chunks):
             content = chunk.get('content', '').strip()
 
-            # Skip if too short
+            # Process all chunks, even short ones
             if len(content) < self.min_chunk_length:
-                self._logger.debug(f"   ⏭️  Skipping short chunk {chunk_idx}: {len(content)} chars")
-                chunk_mapping.append((chunk_idx, False, 0, []))  # Empty embedding
-                continue
+                self._logger.debug(f"   ⚠️  Processing short chunk {chunk_idx}: {len(content)} chars")
 
             # Get section hierarchy
             chunk_metadata = chunk.get('chunk_metadata', {})

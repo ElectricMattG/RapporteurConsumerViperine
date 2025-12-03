@@ -148,12 +148,13 @@ class VideoDownloader(Base):
             f'https://www.youtube.com/watch?v={video_id}',
             '--output', str(channel_dir / f'{safe_title}_{video_id}.%(ext)s'),
             '--ignore-errors',
-            '--impersonate', 'chrome',  # Bypass YouTube 403 blocks via browser impersonation
         ]
 
-        # Skip video download if only subtitles are needed
+        # For subtitle-only downloads, write subs first then skip video
+        # Use --no-download instead of --skip-download to write subtitles
         if config.get('skip_download', False):
-            cmd.append('--skip-download')
+            # --no-download writes metadata and subtitles without downloading video
+            cmd.append('--no-download')
 
         # Add metadata options
         if config['write_info_json']:
@@ -360,11 +361,17 @@ class VideoDownloader(Base):
         """Legacy download mode with live output to terminal."""
         self._logger.info(f"Executing: {' '.join(cmd)}")
 
-        # Run yt-dlp with live output to terminal
-        process = subprocess.Popen(cmd, text=True)
+        # Run yt-dlp with live output to terminal and timeout
+        process = subprocess.Popen(cmd, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # Wait for process to complete
-        result_code = process.wait()
+        try:
+            # Wait for process to complete with 60 second timeout
+            result_code = process.wait(timeout=60)
+        except subprocess.TimeoutExpired:
+            self._logger.warning(f"Download timed out after 60s for {video_id}, terminating process")
+            process.kill()
+            process.wait()
+            return False, "Download timed out"
 
         # For legacy mode, we get basic result info
         if result_code == 0:

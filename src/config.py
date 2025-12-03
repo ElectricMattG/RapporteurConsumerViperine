@@ -48,6 +48,28 @@ defaults = {
         "max_texts_per_request": 64,  # Maximum texts to embed in a single request
         "include_segment_embeddings": False,  # Include per-segment embeddings in response
     },
+    "downloader": {
+        # Video downloader configuration (for YouTube transcript extraction)
+        "output_dir": "./cache/video_transcripts",
+        "min_delay": 2,  # Minimum delay between downloads (seconds)
+        "max_delay": 5,  # Maximum delay between downloads (seconds)
+        "speed_limit": "1M",  # Download speed limit
+        "sleep_requests": 1,  # Sleep between requests
+        "sleep_interval": 1,  # Base sleep interval
+        "max_sleep_interval": 5,  # Max sleep interval
+        "sleep_subtitles": 1,  # Sleep after subtitle download
+        "socket_timeout": 30,  # Socket timeout
+        "retries": 3,  # Number of retries
+        "file_access_retries": 3,  # File access retries
+        "write_info_json": True,  # Write metadata JSON
+        "write_description": True,  # Write video description
+        "write_thumbnail": False,  # Write thumbnail (not needed for transcripts)
+        "write_subs": True,  # Write subtitles (VTT files)
+        "write_auto_subs": True,  # Write auto-generated subtitles
+        "skip_download": True,  # Skip video download (use non-existent format trick)
+        "force_download": False,  # Force re-download
+        "subtitle_languages": ["en", "en-US", "en-GB"],  # Preferred subtitle languages
+    },
     "azure_blob": {
         # Azure Blob Storage configuration for search index download
         "connection_string": None,  # Set via AZURE_STORAGE_CONNECTION_STRING env var
@@ -164,11 +186,23 @@ defaults = {
         # QA generation consumer configuration
         "consumer_group_id": "qa-generator-consumer",  # Consumer group ID for QA generator
         "input_topic": "qa-generation",  # Topic to consume embedded chunks from
+        "output_topic": "qa-embedding",  # Topic to publish Q&A pairs to embedder
         "cache_directory": "cache/qa_pairs",  # Directory for cached QA pairs
         "pairs_per_chunk": 3,  # Target number of QA pairs per chunk
         "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini'
         "min_chunk_length": 50,  # Minimum chunk length to generate QA pairs
         "max_chunk_length": 10000,  # Maximum chunk length for QA generation
+    },
+    "qa_embedder": {
+        # Q&A pair embedding consumer configuration
+        "consumer_group_id": "qa-embedder-consumer",  # Consumer group ID for Q&A embedder
+        "input_topic": "qa-embedding",  # Topic to consume Q&A pairs from
+        "output_topic": None,  # Optional: topic to publish enriched Q&A pairs to
+        "cache_directory": "cache/qa_embeddings",  # Directory for cached embeddings
+        "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model
+        "batch_size": 32,  # Batch size for encoding
+        "separator": " [SEP] ",  # Separator for combining question+answer
+        "mode": "all",  # Embedding mode: 'question', 'answer', 'combined', or 'all'
     },
     "dead_letter": {
         # Dead letter queue consumer configuration

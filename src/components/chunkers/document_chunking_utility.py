@@ -1145,16 +1145,50 @@ class DocumentChunkingUtility(Base):
             doc_id = self.generate_document_id(source_url)
             actual_url = cached_data.get('url', source_url)
 
-            # Web scraping metadata format
-            title = cached_data.get('title') or metadata.get('title')
-            author = metadata.get('author')
-            language = metadata.get('language')
-            file_size = metadata.get('file_size')
-            total_pages = metadata.get('pages')
-            # Handle both 'creation_date' and 'published_date' formats
-            creation_date = metadata.get('creation_date') or metadata.get('published_date')
-            modification_date = metadata.get('modification_date') or metadata.get('modified_date')
-            pdf_version = metadata.get('pdf_version')
+            # Debug: Log what we're working with
+            self._logger.info(f"   🔍 Metadata extraction - top-level extraction_method: {cached_data.get('extraction_method')}")
+            self._logger.info(f"   🔍 Metadata extraction - nested extraction_method: {metadata.get('extraction_method')}")
+            self._logger.info(f"   🔍 Metadata extraction - nested source: {metadata.get('source')}")
+            self._logger.info(f"   🔍 Metadata extraction - nested channel: {metadata.get('channel')}")
+            self._logger.info(f"   🔍 Metadata extraction - nested upload_date: {metadata.get('upload_date')}")
+
+            # Check if this is a YouTube transcript (check both top-level and nested)
+            is_youtube = (
+                cached_data.get('extraction_method') == 'youtube_transcript_api' or
+                metadata.get('extraction_method') == 'youtube_transcript_api' or
+                metadata.get('source') == 'YouTube'
+            )
+
+            self._logger.info(f"   🔍 YouTube detected: {is_youtube}")
+
+            if is_youtube:
+                # YouTube-specific metadata mapping
+                title = metadata.get('title')
+                author = metadata.get('channel')  # Channel name → author
+                language = metadata.get('language')
+                file_size = None
+                total_pages = None
+                creation_date = metadata.get('upload_date')  # Upload date → creation_date
+                modification_date = None
+                pdf_version = None
+                content_type = 'youtube_transcript'  # Set content type
+
+                self._logger.info(f"   ✅ YouTube metadata mapped:")
+                self._logger.info(f"      author: {author}")
+                self._logger.info(f"      creation_date: {creation_date}")
+                self._logger.info(f"      content_type: {content_type}")
+            else:
+                # Web scraping metadata format
+                title = cached_data.get('title') or metadata.get('title')
+                author = metadata.get('author')
+                language = metadata.get('language')
+                file_size = metadata.get('file_size')
+                total_pages = metadata.get('pages')
+                # Handle both 'creation_date' and 'published_date' formats
+                creation_date = metadata.get('creation_date') or metadata.get('published_date')
+                modification_date = metadata.get('modification_date') or metadata.get('modified_date')
+                pdf_version = metadata.get('pdf_version')
+                content_type = metadata.get('content_type')
 
             # Additional web metadata
             publisher = metadata.get('publisher')
@@ -1168,10 +1202,10 @@ class DocumentChunkingUtility(Base):
         return DocumentMetadata(
             document_id=doc_id,
             source_url=actual_url,
-            extraction_method=cached_data.get('method', 'unknown'),
+            extraction_method=cached_data.get('extraction_method', cached_data.get('method', 'unknown')),
             file_size_bytes=file_size,
             total_pages=total_pages,
-            extraction_timestamp=cached_data.get('timestamp'),
+            extraction_timestamp=cached_data.get('extracted_at', cached_data.get('timestamp')),
             language=language,
             title=title,
             author=author,
@@ -1288,11 +1322,19 @@ class DocumentChunkingUtility(Base):
 
         # Prepend document title to section hierarchy for all segments
         if doc_metadata.title:
+            # Check if this is a YouTube transcript
+            is_youtube = doc_metadata.content_type == 'youtube_transcript'
+
             for segment in segments:
                 current_hierarchy = segment.get('section_hierarchy', [])
                 # Filter out None values from current hierarchy
                 current_hierarchy = [h for h in current_hierarchy if h is not None]
-                if current_hierarchy:
+
+                if is_youtube:
+                    # For YouTube transcripts, use only the video title in hierarchy
+                    # This avoids including "YouTube Video Transcript" from the H1 header
+                    segment['section_hierarchy'] = [doc_metadata.title]
+                elif current_hierarchy:
                     # Prepend title to existing hierarchy
                     segment['section_hierarchy'] = [doc_metadata.title] + current_hierarchy
                 else:

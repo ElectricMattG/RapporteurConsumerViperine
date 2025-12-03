@@ -22,3 +22,5 @@ brotli
 python-dateutil
 # Google AI SDK (for GeminiLLMClient)
 google-generativeai
+sentence-transformers
+youtube-transcript-api

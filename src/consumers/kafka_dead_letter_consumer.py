@@ -56,12 +56,12 @@ class KafkaDeadLetterConsumer(Base):
         super().__init__()
         self._logger.info("Initializing KafkaDeadLetterConsumer")
 
-        # Load configuration
-        self._load_config()
-
-        # Initialize Kafka consumer
+        # Initialize Kafka consumer (will be set in _load_config)
         self.consumer = None
         self.running = False
+
+        # Load configuration and create consumer
+        self._load_config()
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
