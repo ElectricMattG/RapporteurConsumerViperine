@@ -1188,7 +1188,8 @@ class DocumentChunkingUtility(Base):
                 creation_date = metadata.get('creation_date') or metadata.get('published_date')
                 modification_date = metadata.get('modification_date') or metadata.get('modified_date')
                 pdf_version = metadata.get('pdf_version')
-                content_type = metadata.get('content_type')
+                # Handle both 'content_type' and 'document_type' (from summary metadata)
+                content_type = metadata.get('content_type') or metadata.get('document_type')
 
             # Additional web metadata
             publisher = metadata.get('publisher')

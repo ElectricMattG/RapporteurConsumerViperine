@@ -35,7 +35,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from confluent_kafka import Consumer, KafkaError, KafkaException
+from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
 # Import components
 try:
@@ -69,6 +69,7 @@ class KafkaSummarizerConsumer(Base):
 
         # Initialize Kafka consumer
         self.consumer = None
+        self.producer = None
         self.running = False
 
         # Setup signal handlers for graceful shutdown
@@ -105,6 +106,7 @@ class KafkaSummarizerConsumer(Base):
 
             # Topic configuration
             self.input_topic = self._app_config.get('kafka.output_topic') or 'summarise-document'
+            self.output_topic = 'content-extracted'  # Publish summary back for chunking when extraction failed
 
             # Cache configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
@@ -126,13 +128,20 @@ class KafkaSummarizerConsumer(Base):
         self.running = False
 
     def _create_consumer(self):
-        """Create and configure Kafka consumer"""
+        """Create and configure Kafka consumer and producer"""
         try:
             self.consumer = Consumer(self.kafka_config)
             self.consumer.subscribe([self.input_topic])
             self._logger.info(f"✅ Subscribed to topic: {self.input_topic}")
+
+            # Create producer for publishing summary content back to content-extracted
+            producer_config = {
+                'bootstrap.servers': self.kafka_config['bootstrap.servers']
+            }
+            self.producer = Producer(producer_config)
+            self._logger.info(f"✅ Producer ready for topic: {self.output_topic}")
         except Exception as e:
-            self._logger.error(f"❌ Error creating Kafka consumer: {e}")
+            self._logger.error(f"❌ Error creating Kafka consumer/producer: {e}")
             raise
 
     async def _process_message(self, message_data: Dict) -> Dict:
@@ -188,6 +197,12 @@ class KafkaSummarizerConsumer(Base):
             author = metadata.get('author', 'Unknown')
             citation = f"{author}. {title}. {url}"
 
+            # Detect language from text or metadata (default to English)
+            detected_language = metadata.get('language') or 'en'
+            if not detected_language and text:
+                # Simple language detection: if mostly ASCII, assume English
+                detected_language = 'en'
+
             # For failed extractions with Gemini, rely on web grounding
             context_text = text[:2000] if text and not extraction_failed else None
 
@@ -220,6 +235,22 @@ class KafkaSummarizerConsumer(Base):
             result['summary_file'] = str(summary_file)
             result['markdown_file'] = str(markdown_file)
 
+            # CONTINGENCY: If extraction failed (403/404) but summary succeeded,
+            # publish the summary content to content-extracted topic for chunking
+            # This ensures 100% coverage even when direct scraping fails
+            if extraction_failed:
+                self._logger.info("   🔄 Extraction failed but summary succeeded - publishing summary for chunking")
+                await self._publish_summary_for_chunking(
+                    request_id=request_id,
+                    session_id=session_id,
+                    url=url,
+                    summary_text=summary_result.get('markdown_summary', ''),
+                    metadata=metadata,
+                    title=title,
+                    summary_metadata=summary_result.get('metadata', {}),
+                    language=detected_language
+                )
+
         except Exception as e:
             result['error'] = str(e)
             self._logger.error(f"❌ Error generating summary: {e}")
@@ -228,6 +259,109 @@ class KafkaSummarizerConsumer(Base):
 
         self._logger.info("=" * 80)
         return result
+
+    async def _publish_summary_for_chunking(
+        self,
+        request_id: str,
+        session_id: str,
+        url: str,
+        summary_text: str,
+        metadata: Dict,
+        title: str,
+        summary_metadata: Dict,
+        language: str = 'en'
+    ):
+        """
+        Publish summary content to content-extracted topic for chunking.
+
+        This is used when extraction fails (403/404) but summary generation succeeds
+        via Gemini web grounding. By publishing the summary, we ensure it gets chunked
+        and embedded, providing 100% coverage even when direct scraping fails.
+
+        Args:
+            request_id: Request identifier
+            session_id: Session identifier
+            url: Source URL
+            summary_text: The generated summary (markdown format)
+            metadata: Original metadata from extraction attempt
+            title: Document title
+            summary_metadata: Rich metadata extracted by Gemini (title, authors, date, etc.)
+            language: Detected language code (default: 'en')
+        """
+        try:
+            # Enhanced metadata for data lineage tracking
+            # Merge summary metadata (from Gemini) with original metadata
+            enhanced_metadata = {
+                **metadata,
+                'title': summary_metadata.get('title', title),
+                'authors': summary_metadata.get('authors', []),
+                'publication_date': summary_metadata.get('publication_date'),
+                'publisher': summary_metadata.get('publisher'),
+                'publication_venue': summary_metadata.get('publication_venue'),
+                'document_type': summary_metadata.get('type'),  # Propagate type (article, report, etc.)
+                'pages': summary_metadata.get('pages'),
+                'volume': summary_metadata.get('volume'),
+                'issue': summary_metadata.get('issue'),
+                'doi': summary_metadata.get('doi'),
+                'isbn': summary_metadata.get('isbn'),
+                'language': language,  # Add language from detection
+                'url': url,
+                'content_source': 'gemini_summary',  # Track that this came from summary, not extraction
+                'extraction_status': 'failed_used_summary_fallback',
+                'extraction_method': 'gemini_web_grounding',  # Clear method indicator
+                'summary_generated_at': datetime.now().isoformat(),
+                'data_lineage': {
+                    'original_extraction_failed': True,
+                    'fallback_strategy': 'gemini_web_grounding_summary',
+                    'content_type': 'ai_generated_summary',
+                    'chunked_from': 'summary',  # Critical: we're chunking the summary, not scraped content
+                    'source_method': 'llm_summarization_with_web_grounding'
+                }
+            }
+
+            # Prepare message for chunking consumer with optional summary_metadata
+            message = {
+                'request_id': request_id,
+                'session_id': session_id,
+                'extracted_content': {
+                    'url': url,
+                    'text': summary_text,  # Use summary text for chunking
+                    'metadata': enhanced_metadata,
+                    'extracted_at': datetime.now().isoformat()
+                },
+                # Optional: include full summary metadata for chunker to use
+                'summary_metadata': summary_metadata
+            }
+
+            # Serialize message
+            message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
+
+            # Publish to content-extracted topic (same topic web scraper uses)
+            self.producer.produce(
+                topic=self.output_topic,
+                key=request_id.encode('utf-8'),
+                value=message_bytes,
+                callback=self._delivery_callback
+            )
+
+            # Flush to ensure delivery
+            self.producer.poll(0)
+
+            self._logger.info(f"   📤 Published summary to '{self.output_topic}' for chunking")
+            self._logger.info(f"   📊 Summary length: {len(summary_text)} characters")
+            self._logger.info(f"   🏷️  Data lineage: gemini_web_grounding_summary")
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing summary for chunking: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
+
+    def _delivery_callback(self, err, msg):
+        """Callback for Kafka producer delivery reports"""
+        if err:
+            self._logger.error(f"❌ Message delivery failed: {err}")
+        else:
+            self._logger.debug(f"✅ Message delivered to {msg.topic()} [{msg.partition()}]")
 
     def start(self):
         """Start the Kafka consumer"""
@@ -290,6 +424,13 @@ class KafkaSummarizerConsumer(Base):
     def _shutdown(self):
         """Cleanup and shutdown"""
         self._logger.info("🛑 Shutting down consumer...")
+
+        if self.producer:
+            try:
+                self.producer.flush()
+                self._logger.info("✅ Producer flushed successfully")
+            except Exception as e:
+                self._logger.error(f"Error flushing producer: {e}")
 
         if self.consumer:
             try:

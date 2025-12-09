@@ -113,3 +113,62 @@ gcp_gemini: ## Setup GCP authentication and environment for Gemini API
 	@echo ""
 	@echo "Or run commands with them:"
 	@echo "  PROJECT_ID=$${PROJECT_ID:-$$(gcloud config get-value project 2>/dev/null)} LOCATION=us-central1 python3 your_script.py"
+
+
+.PHONY: kafka_start
+kafka_start: ## Start Kafka and Zookeeper containers
+	@echo "$(YELLOW)$(BOLD)Starting Kafka services...$(RESET)"
+	@docker-compose -f docker-compose.kafka.yml up -d
+	@echo "Waiting for Kafka to be ready..."
+	@sleep 8
+	@echo "✓ Kafka services started"
+	@echo ""
+	@echo "Kafka UI available at: http://localhost:8090"
+
+
+.PHONY: kafka_stop
+kafka_stop: ## Stop Kafka and Zookeeper containers
+	@echo "$(YELLOW)$(BOLD)Stopping Kafka services...$(RESET)"
+	@docker-compose -f docker-compose.kafka.yml down
+	@echo "✓ Kafka services stopped"
+
+
+.PHONY: kafka_topics
+kafka_topics: ## Create all required Kafka topics
+	@echo "$(YELLOW)$(BOLD)Creating Kafka topics...$(RESET)"
+	@docker exec kafka kafka-topics --create --if-not-exists --topic web-scrape-requests --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic content-extracted --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic citation-extraction --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic chunk-embedding --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic qa-generation --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic dead-letter-queue --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@echo "✓ All topics created"
+	@echo ""
+	@echo "Listing topics:"
+	@docker exec kafka kafka-topics --list --bootstrap-server localhost:9092
+
+
+.PHONY: kafka_setup
+kafka_setup: kafka_start kafka_topics ## Start Kafka and create all topics
+	@echo ""
+	@echo "$(GREEN)$(BOLD)Kafka setup complete!$(RESET)"
+	@echo "Bootstrap servers: localhost:9092"
+	@echo "Kafka UI: http://localhost:8090"
+
+
+.PHONY: kafka_flush
+kafka_flush: ## Flush all Kafka topics and clear cache
+	@echo "$(YELLOW)$(BOLD)Flushing Kafka topics and cache...$(RESET)"
+	@echo "Deleting and recreating topics..."
+	@docker exec kafka kafka-topics --delete --topic web-scrape-requests --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic content-extracted --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic citation-extraction --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic chunk-embedding --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic qa-generation --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic dead-letter-queue --bootstrap-server localhost:9092 2>/dev/null || true
+	@sleep 3
+	@echo "Recreating topics..."
+	@$(MAKE) kafka_topics
+	@echo "Clearing cache..."
+	@rm -rf cache/web_scrapes/req_*
+	@echo "✓ Kafka topics flushed and cache cleared"

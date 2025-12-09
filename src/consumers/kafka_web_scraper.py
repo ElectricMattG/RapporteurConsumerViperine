@@ -21,6 +21,7 @@ Usage:
 """
 
 import asyncio
+import io
 import json
 import os
 import random
@@ -34,6 +35,7 @@ from typing import Any, Dict, List, Optional
 import requests
 from bs4 import BeautifulSoup
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
+from PyPDF2 import PdfReader
 
 try:
     import cloudscraper
@@ -385,15 +387,24 @@ class KafkaWebScraperConsumer(Base):
                     response = self.web_searcher.session.get(final_url, timeout=15)
 
                     if response.status_code == 200:
-                        # Get HTML content
-                        html_content = response.content.decode('utf-8', errors='ignore')
-                        soup = BeautifulSoup(html_content, 'html.parser')
+                        # Check if this is a PDF based on content-type or URL
+                        content_type = response.headers.get('content-type', '').lower()
+                        is_pdf = 'application/pdf' in content_type or final_url.lower().endswith('.pdf')
 
-                        # Extract metadata
-                        metadata = self.web_searcher._extract_page_metadata(soup)
+                        if is_pdf:
+                            # Extract text from PDF
+                            self._logger.info("   📄 Detected PDF - extracting text...")
+                            text_content, metadata = self._extract_pdf_text(response.content, final_url)
+                        else:
+                            # Get HTML content
+                            html_content = response.content.decode('utf-8', errors='ignore')
+                            soup = BeautifulSoup(html_content, 'html.parser')
 
-                        # Extract FULL text content (not truncated)
-                        text_content = self._extract_full_text_content(soup)
+                            # Extract metadata
+                            metadata = self.web_searcher._extract_page_metadata(soup)
+
+                            # Extract FULL text content (not truncated)
+                            text_content = self._extract_full_text_content(soup)
 
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters of text content")
 
@@ -406,12 +417,12 @@ class KafkaWebScraperConsumer(Base):
                             'extracted_at': datetime.now().isoformat(),
                             'session_id': session_id,
                             'request_id': request_id,
-                            'extraction_method': 'curl_cffi'
+                            'extraction_method': 'pdf_extraction' if is_pdf else 'curl_cffi'
                         }
 
                         # Save to output file (append mode)
                         self._save_extraction(extraction_result, output_file)
-                        self._logger.info(f"   ✅ Successfully extracted with curl_cffi")
+                        self._logger.info(f"   ✅ Successfully extracted with {'PDF extraction' if is_pdf else 'curl_cffi'}")
 
                         # Publish to Kafka for downstream processing (summarization)
                         self._publish_to_kafka(extraction_result)
@@ -756,6 +767,62 @@ class KafkaWebScraperConsumer(Base):
                 return True
 
         return False
+
+    def _extract_pdf_text(self, pdf_content: bytes, url: str) -> tuple[str, Dict]:
+        """
+        Extract text from PDF content using PyPDF2.
+
+        NOTE: This is a temporary patch. Will be replaced with a call to a
+        dedicated PDF extraction service for better quality extraction.
+
+        Args:
+            pdf_content: Raw PDF bytes
+            url: Source URL for metadata
+
+        Returns:
+            Tuple of (extracted_text, metadata)
+        """
+        try:
+            # Create PDF reader from bytes
+            pdf_file = io.BytesIO(pdf_content)
+            pdf_reader = PdfReader(pdf_file)
+
+            # Extract metadata
+            pdf_info = pdf_reader.metadata
+            metadata = {
+                'title': pdf_info.get('/Title', 'PDF Document') if pdf_info else 'PDF Document',
+                'author': pdf_info.get('/Author', '') if pdf_info else '',
+                'subject': pdf_info.get('/Subject', '') if pdf_info else '',
+                'creator': pdf_info.get('/Creator', '') if pdf_info else '',
+                'num_pages': len(pdf_reader.pages),
+                'content_type': 'application/pdf',
+                'source_url': url
+            }
+
+            # Extract text from all pages
+            text_parts = []
+            for page_num, page in enumerate(pdf_reader.pages, 1):
+                try:
+                    page_text = page.extract_text()
+                    if page_text.strip():
+                        text_parts.append(f"--- Page {page_num} ---\n{page_text}")
+                except Exception as e:
+                    self._logger.warning(f"   ⚠️ Could not extract text from page {page_num}: {e}")
+                    continue
+
+            extracted_text = "\n\n".join(text_parts)
+
+            if not extracted_text.strip():
+                extracted_text = "No text could be extracted from PDF"
+                self._logger.warning("   ⚠️ PDF appears to be image-based or encrypted")
+
+            self._logger.info(f"   ✅ Extracted {len(extracted_text)} characters from {len(pdf_reader.pages)} pages")
+
+            return extracted_text, metadata
+
+        except Exception as e:
+            self._logger.error(f"   ❌ PDF extraction failed: {e}")
+            return f"PDF extraction error: {str(e)}", {'error': str(e), 'source_url': url}
 
     def _extract_full_text_content(self, soup: BeautifulSoup) -> str:
         """

@@ -20,7 +20,10 @@ curl-cffi  # For advanced browser impersonation
 beautifulsoup4
 brotli
 python-dateutil
+pypdf2  # PDF text extraction
 # Google AI SDK (for GeminiLLMClient)
 google-generativeai
+google-genai
+openai  # OpenAI API client
 sentence-transformers
 youtube-transcript-api

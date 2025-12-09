@@ -96,6 +96,7 @@ class KafkaDocumentChunkerConsumer(Base):
             message_data: Dictionary containing:
                 - request_id: Unique identifier for this request
                 - extracted_content: Nested dict with url, text, metadata
+                - summary_metadata (optional): Rich metadata from summary (title, authors, date, etc.)
         """
         request_id = message_data.get('request_id', 'unknown')
 
@@ -104,49 +105,79 @@ class KafkaDocumentChunkerConsumer(Base):
         url = extracted_content.get('url', '')
         text = extracted_content.get('text', '')
         metadata = extracted_content.get('metadata', {})
-        title = metadata.get('title', '')
+
+        # Check for optional summary_metadata (from summarizer fallback)
+        summary_metadata = message_data.get('summary_metadata', {})
+
+        # Use summary metadata if available, otherwise fall back to extraction metadata
+        if summary_metadata:
+            title = summary_metadata.get('title', metadata.get('title', ''))
+            authors = summary_metadata.get('authors', [])
+            author = ', '.join(authors) if authors else metadata.get('author', '')
+            published_date = summary_metadata.get('publication_date', metadata.get('published_date', ''))
+            publisher = summary_metadata.get('publisher', metadata.get('publisher', ''))
+            document_type = summary_metadata.get('type', metadata.get('document_type'))
+            publication_venue = summary_metadata.get('publication_venue', metadata.get('publication_venue'))
+            data_source = 'summary_metadata'
+        else:
+            title = metadata.get('title', '')
+            author = metadata.get('author', '')
+            published_date = metadata.get('published_date', '')
+            publisher = metadata.get('publisher', '')
+            document_type = metadata.get('document_type')
+            publication_venue = metadata.get('publication_venue')
+            data_source = 'extraction_metadata'
 
         self._logger.info("=" * 80)
         self._logger.info("📦 New chunking request received")
         self._logger.info(f"   Request ID: {request_id}")
         self._logger.info(f"   URL: {url[:100]}...")
         self._logger.info(f"   Content length: {len(text)} characters")
+        if summary_metadata:
+            self._logger.info(f"   📊 Using summary metadata (title, authors, date from Gemini)")
 
         try:
-            # Extract rich metadata from the extraction (not summary)
-            # The web scraper extracts: title, author, published_date, publisher, etc.
-            doc_title = metadata.get('title', '')
-            doc_author = metadata.get('author', '')
-            published_date = metadata.get('published_date', '')
-            publisher = metadata.get('publisher', '')
+            # Get data lineage info
+            data_lineage = metadata.get('data_lineage', {})
+            chunked_from = data_lineage.get('chunked_from', 'extraction')  # 'summary' or 'extraction'
+            extraction_method = metadata.get('extraction_method', 'web_extraction')
 
-            # If title is just the author name, extract real title from text
-            if doc_title == doc_author and text:
-                # First line is usually the article title
-                first_line = text.split('\n')[0].strip()
-                if first_line and first_line != doc_author:
-                    doc_title = first_line
+            # Use the enriched metadata values we extracted above
+            doc_title = title
+            doc_author = author
+            doc_language = metadata.get('language', 'en')
+
+            # Remove the old title extraction logic since we now have it from summary_metadata or extraction
 
             self._logger.info(f"   📄 Title: {doc_title[:80]}...")
             self._logger.info(f"   ✍️  Author: {doc_author}")
             self._logger.info(f"   📅 Published: {published_date}")
             self._logger.info(f"   🏢 Publisher: {publisher}")
+            self._logger.info(f"   🌐 Language: {doc_language}")
+            self._logger.info(f"   🔗 Data source: {data_source}")
+            self._logger.info(f"   📊 Chunked from: {chunked_from}")
+            self._logger.info(f"   🔧 Extraction method: {extraction_method}")
 
             # Prepare cached data structure for chunker with enriched metadata
+            # Include data lineage to track whether we chunked summary or extraction
             cached_data = {
                 'url': url,
-                'title': doc_title,  # Use enriched title
+                'title': doc_title,
                 'text': text,
                 'metadata': {
                     'title': doc_title,
                     'author': doc_author,
                     'publisher': publisher,
+                    'publication_venue': publication_venue,
                     'creation_date': published_date,
-                    'language': metadata.get('language'),
+                    'document_type': document_type,  # Propagate document type (article, report, etc.)
+                    'language': doc_language,
                     'description': metadata.get('description'),
                     'keywords': metadata.get('keywords'),
+                    'content_source': metadata.get('content_source', 'extraction'),
+                    'data_lineage': data_lineage  # Preserve data lineage
                 },
-                'method': 'web_extraction',
+                'method': extraction_method,  # Use the actual method (gemini_web_grounding or web_extraction)
                 'success': True,
                 'timestamp': extracted_content.get('extracted_at')
             }

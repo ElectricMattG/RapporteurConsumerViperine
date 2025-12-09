@@ -53,7 +53,7 @@ pathspec==0.12.1
     # via black
 pip-tools==7.5.2
     # via -r dev-requirements.in
-platformdirs==4.5.0
+platformdirs==4.5.1
     # via
     #   -c requirements.txt
     #   black
@@ -75,7 +75,7 @@ pyproject-hooks==1.2.0
     # via
     #   build
     #   pip-tools
-pytest==9.0.1
+pytest==9.0.2
     # via
     #   -r dev-requirements.in
     #   pytest-clarity
