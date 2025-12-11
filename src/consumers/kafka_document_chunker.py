@@ -109,6 +109,9 @@ class KafkaDocumentChunkerConsumer(Base):
         # Check for optional summary_metadata (from summarizer fallback)
         summary_metadata = message_data.get('summary_metadata', {})
 
+        # Check extraction method to determine content type
+        extraction_method = metadata.get('extraction_method', 'web_extraction')
+
         # Use summary metadata if available, otherwise fall back to extraction metadata
         if summary_metadata:
             title = summary_metadata.get('title', metadata.get('title', ''))
@@ -120,13 +123,23 @@ class KafkaDocumentChunkerConsumer(Base):
             publication_venue = summary_metadata.get('publication_venue', metadata.get('publication_venue'))
             data_source = 'summary_metadata'
         else:
-            title = metadata.get('title', '')
-            author = metadata.get('author', '')
-            published_date = metadata.get('published_date', '')
-            publisher = metadata.get('publisher', '')
-            document_type = metadata.get('document_type')
-            publication_venue = metadata.get('publication_venue')
-            data_source = 'extraction_metadata'
+            # For YouTube videos, map channel -> author and upload_date -> creation_date
+            if extraction_method == 'youtube_transcript_api':
+                title = metadata.get('title', '')
+                author = metadata.get('channel', metadata.get('author', ''))  # channel -> author
+                published_date = metadata.get('upload_date', metadata.get('published_date', ''))  # upload_date -> published_date
+                publisher = metadata.get('channel', '')  # Also use channel as publisher
+                document_type = 'video'  # Set content type to 'video' for YouTube
+                publication_venue = 'YouTube'
+                data_source = 'youtube_extraction'
+            else:
+                title = metadata.get('title', '')
+                author = metadata.get('author', '')
+                published_date = metadata.get('published_date', '')
+                publisher = metadata.get('publisher', '')
+                document_type = metadata.get('document_type')
+                publication_venue = metadata.get('publication_venue')
+                data_source = 'extraction_metadata'
 
         self._logger.info("=" * 80)
         self._logger.info("📦 New chunking request received")

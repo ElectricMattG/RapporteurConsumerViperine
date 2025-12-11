@@ -50,6 +50,13 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
 
 try:
+    from docling.document_converter import DocumentConverter
+    DOCLING_AVAILABLE = True
+except ImportError:
+    DOCLING_AVAILABLE = False
+    DocumentConverter = None
+
+try:
     from playwright_stealth import stealth_async
     STEALTH_AVAILABLE = True
 except ImportError:
@@ -135,6 +142,7 @@ class KafkaWebScraperConsumer(Base):
             # Web scraper configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
             self.max_urls_per_message = self._app_config.get('web_scraper.max_urls_per_message') or 50
+            self.extract_markdown = self._app_config.get('web_scraper.extract_markdown') or False
 
             # Create cache directory
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -145,6 +153,16 @@ class KafkaWebScraperConsumer(Base):
             self._logger.info(f"   Input topic: {self.input_topic}")
             self._logger.info(f"   Output topic: {self.output_topic}")
             self._logger.info(f"   Cache directory: {self.cache_dir}")
+            self._logger.info(f"   Extract markdown: {self.extract_markdown}")
+
+            # Initialize docling converter if markdown extraction is enabled
+            if self.extract_markdown:
+                if DOCLING_AVAILABLE:
+                    self.markdown_converter = DocumentConverter()
+                    self._logger.info("   ✅ Docling HTML-to-markdown converter initialized")
+                else:
+                    self._logger.warning("   ⚠️ Markdown extraction enabled but docling not available - falling back to text extraction")
+                    self.extract_markdown = False
 
         except Exception as e:
             self._logger.error(f"❌ Error loading configuration: {e}")
@@ -403,8 +421,17 @@ class KafkaWebScraperConsumer(Base):
                             # Extract metadata
                             metadata = self.web_searcher._extract_page_metadata(soup)
 
-                            # Extract FULL text content (not truncated)
-                            text_content = self._extract_full_text_content(soup)
+                            # Try markdown conversion first if enabled
+                            text_content = None
+                            if self.extract_markdown:
+                                text_content = self._convert_html_to_markdown(html_content, final_url)
+                                if text_content:
+                                    metadata['extraction_format'] = 'markdown'
+
+                            # Fall back to plain text extraction if markdown failed or disabled
+                            if not text_content:
+                                text_content = self._extract_full_text_content(soup)
+                                metadata['extraction_format'] = 'plain_text'
 
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters of text content")
 
@@ -823,6 +850,48 @@ class KafkaWebScraperConsumer(Base):
         except Exception as e:
             self._logger.error(f"   ❌ PDF extraction failed: {e}")
             return f"PDF extraction error: {str(e)}", {'error': str(e), 'source_url': url}
+
+    def _convert_html_to_markdown(self, html_content: str, url: str) -> Optional[str]:
+        """
+        Convert HTML content to markdown using docling.
+
+        This preserves document structure (headings, tables, lists, paragraphs)
+        which is useful for chunking and filtering.
+
+        Args:
+            html_content: HTML content to convert
+            url: Source URL (for logging)
+
+        Returns:
+            Markdown content or None if conversion fails
+        """
+        if not self.extract_markdown or not DOCLING_AVAILABLE:
+            return None
+
+        try:
+            self._logger.info(f"   📝 Converting HTML to markdown...")
+
+            # Save HTML to temporary file (docling requires file input)
+            import tempfile
+            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_file:
+                tmp_file.write(html_content)
+                tmp_path = tmp_file.name
+
+            try:
+                # Convert HTML using docling
+                result = self.markdown_converter.convert(tmp_path)
+                markdown_content = result.document.export_to_markdown()
+                self._logger.info(f"   ✅ Converted to {len(markdown_content)} chars of markdown")
+                return markdown_content
+            finally:
+                # Clean up temporary file
+                import os
+                if os.path.exists(tmp_path):
+                    os.unlink(tmp_path)
+
+        except Exception as e:
+            self._logger.warning(f"   ⚠️ Markdown conversion failed: {e}")
+            return None
 
     def _extract_full_text_content(self, soup: BeautifulSoup) -> str:
         """

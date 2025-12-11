@@ -260,6 +260,7 @@ class KafkaQAGeneratorConsumer(Base):
                         'session_id': session_id,
                         'document_id': document_id,
                         'source_url': source_url,
+                        'embedded_chunks_file': embedded_chunks_file,  # Pass through from chunk embedder
                         'qa_pairs_file': qa_file,  # Path to Q&A pairs JSONL file
                         'qa_count': len(qa_pairs),
                         'chunks_processed': stats.get('chunks_processed', 0),

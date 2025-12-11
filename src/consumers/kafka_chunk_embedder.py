@@ -108,7 +108,8 @@ class KafkaChunkEmbedderConsumer(Base):
                 'group.id': self._app_config.get('chunk_embedder.consumer_group_id') or 'chunk-embedder-consumer',
                 'auto.offset.reset': self._app_config.get('kafka.auto_offset_reset') or 'earliest',
                 'enable.auto.commit': self._app_config.get('kafka.enable_auto_commit') or True,
-                'session.timeout.ms': self._app_config.get('kafka.session_timeout_ms') or 30000,
+                'session.timeout.ms': self._app_config.get('kafka.session_timeout_ms') or 45000,  # 45 seconds
+                'heartbeat.interval.ms': 3000,  # 3 seconds - should be 1/3 of session timeout
                 'max.poll.interval.ms': 600000,  # 10 minutes for embedding generation
             }
 

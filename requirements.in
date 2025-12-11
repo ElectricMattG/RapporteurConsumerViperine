@@ -18,6 +18,7 @@ confluent-kafka
 # Additional dependencies for URL resolution and scraping
 curl-cffi  # For advanced browser impersonation
 beautifulsoup4
+docling  # HTML to markdown conversion with structure preservation
 brotli
 python-dateutil
 pypdf2  # PDF text extraction

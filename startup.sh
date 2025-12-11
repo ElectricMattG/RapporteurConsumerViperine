@@ -55,6 +55,11 @@ echo "  ✓ Starting Q&A Embedder..."
 PYTHONDONTWRITEBYTECODE=1 python3 src/consumers/run_kafka_qa_embedder.py > logs/qa_embedder.log 2>&1 &
 QA_EMB_PID=$!
 
+# 8. Index Aggregator - Aggregates indices and uploads to Azure
+echo "  ✓ Starting Index Aggregator..."
+PYTHONDONTWRITEBYTECODE=1 python3 src/consumers/run_kafka_index_aggregator.py > logs/index_aggregator.log 2>&1 &
+AGGREGATOR_PID=$!
+
 # Wait a moment for processes to start
 sleep 3
 
@@ -63,10 +68,10 @@ echo ""
 echo "📊 Checking running processes..."
 RUNNING_COUNT=$(ps aux | grep "python3 src/consumers" | grep -v grep | wc -l)
 
-if [ "$RUNNING_COUNT" -eq 7 ]; then
-    echo "✅ All 7 consumers started successfully!"
+if [ "$RUNNING_COUNT" -eq 8 ]; then
+    echo "✅ All 8 consumers started successfully!"
 else
-    echo "⚠️  Warning: Only $RUNNING_COUNT/7 consumers are running"
+    echo "⚠️  Warning: Only $RUNNING_COUNT/8 consumers are running"
 fi
 
 echo ""
@@ -78,6 +83,7 @@ echo "  Citation Extractor: $CITATION_PID"
 echo "  Chunk Embedder:     $EMBEDDER_PID"
 echo "  Q&A Generator:      $QA_GEN_PID"
 echo "  Q&A Embedder:       $QA_EMB_PID"
+echo "  Index Aggregator:   $AGGREGATOR_PID"
 
 echo ""
 echo "📁 Log files location: logs/"
@@ -88,6 +94,7 @@ echo "  • logs/citation.log"
 echo "  • logs/embedder.log"
 echo "  • logs/qa_generator.log"
 echo "  • logs/qa_embedder.log"
+echo "  • logs/index_aggregator.log"
 
 echo ""
 echo "💡 To monitor logs in real-time:"

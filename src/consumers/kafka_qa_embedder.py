@@ -114,7 +114,8 @@ class KafkaQAEmbedderConsumer(Base):
                 'group.id': self._app_config.get('qa_embedder.consumer_group_id') or 'qa-embedder-consumer',
                 'auto.offset.reset': self._app_config.get('kafka.auto_offset_reset') or 'earliest',
                 'enable.auto.commit': self._app_config.get('kafka.enable_auto_commit') or True,
-                'session.timeout.ms': self._app_config.get('kafka.session_timeout_ms') or 30000,
+                'session.timeout.ms': self._app_config.get('kafka.session_timeout_ms') or 45000,  # 45 seconds
+                'heartbeat.interval.ms': 3000,  # 3 seconds - should be 1/3 of session timeout
                 'max.poll.interval.ms': 600000,  # 10 minutes for embedding generation
             }
 
@@ -487,6 +488,7 @@ class KafkaQAEmbedderConsumer(Base):
             request_id = message_data.get('request_id')
             session_id = message_data.get('session_id')
             qa_pairs_file = message_data.get('qa_pairs_file')
+            embedded_chunks_file = message_data.get('embedded_chunks_file')  # From chunk embedder via QA generator
             document_id = message_data.get('document_id')
             source_url = message_data.get('source_url')
 
@@ -495,6 +497,7 @@ class KafkaQAEmbedderConsumer(Base):
             self._logger.info(f"   Request ID: {request_id}")
             self._logger.info(f"   Session ID: {session_id}")
             self._logger.info(f"   Q&A pairs file: {qa_pairs_file}")
+            self._logger.info(f"   Embedded chunks file: {embedded_chunks_file}")
             self._logger.info("="*80)
 
             # Validate Q&A pairs file exists
@@ -525,6 +528,7 @@ class KafkaQAEmbedderConsumer(Base):
             result = {
                 'request_id': request_id,
                 'session_id': session_id,
+                'embedded_chunks_file': embedded_chunks_file,  # Pass through from chunk embedder
                 'enriched_qa_pairs_file': str(enriched_file),
                 'document_id': document_id,
                 'source_url': source_url,

@@ -47,7 +47,8 @@ def create_messages_from_grounding(grounding_data, session_id=None):
             "title": citation['title'],
             "context": citation_context if citation_context else ["No context available"],
             "session_id": session_id,
-            "request_id": f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx:03d}"
+            "request_id": f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}_{idx:03d}",
+            "total_requests": len(citations)  # Total requests in this session
         }
         messages.append(message)
 
@@ -95,6 +96,19 @@ def send_batch_messages(messages, bootstrap_servers='localhost:9092', topic='web
 
     # Flush all messages
     producer.flush()
+
+    # Send session complete signal to trigger immediate aggregation
+    if sent_count > 0 and messages:
+        session_id = messages[0]['session_id']
+        complete_signal = {
+            "session_id": session_id,
+            "session_complete": True,
+            "total_requests": len(messages),
+            "request_id": f"{session_id}_complete"
+        }
+        producer.produce('session-complete', json.dumps(complete_signal).encode('utf-8'))
+        producer.flush()
+        print(f"\n🏁 Session complete signal sent for: {session_id}")
 
     print("\n" + "=" * 80)
     print(f"📊 Batch Summary:")

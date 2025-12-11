@@ -29,7 +29,7 @@ defaults = {
     },
     "gemini": {
         # GCP Gemini configuration (alternative to local LLM)
-        "project_id": None,  # Set via PROJECT_ID env var or config
+        "project_id": "another-project-472212",  # Set via PROJECT_ID env var or config
         "location": "us-central1",  # GCP region for Vertex AI
         "model_name": "gemini-2.5-flash",  # Fast model with good performance
         "timeout": 300,  # Request timeout for Gemini API
@@ -197,7 +197,7 @@ defaults = {
         # Q&A pair embedding consumer configuration
         "consumer_group_id": "qa-embedder-consumer",  # Consumer group ID for Q&A embedder
         "input_topic": "qa-embedding",  # Topic to consume Q&A pairs from
-        "output_topic": None,  # Optional: topic to publish enriched Q&A pairs to
+        "output_topic": "qa-indexed",  # Topic to publish enriched Q&A pairs to index aggregator
         "cache_directory": "cache/qa_embeddings",  # Directory for cached embeddings
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model
         "batch_size": 32,  # Batch size for encoding
@@ -294,6 +294,7 @@ defaults = {
         # Content extraction
         "extract_links": True,  # Extract links from scraped pages
         "extract_images": False,  # Extract images from scraped pages
+        "extract_markdown": False,  # Extract markdown from HTML content using docling for structured chunking
         "max_depth": 1,  # Maximum depth for link following (0 = no following)
     },
     "tree_search": {
