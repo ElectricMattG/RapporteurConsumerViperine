@@ -260,7 +260,12 @@ class KafkaIndexAggregatorConsumer(Base):
                 received = len(self.session_request_ids[session_id])
                 if received >= expected:
                     self._logger.info(f"✅ All requests received ({received}/{expected}) for session: {session_id}")
-                    self._aggregate_and_upload_session(session_id)
+
+                    # Verify all pipeline files are present before aggregating
+                    if self._verify_all_files_ready(session_id):
+                        self._aggregate_and_upload_session(session_id)
+                    else:
+                        self._logger.warning(f"⚠️  Delaying aggregation - waiting for remaining files to complete processing")
 
         except Exception as e:
             self._logger.error(f"Error processing message: {e}")
@@ -275,6 +280,66 @@ class KafkaIndexAggregatorConsumer(Base):
             if current_time - last_activity > self.session_timeout:
                 self._logger.info(f"⏰ Session timeout: {session_id}")
                 self._aggregate_and_upload_session(session_id)
+
+    def _verify_all_files_ready(self, session_id: str) -> bool:
+        """Verify all expected pipeline output files exist in cache before aggregating.
+
+        Expected files for each request:
+        - extracted_linked_text.jsonl (or failure documents)
+        - chunked_document_enriched_embedded.jsonl
+        - req_*_qa_pairs_enriched_embedded.jsonl
+
+        Returns:
+            True if all files exist, False otherwise
+        """
+        cache_dir = Path("./cache/web_scrapes")
+
+        if not cache_dir.exists():
+            self._logger.warning(f"⚠️  Cache directory does not exist: {cache_dir}")
+            return False
+
+        request_ids = self.session_request_ids.get(session_id, set())
+        if not request_ids:
+            self._logger.warning(f"⚠️  No request IDs tracked for session: {session_id}")
+            return True  # No requests to verify
+
+        missing_files = []
+
+        for request_id in request_ids:
+            request_dir = cache_dir / request_id
+
+            if not request_dir.exists():
+                missing_files.append(f"{request_id}/[directory not found]")
+                continue
+
+            # Check for extraction output (either success, failure, or summary)
+            extraction_file = request_dir / "extracted_linked_text.jsonl"
+            failure_file = request_dir / "failure.json"
+            summary_file = request_dir / "summary.json"
+
+            if not extraction_file.exists() and not failure_file.exists() and not summary_file.exists():
+                missing_files.append(f"{request_id}/extracted_linked_text.jsonl or failure.json or summary.json")
+
+            # Check for enriched embedded chunks
+            chunks_file = request_dir / "chunked_document_enriched_embedded.jsonl"
+            if not chunks_file.exists():
+                missing_files.append(f"{request_id}/chunked_document_enriched_embedded.jsonl")
+
+            # Check for Q&A pairs with embeddings
+            qa_files = list(request_dir.glob(f"{request_id}_qa_pairs_enriched_embedded.jsonl"))
+            if not qa_files:
+                missing_files.append(f"{request_id}/{request_id}_qa_pairs_enriched_embedded.jsonl")
+
+        if missing_files:
+            self._logger.warning(f"⚠️  Session {session_id} not ready - missing {len(missing_files)} files:")
+            for missing in missing_files[:5]:  # Show first 5
+                self._logger.warning(f"     - {missing}")
+            if len(missing_files) > 5:
+                self._logger.warning(f"     ... and {len(missing_files) - 5} more")
+            return False
+
+        self._logger.info(f"✅ All {len(request_ids)} requests have complete pipeline outputs")
+        return True
 
     def _aggregate_and_upload_session(self, session_id: str):
         """Aggregate session documents and upload to Azure."""
@@ -362,9 +427,16 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   ✅ Chunks uploaded successfully")
 
         except Exception as e:
-            self._logger.error(f"Error uploading chunks: {e}")
+            self._logger.error(f"❌ Error uploading chunks to Azure: {e}")
+            self._logger.warning(f"⚠️  Falling back to local storage...")
             import traceback
             traceback.print_exc()
+            # Fallback to local storage
+            try:
+                self._save_chunks_locally(new_chunks)
+            except Exception as fallback_error:
+                self._logger.error(f"❌ CRITICAL: Local storage fallback also failed: {fallback_error}")
+                traceback.print_exc()
 
     def _upload_qa_pairs(self, session_id: str, new_qa_pairs: List[Dict]):
         """Normalize and upload Q&A pairs to Azure research index."""
@@ -423,9 +495,16 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   ✅ Q&A pairs uploaded successfully")
 
         except Exception as e:
-            self._logger.error(f"Error uploading Q&A pairs: {e}")
+            self._logger.error(f"❌ Error uploading Q&A pairs to Azure: {e}")
+            self._logger.warning(f"⚠️  Falling back to local storage...")
             import traceback
             traceback.print_exc()
+            # Fallback to local storage
+            try:
+                self._save_qa_pairs_locally(new_qa_pairs)
+            except Exception as fallback_error:
+                self._logger.error(f"❌ CRITICAL: Local storage fallback also failed: {fallback_error}")
+                traceback.print_exc()
 
     def _normalize_qa_pair(self, qa_pair: Dict) -> Dict:
         """

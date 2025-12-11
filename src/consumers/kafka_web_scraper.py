@@ -336,6 +336,12 @@ class KafkaWebScraperConsumer(Base):
                             extraction_attempts.append("cloudscraper: Cloudflare bot page detected")
                             raise Exception("Cloudscraper extracted Cloudflare challenge page, not actual content")
 
+                        # Validate extracted content
+                        if not self._is_extraction_valid(text_content):
+                            self._logger.warning(f"   ⚠️ Cloudscraper extracted insufficient content (< 10 words)")
+                            extraction_attempts.append("cloudscraper: Insufficient content")
+                            raise Exception("Cloudscraper extracted insufficient content")
+
                         extraction_result = {
                             'url': final_url,
                             'original_url': uri,
@@ -364,7 +370,7 @@ class KafkaWebScraperConsumer(Base):
                 self._logger.info("   🌐 Attempting JavaScript rendering with enhanced stealth...")
                 try:
                     text_content, metadata = await self._extract_with_playwright(final_url)
-                    if text_content and text_content != "No readable content found":
+                    if text_content and text_content != "No readable content found" and self._is_extraction_valid(text_content):
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters with Playwright")
 
                         # Check if this is actually a Cloudflare bot page
@@ -373,6 +379,12 @@ class KafkaWebScraperConsumer(Base):
                             self._logger.warning(f"   🤖 Detected Cloudflare bot page - extraction blocked")
                             extraction_attempts.append("playwright: Cloudflare bot page detected")
                             raise Exception("Playwright extracted Cloudflare challenge page, not actual content")
+
+                        # Validate extracted content
+                        if not self._is_extraction_valid(text_content):
+                            self._logger.warning(f"   ⚠️ Playwright extracted insufficient content (< 10 words)")
+                            extraction_attempts.append("playwright: Insufficient content")
+                            raise Exception("Playwright extracted insufficient content")
 
                         extraction_result = {
                             'url': final_url,
@@ -434,6 +446,13 @@ class KafkaWebScraperConsumer(Base):
                                 metadata['extraction_format'] = 'plain_text'
 
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters of text content")
+
+                        # Validate extracted content
+                        if not self._is_extraction_valid(text_content):
+                            self._logger.warning(f"   ⚠️ Extracted content is invalid or insufficient (< 10 words)")
+                            error_msg = f"Insufficient content - {len(text_content.split())} words (minimum 10 required)"
+                            extraction_attempts.append(f"curl_cffi: {error_msg}")
+                            raise Exception(error_msg)
 
                         # Create extraction result
                         extraction_result = {
@@ -1398,6 +1417,39 @@ class KafkaWebScraperConsumer(Base):
             finally:
                 await context.close()
                 await browser.close()
+
+    def _is_extraction_valid(self, text_content: str) -> bool:
+        """
+        Check if extracted text content is valid and contains meaningful content.
+
+        Args:
+            text_content: The extracted text content
+
+        Returns:
+            True if content is valid, False if it should be treated as failed extraction
+        """
+        if not text_content:
+            return False
+
+        # Remove extra whitespace and count words
+        cleaned_text = ' '.join(text_content.split())
+        word_count = len(cleaned_text.split())
+
+        # Check for common failure messages or insufficient content
+        failure_indicators = [
+            "no readable content found",
+            "content not found",
+            "page not found",
+            "access denied"
+        ]
+
+        text_lower = cleaned_text.lower()
+        for indicator in failure_indicators:
+            if text_lower == indicator or text_lower.startswith(indicator):
+                return False
+
+        # Require at least 10 words for valid content
+        return word_count >= 10
 
     def _save_extraction(self, extraction_result: Dict, output_file: Path):
         """
