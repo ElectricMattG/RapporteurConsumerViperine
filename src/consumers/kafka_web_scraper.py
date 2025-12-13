@@ -290,7 +290,11 @@ class KafkaWebScraperConsumer(Base):
                 result['resolved_urls'] = [uri]
 
             # Step 2: Check if this is a YouTube URL and extract transcript if available
-            is_youtube = 'youtube.com/watch' in final_url or 'youtu.be/' in final_url
+            # Support multiple YouTube URL patterns: /watch, /live, /shorts, youtu.be
+            is_youtube = ('youtube.com/watch' in final_url or
+                         'youtube.com/live' in final_url or
+                         'youtube.com/shorts' in final_url or
+                         'youtu.be/' in final_url)
 
             if is_youtube:
                 self._logger.info("📹 Detected YouTube URL - attempting transcript extraction...")
@@ -454,6 +458,16 @@ class KafkaWebScraperConsumer(Base):
                             extraction_attempts.append(f"curl_cffi: {error_msg}")
                             raise Exception(error_msg)
 
+                        # Check for low-quality content (sidebar/navigation fragments)
+                        quality_check = self._check_content_quality(text_content, metadata.get('title', ''))
+                        if not quality_check['is_quality']:
+                            self._logger.warning(f"   ⚠️ Low-quality content detected: {quality_check['reason']}")
+                            self._logger.info(f"   🔄 Triggering summary fallback for better content extraction")
+                            # Treat as failed extraction to trigger summary-based recovery
+                            error_msg = f"Low-quality content: {quality_check['reason']}"
+                            extraction_attempts.append(f"curl_cffi: {error_msg}")
+                            raise Exception(error_msg)
+
                         # Create extraction result
                         extraction_result = {
                             'url': final_url,
@@ -534,8 +548,8 @@ class KafkaWebScraperConsumer(Base):
             import re
             video_id = None
 
-            # Match youtube.com/watch?v=VIDEO_ID or youtu.be/VIDEO_ID
-            match = re.search(r'(?:youtube\.com/watch\?v=|youtu\.be/)([a-zA-Z0-9_-]{11})', youtube_url)
+            # Match multiple YouTube URL patterns: /watch?v=, /live/, /shorts/, youtu.be/
+            match = re.search(r'(?:youtube\.com/(?:watch\?v=|live/|shorts/)|youtu\.be/)([a-zA-Z0-9_-]{11})', youtube_url)
             if match:
                 video_id = match.group(1)
 
@@ -1448,8 +1462,78 @@ class KafkaWebScraperConsumer(Base):
             if text_lower == indicator or text_lower.startswith(indicator):
                 return False
 
-        # Require at least 10 words for valid content
-        return word_count >= 10
+        # Get minimum words from config (default 10)
+        # CustConf.get() only takes one argument - access nested config with dotted path
+        min_words = self._app_config.get('web_scraper.min_words_for_valid_extraction')
+        if not min_words or not isinstance(min_words, int):
+            min_words = 10
+        return word_count >= min_words
+
+    def _check_content_quality(self, text_content: str, title: str) -> dict:
+        """
+        Check if extracted content appears to be low-quality sidebar/navigation text.
+
+        Uses heuristics to detect content that passes basic validation but is actually
+        navigation links, sidebars, date listings, or other non-article content.
+
+        Args:
+            text_content: The extracted text to check
+            title: The page title (if available)
+
+        Returns:
+            dict with 'is_quality' (bool) and 'reason' (str) explaining the determination
+        """
+        if not text_content:
+            return {'is_quality': False, 'reason': 'Empty content'}
+
+        words = text_content.split()
+        word_count = len(words)
+        lines = [line.strip() for line in text_content.strip().split('\n') if line.strip()]
+        line_count = len(lines)
+
+        # Has title suggests metadata extraction succeeded
+        has_metadata = bool(title and title.strip())
+
+        # Heuristic 1: Very short content with full metadata suggests sidebar/navigation
+        # Real articles are typically much longer even with good metadata
+        if word_count < 50 and has_metadata:
+            return {
+                'is_quality': False,
+                'reason': f'Short content ({word_count} words) with metadata suggests sidebar/navigation'
+            }
+
+        # Heuristic 2: Single-line or very few lines with metadata likely a navigation link
+        if line_count <= 2 and word_count < 100 and has_metadata:
+            return {
+                'is_quality': False,
+                'reason': f'Few lines ({line_count}) with low word count suggests navigation link'
+            }
+
+        # Heuristic 3: Date patterns with low word count suggests date listing sidebar
+        import re
+        date_patterns = [
+            r'\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2},?\s+\d{4}\b',
+            r'\b\d{1,2}[/-]\d{1,2}[/-]\d{2,4}\b',
+            r'\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+\d{1,2},?\s+\d{4}\b'
+        ]
+        text_lower = text_content.lower()
+        has_dates = any(re.search(pattern, text_lower) for pattern in date_patterns)
+        if has_dates and word_count < 100:
+            return {
+                'is_quality': False,
+                'reason': 'Date patterns with low word count suggests sidebar date listing'
+            }
+
+        # Heuristic 4: High ratio of newlines to words suggests list/navigation structure
+        newline_ratio = line_count / word_count if word_count > 0 else 0
+        if newline_ratio > 0.5 and word_count < 200:
+            return {
+                'is_quality': False,
+                'reason': f'High newline-to-word ratio ({newline_ratio:.2f}) suggests navigation list'
+            }
+
+        # Content appears to be quality article text
+        return {'is_quality': True, 'reason': 'Content passes quality checks'}
 
     def _save_extraction(self, extraction_result: Dict, output_file: Path):
         """
