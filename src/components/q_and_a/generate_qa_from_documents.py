@@ -70,11 +70,8 @@ def extract_paragraphs_from_markdown(markdown_text: str) -> List[str]:
         if re.match(r'^[\*\-\+]\s*$', block):
             continue
 
-        # Skip very short blocks (likely not paragraphs)
-        if len(block) < 50:
-            continue
-
-        # This looks like a real paragraph
+        # Accept all remaining blocks to keep pipeline flowing
+        # Short content can be filtered downstream if needed
         paragraphs.append(block)
 
     return paragraphs

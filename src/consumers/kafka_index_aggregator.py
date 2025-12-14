@@ -64,10 +64,15 @@ class KafkaIndexAggregatorConsumer(Base):
         super().__init__()
         self._logger.info("Initializing KafkaIndexAggregatorConsumer")
 
+        # Load configuration from centralized config
+        # Note: CustConf nested configs are accessed as attributes or via data dict
+        aggregator_config = self._app_config.data['index_aggregator']
+
         # Kafka configuration
         self.bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-        self.group_id = 'index-aggregator-consumer'
-        self.input_topic = 'qa-indexed'  # Subscribe to QA embedder output (includes both chunks and QA pairs)
+        self.group_id = aggregator_config.consumer_group_id
+        self.input_topic = aggregator_config.input_topic
+        self.session_complete_topic = aggregator_config.session_complete_topic
 
         # Azure Blob Storage configuration
         self.connection_string = (
@@ -79,12 +84,12 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning("⚠️  Files will be saved locally only")
             self.upload_to_azure = False
         else:
-            self.upload_to_azure = True
+            self.upload_to_azure = aggregator_config.upload_to_azure
 
-        self.container_name = 'indices'
-        self.archive_container = 'research-archive'
-        self.chunks_blob_name = 'research_chunks_with_embeddings_combined.jsonl'
-        self.qa_blob_name = 'research_qa_pairs_with_embeddings_combined.jsonl'
+        self.container_name = aggregator_config.azure_container_indices
+        self.archive_container = aggregator_config.azure_container_archive
+        self.chunks_blob_name = aggregator_config.azure_chunks_blob_name
+        self.qa_blob_name = aggregator_config.azure_qa_pairs_blob_name
 
         # Session accumulation
         self.session_chunks: Dict[str, List[Dict]] = defaultdict(list)
@@ -93,11 +98,16 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_last_activity: Dict[str, float] = {}
         self.session_total_requests: Dict[str, int] = {}  # Expected total requests per session
 
-        # Configuration
-        self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
-        self.session_timeout = 300  # 5 minutes of inactivity triggers aggregation (fallback)
-        self.cleanup_after_upload = True
-        self.archive_before_cleanup = True
+        # Directory configuration
+        self.cache_dir = Path(aggregator_config.cache_dir)
+        self.session_backup_dir = Path(aggregator_config.session_backup_dir)
+        self.archive_dir = Path(aggregator_config.archive_dir)
+        self.indices_dir = Path(aggregator_config.indices_dir)
+
+        # Behavioral configuration
+        self.session_timeout = aggregator_config.session_timeout
+        self.cleanup_after_upload = aggregator_config.cleanup_after_upload
+        self.archive_before_cleanup = aggregator_config.archive_before_cleanup
 
         # Initialize Azure Blob Service Client (if credentials available)
         if self.upload_to_azure:
@@ -160,7 +170,7 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info("🚀 Starting index aggregation consumer...")
 
             # Subscribe to qa-indexed and session-complete topics
-            topics = [self.input_topic, 'session-complete']
+            topics = [self.input_topic, self.session_complete_topic]
             self.consumer.subscribe(topics)
             self._logger.info(f"✅ Subscribed to topics: {', '.join(topics)}")
 
@@ -341,6 +351,58 @@ class KafkaIndexAggregatorConsumer(Base):
         self._logger.info(f"✅ All {len(request_ids)} requests have complete pipeline outputs")
         return True
 
+    def _save_session_backup(self, session_id: str, chunks: List[Dict], qa_pairs: List[Dict]):
+        """Save session aggregated data as backup for verification.
+
+        This creates a backup of the aggregated chunks and Q&A pairs before upload,
+        allowing verification that all data is present even if Azure upload fails.
+
+        Args:
+            session_id: The session identifier
+            chunks: List of chunk documents
+            qa_pairs: List of Q&A pair documents
+        """
+        try:
+            backup_dir = self.session_backup_dir / session_id
+            backup_dir.mkdir(parents=True, exist_ok=True)
+
+            self._logger.info(f"💾 Saving session backup: {session_id}")
+
+            # Save chunks backup
+            if chunks:
+                chunks_backup = backup_dir / "chunks_aggregated.jsonl"
+                with open(chunks_backup, 'w', encoding='utf-8') as f:
+                    for chunk in chunks:
+                        f.write(json.dumps(chunk, ensure_ascii=False) + '\n')
+                self._logger.info(f"   ✅ Saved {len(chunks)} chunks to {chunks_backup}")
+
+            # Save Q&A pairs backup
+            if qa_pairs:
+                qa_backup = backup_dir / "qa_pairs_aggregated.jsonl"
+                with open(qa_backup, 'w', encoding='utf-8') as f:
+                    for qa in qa_pairs:
+                        f.write(json.dumps(qa, ensure_ascii=False) + '\n')
+                self._logger.info(f"   ✅ Saved {len(qa_pairs)} Q&A pairs to {qa_backup}")
+
+            # Save session metadata
+            metadata = {
+                "session_id": session_id,
+                "timestamp": datetime.now().isoformat(),
+                "total_chunks": len(chunks),
+                "total_qa_pairs": len(qa_pairs),
+                "request_ids": list(self.session_request_ids.get(session_id, set())),
+                "azure_upload_enabled": self.upload_to_azure
+            }
+            metadata_file = backup_dir / "session_metadata.json"
+            with open(metadata_file, 'w', encoding='utf-8') as f:
+                json.dump(metadata, f, indent=2, ensure_ascii=False)
+            self._logger.info(f"   ✅ Saved session metadata to {metadata_file}")
+
+        except Exception as e:
+            self._logger.error(f"❌ Failed to save session backup: {e}")
+            import traceback
+            traceback.print_exc()
+
     def _aggregate_and_upload_session(self, session_id: str):
         """Aggregate session documents and upload to Azure."""
         try:
@@ -349,6 +411,10 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   Requests processed: {len(self.session_request_ids[session_id])}")
             self._logger.info(f"   Total chunks: {len(self.session_chunks[session_id])}")
             self._logger.info(f"   Total Q&A pairs: {len(self.session_qa_pairs[session_id])}")
+
+            # Always save local backup copies for verification
+            if self.session_chunks[session_id] or self.session_qa_pairs[session_id]:
+                self._save_session_backup(session_id, self.session_chunks[session_id], self.session_qa_pairs[session_id])
 
             # Process chunks
             if self.session_chunks[session_id]:
@@ -604,7 +670,7 @@ class KafkaIndexAggregatorConsumer(Base):
     def _save_chunks_locally(self, new_chunks: List[Dict]):
         """Save chunks to local file when Azure is unavailable."""
         try:
-            local_dir = Path("./cache/indices")
+            local_dir = self.indices_dir
             local_dir.mkdir(parents=True, exist_ok=True)
             local_file = local_dir / self.chunks_blob_name
 
@@ -663,7 +729,7 @@ class KafkaIndexAggregatorConsumer(Base):
     def _save_qa_pairs_locally(self, new_qa_pairs: List[Dict]):
         """Save Q&A pairs to local file when Azure is unavailable."""
         try:
-            local_dir = Path("./cache/indices")
+            local_dir = self.indices_dir
             local_dir.mkdir(parents=True, exist_ok=True)
             local_file = local_dir / self.qa_blob_name
 
@@ -781,7 +847,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
             if not self.upload_to_azure:
                 # Local archive - copy to archive directory
-                archive_dir = Path("./cache/archive") / session_id
+                archive_dir = self.archive_dir / session_id
                 archive_dir.mkdir(parents=True, exist_ok=True)
 
                 archive_count = 0
@@ -840,6 +906,22 @@ class KafkaIndexAggregatorConsumer(Base):
                     cleanup_count += 1
 
             self._logger.info(f"   ✅ Cleaned up {cleanup_count} request directories")
+
+            # Clean up entire web_scrapes cache folder if it exists and has session dirs
+            if self.cache_dir.exists():
+                # Check if we should clear the entire cache (all session dirs processed)
+                remaining_dirs = [d for d in self.cache_dir.iterdir() if d.is_dir() and d.name.startswith('req_')]
+                if not remaining_dirs:
+                    self._logger.info(f"   🗑️  All sessions processed - clearing web_scrapes cache folder")
+                    # Keep the directory but remove all contents
+                    for item in self.cache_dir.iterdir():
+                        if item.is_dir():
+                            shutil.rmtree(item)
+                        else:
+                            item.unlink()
+                    self._logger.info(f"   ✅ Cleared web_scrapes cache folder")
+                else:
+                    self._logger.debug(f"   📂 {len(remaining_dirs)} directories remaining in cache")
 
         except Exception as e:
             self._logger.error(f"Error cleaning up session {session_id}: {e}")

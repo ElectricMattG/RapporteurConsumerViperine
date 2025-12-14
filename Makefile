@@ -71,6 +71,8 @@ install: requirements.txt dev-requirements.txt
 	pip install \
 	-r requirements.txt -r dev-requirements.txt
 	pip install -e .
+	@echo "$(YELLOW)$(BOLD)Installing Playwright browser binaries$(RESET)"
+	python -m playwright install chromium
 
 
 .PHONY: test

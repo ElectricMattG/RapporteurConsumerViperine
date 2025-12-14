@@ -28,3 +28,5 @@ google-genai
 openai  # OpenAI API client
 sentence-transformers
 youtube-transcript-api
+playwright  # JavaScript rendering for hard-to-scrape sites
+cloudscraper  # Cloudflare bypass

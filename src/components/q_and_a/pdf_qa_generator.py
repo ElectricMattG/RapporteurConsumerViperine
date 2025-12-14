@@ -164,15 +164,18 @@ class PDFQAGenerator(Base):
         """
         Determine if chunk should be skipped for Q&A generation.
 
-        Skip:
+        Skip only:
         - Headers (already in hierarchy)
         - Citations (separate processing)
         - Metadata markers
-        - Very short chunks (unless they're clauses)
+
+        Process everything else, including short chunks, to keep pipeline flowing.
+        This aligns with qa_generation.min_words_for_qa=0 config.
+        Web scraper already filtered out content < min_words_for_valid_extraction.
+        Short content Q&A pairs can be filtered downstream if needed.
         """
         chunk_type = chunk['chunk_metadata']['chunk_type']
         content = chunk.get('content', '').strip()
-        word_count = chunk['chunk_metadata'].get('word_count', 0)
 
         # Skip headers
         if chunk_type.startswith('header_'):
@@ -182,14 +185,12 @@ class PDFQAGenerator(Base):
         if chunk_type == 'citation':
             return True
 
-        # Skip metadata markers
+        # Skip metadata markers (footnote symbols)
         if re.match(r'^[\*†‡§¶]', content):
             return True
 
-        # Skip very short non-clause content
-        if word_count < 7 and not self.is_legal_clause(chunk):
-            return True
-
+        # Process all other content, even if short
+        # This keeps pipeline flowing and allows downstream filtering
         return False
 
     # ==================== Grouping & Organization ====================
@@ -424,41 +425,40 @@ class PDFQAGenerator(Base):
     # ==================== Individual Chunk Processing ====================
 
     def should_process_individual(self, chunk: Dict[str, Any]) -> bool:
-        """Determine if individual chunk should generate Q&A."""
+        """
+        Determine if individual chunk should generate Q&A.
+
+        Since MarkdownChunkProcessor already filtered navigation noise,
+        we should process ALL chunks that passed through it.
+        Only skip headers, citations, and metadata markers.
+        """
         if self.should_skip_chunk(chunk):
             return False
 
-        chunk_type = chunk['chunk_metadata']['chunk_type']
-        word_count = chunk['chunk_metadata'].get('word_count', 0)
-
-        # Process substantial paragraphs
-        if chunk_type == 'paragraph' and word_count >= 20:
-            return True
-
-        # Process tables
-        if chunk_type == 'table':
-            return True
-
-        # Process legal clauses even if isolated
-        if self.is_legal_clause(chunk):
-            return True
-
-        return False
+        # Process everything else - MarkdownChunkProcessor already filtered noise
+        # This includes: paragraph, merged_paragraph, list_ordered, list_unordered,
+        # table, and any other content chunks
+        return True
 
     def create_individual_task(self, chunk: Dict[str, Any]) -> Dict[str, Any]:
         """Create Q&A task for individual chunk."""
         chunk_type = chunk['chunk_metadata']['chunk_type']
         input_text = self.get_qa_input_text(chunk)
 
-        # Calculate Q&A count based on type
-        if chunk_type == 'paragraph':
+        # Calculate Q&A count based on type and content
+        if chunk_type in ['paragraph', 'merged_paragraph']:
             qa_count = self._calculate_paragraph_qa_count(chunk)
             self.stats['paragraphs_processed'] += 1
         elif chunk_type == 'table':
             qa_count = self._calculate_table_qa_count(chunk)
             self.stats['tables_processed'] += 1
+        elif chunk_type in ['list_ordered', 'list_unordered']:
+            # Calculate based on word count for lists
+            qa_count = self._calculate_list_qa_count(chunk)
+            self.stats['paragraphs_processed'] += 1
         else:
-            qa_count = 2
+            # Default for other types - scale by word count
+            qa_count = self._calculate_default_qa_count(chunk)
 
         return {
             'input_text': input_text,
@@ -482,6 +482,32 @@ class PDFQAGenerator(Base):
             return 5
         else:
             return 7
+
+    def _calculate_list_qa_count(self, chunk: Dict[str, Any]) -> int:
+        """Calculate Q&A count for list items based on word count."""
+        word_count = chunk['chunk_metadata'].get('word_count', 0)
+
+        if word_count < 30:
+            return 1
+        elif word_count < 100:
+            return 2
+        elif word_count < 200:
+            return 3
+        else:
+            return 4
+
+    def _calculate_default_qa_count(self, chunk: Dict[str, Any]) -> int:
+        """Calculate Q&A count for other chunk types based on word count."""
+        word_count = chunk['chunk_metadata'].get('word_count', 0)
+
+        if word_count < 50:
+            return 1
+        elif word_count < 150:
+            return 2
+        elif word_count < 300:
+            return 3
+        else:
+            return 4
 
     def _calculate_table_qa_count(self, chunk: Dict[str, Any]) -> int:
         """Calculate Q&A count for tables."""
@@ -677,7 +703,7 @@ class PDFQAGenerator(Base):
         return results
 
     async def _call_llm_batch(self, prompts: List[str], retry_count: int = 0) -> List[str]:
-        """Call LLM with a batch of prompts using Gemini (async).
+        """Call LLM with a batch of prompts using Gemini (async - truly concurrent).
 
         Args:
             prompts: List of prompts to send
@@ -687,37 +713,50 @@ class PDFQAGenerator(Base):
             List of response strings (one per prompt)
         """
         try:
-            self._logger.debug(f"🔵 LLM Batch Call with Gemini (batch size: {len(prompts)})")
+            self._logger.debug(f"🔵 LLM Batch Call with Gemini (batch size: {len(prompts)}) - CONCURRENT")
 
-            # Process prompts sequentially with delays to avoid rate limiting
-            responses = []
-            for i, prompt in enumerate(prompts):
+            # Process all prompts concurrently using asyncio.gather
+            async def call_single_prompt(i: int, prompt: str):
+                """Call LLM for a single prompt with error handling."""
                 try:
+                    # Add small stagger to avoid instant burst (i * 50ms)
+                    if i > 0:
+                        await asyncio.sleep(i * 0.05)
+
                     response = await self.llm_client.generate_content(
                         prompt=prompt,
                         temperature=0.7,
-                        max_tokens=2000
+                        max_tokens=4000  # Increased to handle large chunks with multiple Q&A pairs
                     )
-                    responses.append(response)
-
-                    # Add delay between requests (except after last one)
-                    if i < len(prompts) - 1:
-                        await asyncio.sleep(0.5)  # 500ms delay between individual calls
+                    return (i, response, None)
 
                 except Exception as e:
                     self._logger.warning(f"⚠️  Prompt {i+1} failed: {e}")
-                    responses.append(e)
+                    return (i, "", e)
 
-            # Handle any exceptions in responses
-            processed_responses = []
-            for i, response in enumerate(responses):
-                if isinstance(response, Exception):
-                    self._logger.warning(f"⚠️  Prompt {i+1} failed: {response}")
-                    processed_responses.append("")
+            # Execute all prompts concurrently
+            results = await asyncio.gather(
+                *[call_single_prompt(i, prompt) for i, prompt in enumerate(prompts)],
+                return_exceptions=True
+            )
+
+            # Process results in original order
+            processed_responses = [""] * len(prompts)
+            success_count = 0
+
+            for result in results:
+                if isinstance(result, Exception):
+                    self._logger.warning(f"⚠️  Task exception: {result}")
+                    continue
+
+                i, response, error = result
+                if error is None and response:
+                    processed_responses[i] = response
+                    success_count += 1
                 else:
-                    processed_responses.append(response)
+                    processed_responses[i] = ""
 
-            self._logger.debug(f"   ✅ Received {len(processed_responses)} responses ({sum(1 for r in processed_responses if r)} successful)")
+            self._logger.debug(f"   ✅ Received {len(processed_responses)} responses ({success_count} successful) - CONCURRENT")
 
             return processed_responses
 

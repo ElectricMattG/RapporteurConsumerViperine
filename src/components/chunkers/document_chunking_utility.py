@@ -1010,6 +1010,15 @@ class DocumentChunkingUtility(Base):
         if current_sentence:
             sentences.append(' '.join(current_sentence))
 
+        # Fallback: If no sentences found (no punctuation), split by word count
+        if len(sentences) == 1 and len(words) > max_words:
+            self._logger.warning(f"No sentence boundaries found in {len(words)}-word text. Splitting by word count.")
+            chunks = []
+            for i in range(0, len(words), max_words):
+                chunk_words = words[i:i + max_words]
+                chunks.append(' '.join(chunk_words))
+            return chunks
+
         # Group sentences into chunks respecting max_words
         for sentence in sentences:
             sentence_words = sentence.split()

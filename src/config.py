@@ -161,6 +161,8 @@ defaults = {
         "output_topic": "citation-extraction",  # Output topic for chunked documents
         "cache_directory": "cache/web_scrapes",  # Directory for cached chunks
         "max_chunk_words": 350,  # Maximum words per chunk before splitting at sentence boundary
+        "process_markdown_chunks": True,  # Apply MarkdownChunkProcessor to filter noise and merge small chunks
+        "min_chunk_words": 3,  # Minimum words for a chunk (used by MarkdownChunkProcessor)
     },
     "citation_extractor": {
         # Citation extraction consumer configuration
@@ -204,6 +206,24 @@ defaults = {
         "separator": " [SEP] ",  # Separator for combining question+answer
         "mode": "all",  # Embedding mode: 'question', 'answer', 'combined', or 'all'
     },
+    "index_aggregator": {
+        # Index aggregator consumer configuration
+        "consumer_group_id": "index-aggregator-consumer",  # Consumer group ID for aggregator
+        "input_topic": "qa-indexed",  # Topic to consume indexed Q&A pairs from
+        "session_complete_topic": "session-complete",  # Topic for session completion signals
+        "session_timeout": 900,  # Session timeout in seconds (15 minutes for large PDFs)
+        "cache_dir": "./cache/web_scrapes",  # Cache directory for processing files
+        "session_backup_dir": "./cache/session_backups",  # Directory for session backups
+        "archive_dir": "./cache/archive",  # Directory for archived session files
+        "indices_dir": "./cache/indices",  # Directory for aggregated indices
+        "cleanup_after_upload": True,  # Clean up local cache after successful upload
+        "archive_before_cleanup": True,  # Archive session files before cleanup
+        "upload_to_azure": True,  # Enable Azure Blob Storage upload (requires connection string)
+        "azure_container_indices": "indices",  # Azure container for research indices
+        "azure_container_archive": "research-archive",  # Azure container for archived sessions
+        "azure_chunks_blob_name": "research_chunks_with_embeddings_combined.jsonl",  # Blob name for chunks
+        "azure_qa_pairs_blob_name": "research_qa_pairs_with_embeddings_combined.jsonl",  # Blob name for Q&A pairs
+    },
     "dead_letter": {
         # Dead letter queue consumer configuration
         "consumer_group_id": "dead-letter-consumer",  # Consumer group ID for DLQ
@@ -217,8 +237,8 @@ defaults = {
 
         # Batching configuration
         "enable_batching": True,  # Enable batch processing for multiple chunks
-        "batch_size": 10,  # Number of chunks to process in a single LLM request
-        "batch_delay": .5,  # Delay between batch requests (seconds) - increased for rate limiting
+        "batch_size": 20,  # Number of chunks to process concurrently (increased from 10)
+        "batch_delay": 0.1,  # Delay between batch requests (seconds) - reduced for concurrent processing
 
         # Text chunking parameters
         "chunk_size": 2000,  # Size of text chunks for processing
@@ -239,6 +259,10 @@ defaults = {
         "max_length_base": 1200,
         "top_p": 0.6,
         "max_qa_pairs_per_chunk": 5,
+
+        # Content filtering (keep pipeline flowing, filter downstream if needed)
+        "min_words_for_extraction": 10,  # Minimum words for valid web extraction (web scraper)
+        "min_words_for_qa": 0,  # Process all chunks for Q&A to keep pipeline flowing (no minimum)
 
         # Session and file naming
         "session_timestamp_format": "%Y%m%d_%H%M%S",
@@ -294,8 +318,11 @@ defaults = {
         # Content extraction
         "extract_links": True,  # Extract links from scraped pages
         "extract_images": False,  # Extract images from scraped pages
-        "extract_markdown": False,  # Extract markdown from HTML content using docling for structured chunking
+        "extract_markdown": True,  # Extract markdown from HTML content using docling for structured chunking
         "max_depth": 1,  # Maximum depth for link following (0 = no following)
+
+        # Content validation (aligned with qa_generation.min_words_for_extraction)
+        "min_words_for_valid_extraction": 10,  # Minimum words required for valid extraction
     },
     "tree_search": {
         "max_depth": 2,

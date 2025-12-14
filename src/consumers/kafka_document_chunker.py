@@ -22,6 +22,8 @@ sys.path.insert(0, str(src_dir))
 
 from components.chunkers.document_chunking_utility import \
     DocumentChunkingUtility
+from components.chunkers.markdown_chunk_processor import (
+    ChunkMergerConfig, MarkdownChunkProcessor)
 from config_handler import Base
 
 
@@ -77,6 +79,23 @@ class KafkaDocumentChunkerConsumer(Base):
             cache_dir=str(self.cache_dir),
             max_chunk_words=max_chunk_words
         )
+
+        # Initialize markdown chunk processor (optional post-processing)
+        self.process_markdown = self._app_config.get('chunker.process_markdown_chunks') or True
+        if self.process_markdown:
+            chunk_processor_config = ChunkMergerConfig(
+                min_words=self._app_config.get('chunker.min_chunk_words') or 3,
+                max_chunk_words=max_chunk_words,
+                filter_standalone_links=True,
+                filter_html_comments=True,
+                filter_date_only=True,
+                filter_youtube_headers=True
+            )
+            self.chunk_processor = MarkdownChunkProcessor(config=chunk_processor_config)
+            self._logger.info(f"   ✅ MarkdownChunkProcessor enabled (min_words={chunk_processor_config.min_words}, max={max_chunk_words})")
+        else:
+            self.chunk_processor = None
+            self._logger.info("   ⚠️  MarkdownChunkProcessor disabled")
 
         self.running = True
 
@@ -204,6 +223,26 @@ class KafkaDocumentChunkerConsumer(Base):
                 chunks = result['chunks']
                 self._logger.info(f"   ✅ Generated {len(chunks)} chunks")
 
+                # Apply markdown chunk processor (filter noise and merge small chunks)
+                if self.process_markdown and self.chunk_processor:
+                    self._logger.info("   🔄 Applying MarkdownChunkProcessor...")
+                    original_count = len(chunks)
+                    original_words = sum(c.chunk_metadata.word_count for c in chunks)
+
+                    # Convert chunks to dicts, process, then back
+                    chunk_dicts = [c.to_dict() for c in chunks]
+                    processed_dicts = self.chunk_processor.process_chunks(chunk_dicts)
+
+                    # For now, we'll save the processed dicts directly
+                    # (avoiding complex Chunk object reconstruction)
+                    chunks = processed_dicts
+
+                    processed_count = len(chunks)
+                    processed_words = sum(c.get('chunk_metadata', {}).get('word_count', 0) for c in chunks)
+
+                    self._logger.info(f"   ✅ Processed: {original_count} → {processed_count} chunks")
+                    self._logger.info(f"   📊 Words: {processed_words}/{original_words} ({processed_words/original_words*100:.1f}% preserved)")
+
                 # Save chunks to request_id folder
                 output_dir = self.cache_dir / request_id
                 output_dir.mkdir(parents=True, exist_ok=True)
@@ -212,24 +251,40 @@ class KafkaDocumentChunkerConsumer(Base):
 
                 with open(chunks_file, 'w', encoding='utf-8') as f:
                     for chunk in chunks:
-                        chunk_record = chunk.to_dict()
+                        # chunk is either Chunk object or dict depending on processing
+                        chunk_record = chunk.to_dict() if hasattr(chunk, 'to_dict') else chunk
                         f.write(json.dumps(chunk_record, ensure_ascii=False) + '\n')
 
                 self._logger.info(f"   💾 Chunks saved to: {chunks_file}")
 
                 # Save chunk statistics
                 stats_file = output_dir / 'chunk_stats.json'
+
+                # Calculate stats handling both Chunk objects and dicts
+                if chunks and hasattr(chunks[0], 'chunk_metadata'):
+                    # Original Chunk objects
+                    avg_char_count = sum(c.chunk_metadata.char_count for c in chunks) / len(chunks)
+                    avg_word_count = sum(c.chunk_metadata.word_count for c in chunks) / len(chunks)
+                    chunk_types = {}
+                    for chunk in chunks:
+                        chunk_type = chunk.chunk_metadata.chunk_type.value
+                        chunk_types[chunk_type] = chunk_types.get(chunk_type, 0) + 1
+                else:
+                    # Processed dicts
+                    avg_char_count = sum(c.get('chunk_metadata', {}).get('char_count', 0) for c in chunks) / len(chunks) if chunks else 0
+                    avg_word_count = sum(c.get('chunk_metadata', {}).get('word_count', 0) for c in chunks) / len(chunks) if chunks else 0
+                    chunk_types = {}
+                    for chunk in chunks:
+                        chunk_type = chunk.get('chunk_metadata', {}).get('chunk_type', 'unknown')
+                        chunk_types[chunk_type] = chunk_types.get(chunk_type, 0) + 1
+
                 stats = {
                     'total_chunks': len(chunks),
-                    'chunk_types': {},
-                    'avg_chunk_size': sum(c.chunk_metadata.char_count for c in chunks) / len(chunks) if chunks else 0,
-                    'avg_word_count': sum(c.chunk_metadata.word_count for c in chunks) / len(chunks) if chunks else 0
+                    'chunk_types': chunk_types,
+                    'avg_chunk_size': avg_char_count,
+                    'avg_word_count': avg_word_count,
+                    'markdown_processed': self.process_markdown
                 }
-
-                # Count chunk types
-                for chunk in chunks:
-                    chunk_type = chunk.chunk_metadata.chunk_type.value
-                    stats['chunk_types'][chunk_type] = stats['chunk_types'].get(chunk_type, 0) + 1
 
                 with open(stats_file, 'w', encoding='utf-8') as f:
                     json.dump(stats, f, indent=2, ensure_ascii=False)

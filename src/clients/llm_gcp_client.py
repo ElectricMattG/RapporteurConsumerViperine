@@ -5,6 +5,7 @@ GCP Gemini LLM Client
 This module provides a client for interacting with Google Gemini via Vertex AI
 using the google-genai SDK. Compatible interface with SimpleLLMClient.
 """
+import asyncio
 import json
 import os
 import re
@@ -164,12 +165,16 @@ class GeminiLLMClient(Base):
                 **config_params
             )
 
-            # Gemini API is synchronous, but we wrap it in async for consistency
-            # This allows for future async implementation or concurrent processing
-            response = self.client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config=config
+            # Run blocking Gemini API call in thread pool to avoid blocking event loop
+            # This enables true concurrent processing of multiple requests
+            loop = asyncio.get_event_loop()
+            response = await loop.run_in_executor(
+                None,  # Use default ThreadPoolExecutor
+                lambda: self.client.models.generate_content(
+                    model=self.model_name,
+                    contents=prompt,
+                    config=config
+                )
             )
 
             # Extract text and optional grounding metadata

@@ -440,7 +440,7 @@ class KafkaWebScraperConsumer(Base):
                             # Try markdown conversion first if enabled
                             text_content = None
                             if self.extract_markdown:
-                                text_content = self._convert_html_to_markdown(html_content, final_url)
+                                text_content = await self._convert_html_to_markdown(html_content, final_url)
                                 if text_content:
                                     metadata['extraction_format'] = 'markdown'
 
@@ -884,9 +884,9 @@ class KafkaWebScraperConsumer(Base):
             self._logger.error(f"   ❌ PDF extraction failed: {e}")
             return f"PDF extraction error: {str(e)}", {'error': str(e), 'source_url': url}
 
-    def _convert_html_to_markdown(self, html_content: str, url: str) -> Optional[str]:
+    async def _convert_html_to_markdown(self, html_content: str, url: str) -> Optional[str]:
         """
-        Convert HTML content to markdown using docling.
+        Convert HTML content to markdown using docling (async to avoid blocking).
 
         This preserves document structure (headings, tables, lists, paragraphs)
         which is useful for chunking and filtering.
@@ -902,29 +902,52 @@ class KafkaWebScraperConsumer(Base):
             return None
 
         try:
-            self._logger.info(f"   📝 Converting HTML to markdown...")
+            self._logger.info(f"   📝 Converting HTML to markdown (async)...")
 
-            # Save HTML to temporary file (docling requires file input)
-            import tempfile
-            with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_file:
-                tmp_file.write(html_content)
-                tmp_path = tmp_file.name
+            # Use asyncio to run blocking docling conversion in thread pool
+            # This prevents blocking the event loop
+            loop = asyncio.get_event_loop()
+            markdown_content = await loop.run_in_executor(
+                None,  # Use default executor
+                self._do_markdown_conversion,
+                html_content
+            )
 
-            try:
-                # Convert HTML using docling
-                result = self.markdown_converter.convert(tmp_path)
-                markdown_content = result.document.export_to_markdown()
+            if markdown_content:
                 self._logger.info(f"   ✅ Converted to {len(markdown_content)} chars of markdown")
-                return markdown_content
-            finally:
-                # Clean up temporary file
-                import os
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
+            return markdown_content
 
         except Exception as e:
             self._logger.warning(f"   ⚠️ Markdown conversion failed: {e}")
             return None
+
+    def _do_markdown_conversion(self, html_content: str) -> Optional[str]:
+        """
+        Blocking markdown conversion operation (runs in thread pool).
+
+        Args:
+            html_content: HTML content to convert
+
+        Returns:
+            Markdown content or None
+        """
+        import os
+        import tempfile
+
+        # Save HTML to temporary file (docling requires file input)
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.html', delete=False, encoding='utf-8') as tmp_file:
+            tmp_file.write(html_content)
+            tmp_path = tmp_file.name
+
+        try:
+            # Convert HTML using docling
+            result = self.markdown_converter.convert(tmp_path)
+            markdown_content = result.document.export_to_markdown()
+            return markdown_content
+        finally:
+            # Clean up temporary file
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
 
     def _extract_full_text_content(self, soup: BeautifulSoup) -> str:
         """

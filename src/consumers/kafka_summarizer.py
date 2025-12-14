@@ -381,40 +381,56 @@ class KafkaSummarizerConsumer(Base):
             self._shutdown()
 
     async def _consume_loop(self):
-        """Main message consumption loop"""
-        self._logger.info("🔄 Starting message consumption loop...")
+        """Main message consumption loop with batch concurrency"""
+        self._logger.info("🔄 Starting message consumption loop with CONCURRENT processing...")
+
+        batch_size = 10  # Process up to 10 summaries concurrently
+        pending_tasks = []
 
         while self.running:
             try:
-                # Poll for messages
-                msg = self.consumer.poll(timeout=1.0)
+                # Collect batch of messages
+                messages = []
+                for _ in range(batch_size):
+                    msg = self.consumer.poll(timeout=0.1)
+                    if msg and not msg.error():
+                        messages.append(msg)
+                    elif msg and msg.error():
+                        if msg.error().code() != KafkaError._PARTITION_EOF:
+                            raise KafkaException(msg.error())
 
-                if msg is None:
+                if not messages:
+                    # Wait a bit before next poll
+                    await asyncio.sleep(0.1)
                     continue
 
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
-                        self._logger.debug(f"Reached end of partition {msg.partition()}")
-                    else:
-                        raise KafkaException(msg.error())
-                    continue
+                self._logger.info(f"🚀 Processing batch of {len(messages)} summaries CONCURRENTLY")
 
-                # Process the message
-                try:
-                    message_data = json.loads(msg.value().decode('utf-8'))
+                # Process all messages concurrently
+                tasks = []
+                for msg in messages:
+                    try:
+                        message_data = json.loads(msg.value().decode('utf-8'))
+                        tasks.append(self._process_message(message_data))
+                    except json.JSONDecodeError as e:
+                        self._logger.error(f"❌ Invalid JSON in message: {e}")
 
-                    # Process message asynchronously
-                    result = await self._process_message(message_data)
+                # Execute all summaries concurrently
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    if result['success']:
-                        self._logger.info(f"✅ Successfully processed summary for request {result['request_id']}")
-                    else:
-                        self._logger.warning(f"⚠️ Summary processing completed with errors: {result['error']}")
+                    # Log results
+                    success_count = 0
+                    for result in results:
+                        if isinstance(result, Exception):
+                            self._logger.error(f"❌ Task exception: {result}")
+                        elif result.get('success'):
+                            success_count += 1
+                            self._logger.info(f"✅ Successfully processed summary for request {result['request_id']}")
+                        else:
+                            self._logger.warning(f"⚠️ Summary processing completed with errors: {result.get('error')}")
 
-                except json.JSONDecodeError as e:
-                    self._logger.error(f"❌ Invalid JSON in message: {e}")
-                except Exception as e:
-                    self._logger.error(f"❌ Error processing message: {e}")
+                    self._logger.info(f"📊 Batch complete: {success_count}/{len(tasks)} successful")
 
             except Exception as e:
                 self._logger.error(f"❌ Error in consume loop: {e}")
