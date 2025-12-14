@@ -912,7 +912,7 @@ class KafkaIndexAggregatorConsumer(Base):
                         blob_name = f"{session_id}/{relative_path}"
 
                         # Retry logic for large files
-                        max_retries = 3
+                        max_retries = 2
                         for attempt in range(max_retries):
                             try:
                                 blob_client = self.blob_service_client.get_blob_client(
@@ -920,8 +920,8 @@ class KafkaIndexAggregatorConsumer(Base):
                                     blob=blob_name
                                 )
                                 with open(file_path, 'rb') as f:
-                                    # Set timeout to 5 minutes for large files
-                                    blob_client.upload_blob(f, overwrite=True, timeout=300)
+                                    # Set timeout to 10 minutes for slow regional connections
+                                    blob_client.upload_blob(f, overwrite=True, timeout=600)
                                 backup_count += 1
                                 break
                             except Exception as upload_error:
