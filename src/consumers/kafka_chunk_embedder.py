@@ -507,6 +507,10 @@ class KafkaChunkEmbedderConsumer(Base):
                     'embeddings_generated': embeddings_count
                 }
 
+                # Pass through total_requests if present
+                if 'total_requests' in message_data:
+                    qa_message['total_requests'] = message_data['total_requests']
+
                 message_json = json.dumps(qa_message)
                 self.producer.produce(
                     topic=self.output_topic,

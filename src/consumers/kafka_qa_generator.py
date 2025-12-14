@@ -267,6 +267,10 @@ class KafkaQAGeneratorConsumer(Base):
                         'processing_time': stats.get('duration_minutes', 0)
                     }
 
+                    # Pass through total_requests if present
+                    if 'total_requests' in message_data:
+                        output_message['total_requests'] = message_data['total_requests']
+
                     self.producer.produce(
                         topic=self.output_topic,
                         value=json.dumps(output_message).encode('utf-8')

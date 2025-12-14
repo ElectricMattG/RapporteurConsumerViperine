@@ -303,6 +303,10 @@ class KafkaDocumentChunkerConsumer(Base):
                         'chunk_count': len(chunks)
                     }
 
+                    # Pass through total_requests if present
+                    if 'total_requests' in message_data:
+                        message['total_requests'] = message_data['total_requests']
+
                     message_json = json.dumps(message)
                     self.producer.produce(
                         topic=self.output_topic,

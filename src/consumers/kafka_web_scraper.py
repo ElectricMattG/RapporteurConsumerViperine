@@ -356,6 +356,8 @@ class KafkaWebScraperConsumer(Base):
                             'request_id': request_id,
                             'extraction_method': 'cloudscraper'
                         }
+                        if 'total_requests' in message_data:
+                            extraction_result['total_requests'] = message_data['total_requests']
 
                         self._save_extraction(extraction_result, output_file)
                         self._logger.info(f"   ✅ Successfully extracted with cloudscraper")
@@ -400,6 +402,8 @@ class KafkaWebScraperConsumer(Base):
                             'request_id': request_id,
                             'extraction_method': 'playwright'
                         }
+                        if 'total_requests' in message_data:
+                            extraction_result['total_requests'] = message_data['total_requests']
 
                         self._save_extraction(extraction_result, output_file)
                         self._logger.info(f"   ✅ Successfully extracted with Playwright")
@@ -479,6 +483,8 @@ class KafkaWebScraperConsumer(Base):
                             'request_id': request_id,
                             'extraction_method': 'pdf_extraction' if is_pdf else 'curl_cffi'
                         }
+                        if 'total_requests' in message_data:
+                            extraction_result['total_requests'] = message_data['total_requests']
 
                         # Save to output file (append mode)
                         self._save_extraction(extraction_result, output_file)
@@ -668,6 +674,8 @@ class KafkaWebScraperConsumer(Base):
                 'request_id': request_id,
                 'extraction_method': 'youtube_transcript_api'
             }
+            if 'total_requests' in message_data:
+                extraction_result['total_requests'] = message_data['total_requests']
 
             # Save to output file
             output_file = request_dir / "extracted_linked_text.jsonl"
@@ -1649,6 +1657,10 @@ class KafkaWebScraperConsumer(Base):
                     'extracted_at': extraction_result.get('extracted_at')
                 }
             }
+
+            # Pass through total_requests for aggregator
+            if 'total_requests' in extraction_result:
+                message['total_requests'] = extraction_result['total_requests']
 
             # Serialize message
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')

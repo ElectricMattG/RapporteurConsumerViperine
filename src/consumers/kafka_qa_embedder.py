@@ -537,6 +537,10 @@ class KafkaQAEmbedderConsumer(Base):
                 'processing_timestamp': datetime.now().isoformat()
             }
 
+            # Pass through total_requests if present for aggregator
+            if 'total_requests' in message_data:
+                result['total_requests'] = message_data['total_requests']
+
             self._logger.info("="*80)
             self._logger.info(f"✅ Successfully processed Q&A embedding for session {session_id}")
             self._logger.info(f"   Enriched Q&A pairs: {enriched_file}")

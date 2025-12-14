@@ -128,6 +128,10 @@ class KafkaIndexAggregatorConsumer(Base):
             'max.poll.interval.ms': 600000,  # 10 minutes
         })
 
+        # Initialize Kafka producer for session-complete signals
+        from confluent_kafka import Producer
+        self.producer = Producer({'bootstrap.servers': self.bootstrap_servers})
+
         self._logger.info("✅ Configuration loaded:")
         self._logger.info(f"   Kafka servers: {self.bootstrap_servers}")
         self._logger.info(f"   Consumer group: {self.group_id}")
@@ -169,10 +173,9 @@ class KafkaIndexAggregatorConsumer(Base):
         try:
             self._logger.info("🚀 Starting index aggregation consumer...")
 
-            # Subscribe to qa-indexed and session-complete topics
-            topics = [self.input_topic, self.session_complete_topic]
-            self.consumer.subscribe(topics)
-            self._logger.info(f"✅ Subscribed to topics: {', '.join(topics)}")
+            # Subscribe to qa-indexed topic only (we publish to session-complete)
+            self.consumer.subscribe([self.input_topic])
+            self._logger.info(f"✅ Subscribed to topic: {self.input_topic}")
 
             while True:
                 msg = self.consumer.poll(timeout=1.0)
@@ -222,6 +225,7 @@ class KafkaIndexAggregatorConsumer(Base):
             # Track total expected requests if provided
             if 'total_requests' in message_data:
                 self.session_total_requests[session_id] = message_data['total_requests']
+                self._logger.info(f"📊 Session {session_id}: Expecting {message_data['total_requests']} total requests")
 
             # Check if this is a session complete signal
             if message_data.get('session_complete'):
@@ -268,6 +272,7 @@ class KafkaIndexAggregatorConsumer(Base):
             if session_id in self.session_total_requests:
                 expected = self.session_total_requests[session_id]
                 received = len(self.session_request_ids[session_id])
+                self._logger.info(f"📊 Session {session_id}: {received}/{expected} requests received")
                 if received >= expected:
                     self._logger.info(f"✅ All requests received ({received}/{expected}) for session: {session_id}")
 
@@ -436,6 +441,27 @@ class KafkaIndexAggregatorConsumer(Base):
             del self.session_qa_pairs[session_id]
             del self.session_request_ids[session_id]
             del self.session_last_activity[session_id]
+
+            # Clear from total_requests tracking if present
+            if session_id in self.session_total_requests:
+                del self.session_total_requests[session_id]
+
+            # Publish session-complete message so other consumers can clean up
+            try:
+                import json
+                complete_message = {
+                    'session_id': session_id,
+                    'session_complete': True,
+                    'completed_at': datetime.now().isoformat()
+                }
+                self.producer.produce(
+                    topic=self.session_complete_topic,
+                    value=json.dumps(complete_message).encode('utf-8')
+                )
+                self.producer.flush()
+                self._logger.info(f"📢 Published session-complete signal to {self.session_complete_topic}")
+            except Exception as e:
+                self._logger.warning(f"⚠️  Failed to publish session-complete: {e}")
 
             self._logger.info(f"✅ Session aggregation complete: {session_id}")
             self._logger.info("=" * 80)
