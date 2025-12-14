@@ -298,7 +298,7 @@ class KafkaWebScraperConsumer(Base):
 
             if is_youtube:
                 self._logger.info("📹 Detected YouTube URL - attempting transcript extraction...")
-                transcript_result = self._extract_youtube_transcript(final_url, request_dir, session_id, request_id, uri, title)
+                transcript_result = self._extract_youtube_transcript(final_url, request_dir, session_id, request_id, uri, title, message_data)
                 print(f"TRANSCRIPT: {transcript_result}")
 
                 if transcript_result['success']:
@@ -533,7 +533,8 @@ class KafkaWebScraperConsumer(Base):
         session_id: str,
         request_id: str,
         original_uri: str,
-        title: str
+        title: str,
+        message_data: Dict
     ) -> Dict[str, Any]:
         """
         Extract YouTube video transcript using youtube-transcript-api.
