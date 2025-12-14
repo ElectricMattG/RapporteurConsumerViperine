@@ -24,6 +24,7 @@ Usage:
     python run_kafka_qa_generator.py
 """
 
+import asyncio
 import json
 import os
 import signal
@@ -292,46 +293,81 @@ class KafkaQAGeneratorConsumer(Base):
             return result
 
     def consume_messages(self):
-        """Main consume loop"""
-        self._logger.info("🚀 Starting Q&A generation consumer...")
+        """Main consume loop with batch concurrency"""
+        self._logger.info("🚀 Starting Q&A generation consumer with CONCURRENT processing...")
         self._create_consumer()
         self.running = True
 
+        # Run async consume loop
         try:
-            while self.running:
-                msg = self.consumer.poll(timeout=1.0)
-
-                if msg is None:
-                    continue
-
-                if msg.error():
-                    if msg.error().code() == KafkaError._PARTITION_EOF:
-                        continue
-                    else:
-                        self._logger.error(f"❌ Consumer error: {msg.error()}")
-                        continue
-
-                try:
-                    # Parse message
-                    message_data = json.loads(msg.value().decode('utf-8'))
-
-                    # Process message (calls PDFQAGenerator)
-                    result = self._process_message(message_data)
-
-                    if result['success']:
-                        self._logger.info(f"✅ Successfully generated {result['qa_pairs_generated']} Q&A pairs")
-                    else:
-                        self._logger.warning(f"⚠️ Q&A generation failed: {result.get('error', 'Unknown error')}")
-
-                except json.JSONDecodeError as e:
-                    self._logger.error(f"❌ Invalid JSON in message: {e}")
-                except Exception as e:
-                    self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
-
+            asyncio.run(self._consume_loop())
         except KeyboardInterrupt:
             self._logger.info("⚠️ Interrupted by user")
         finally:
             self._shutdown()
+
+    async def _consume_loop(self):
+        """Main message consumption loop with batch concurrency"""
+        self._logger.info("🔄 Starting message consumption loop with CONCURRENT Q&A generation...")
+
+        batch_size = 5  # Process up to 5 documents concurrently (each may have 20-100 chunks)
+
+        while self.running:
+            try:
+                # Collect batch of messages
+                messages = []
+                for _ in range(batch_size):
+                    msg = self.consumer.poll(timeout=0.1)
+                    if msg and not msg.error():
+                        messages.append(msg)
+                    elif msg and msg.error():
+                        if msg.error().code() != KafkaError._PARTITION_EOF:
+                            raise KafkaException(msg.error())
+
+                if not messages:
+                    # Wait a bit before next poll
+                    await asyncio.sleep(0.1)
+                    continue
+
+                self._logger.info(f"🚀 Processing batch of {len(messages)} documents CONCURRENTLY")
+
+                # Process all messages concurrently
+                tasks = []
+                for msg in messages:
+                    try:
+                        message_data = json.loads(msg.value().decode('utf-8'))
+                        tasks.append(self._process_message_async(message_data))
+                    except json.JSONDecodeError as e:
+                        self._logger.error(f"❌ Invalid JSON in message: {e}")
+
+                # Execute all Q&A generations concurrently
+                if tasks:
+                    results = await asyncio.gather(*tasks, return_exceptions=True)
+
+                    # Log results
+                    success_count = 0
+                    total_pairs = 0
+                    for result in results:
+                        if isinstance(result, Exception):
+                            self._logger.error(f"❌ Task exception: {result}")
+                        elif result.get('success'):
+                            success_count += 1
+                            total_pairs += result.get('qa_pairs_generated', 0)
+                            self._logger.info(f"✅ Generated {result['qa_pairs_generated']} Q&A pairs for {result['request_id']}")
+                        else:
+                            self._logger.warning(f"⚠️ Q&A generation failed: {result.get('error')}")
+
+                    self._logger.info(f"📊 Batch complete: {success_count}/{len(tasks)} successful, {total_pairs} total Q&A pairs")
+
+            except Exception as e:
+                self._logger.error(f"❌ Error in consume loop: {e}")
+                if not self.running:
+                    break
+
+    async def _process_message_async(self, message_data: Dict) -> Dict:
+        """Async wrapper for _process_message to enable concurrent processing"""
+        loop = asyncio.get_event_loop()
+        return await loop.run_in_executor(None, self._process_message, message_data)
 
     def run(self):
         """Run the consumer"""

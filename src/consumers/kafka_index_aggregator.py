@@ -146,24 +146,28 @@ class KafkaIndexAggregatorConsumer(Base):
     def _ensure_containers_exist(self):
         """Ensure Azure containers exist."""
         try:
-            # Create indices container if not exists
-            try:
-                container_client = self.blob_service_client.get_container_client(self.container_name)
-                if not container_client.exists():
-                    self.blob_service_client.create_container(self.container_name)
-                    self._logger.info(f"✅ Created container: {self.container_name}")
-            except Exception as e:
-                self._logger.debug(f"Container {self.container_name} check: {e}")
+            # List of required containers
+            required_containers = [
+                (self.container_name, "Indices container for aggregated research data"),
+                (self.archive_container, "Archive container (7-day lifecycle)"),
+                ("webscrapes", "Raw web scrape data"),
+                ("session-backups", "Session backup data"),
+                ("archive", "Archive parent container")
+            ]
 
-            # Create archive container with lifecycle policy
-            try:
-                archive_client = self.blob_service_client.get_container_client(self.archive_container)
-                if not archive_client.exists():
-                    self.blob_service_client.create_container(self.archive_container)
-                    self._logger.info(f"✅ Created archive container: {self.archive_container}")
-                    self._logger.warning("⚠️  Configure 7-day lifecycle policy on archive container via Azure Portal")
-            except Exception as e:
-                self._logger.debug(f"Archive container {self.archive_container} check: {e}")
+            for container_name, description in required_containers:
+                try:
+                    container_client = self.blob_service_client.get_container_client(container_name)
+                    if not container_client.exists():
+                        self.blob_service_client.create_container(container_name)
+                        self._logger.info(f"✅ Created container: {container_name} ({description})")
+                    else:
+                        self._logger.debug(f"✓ Container exists: {container_name}")
+                except Exception as e:
+                    self._logger.debug(f"Container {container_name} check: {e}")
+
+            # Note about grounding subfolder
+            self._logger.info("📁 Note: 'archive/grounding' will be created as a virtual folder within 'archive' container")
 
         except Exception as e:
             self._logger.error(f"Error ensuring containers exist: {e}")
@@ -893,31 +897,83 @@ class KafkaIndexAggregatorConsumer(Base):
                 self._logger.info(f"   ✅ Archived {archive_count} files locally to {archive_dir}")
                 return
 
-            # Azure archive
+            # Azure upload - mirror entire local cache structure to Azure
+            self._logger.info(f"☁️  Uploading local cache to Azure containers...")
+
+            # 1. Upload session backups to session-backups container
+            session_backup_dir = Path(f"cache/session_backups/{session_id}")
+            backup_count = 0
+            if session_backup_dir.exists():
+                self._logger.info(f"   📦 Uploading session backups from {session_backup_dir}...")
+                for file_path in session_backup_dir.rglob('*'):
+                    if file_path.is_file():
+                        # Preserve directory structure under session_id
+                        relative_path = file_path.relative_to(session_backup_dir)
+                        blob_name = f"{session_id}/{relative_path}"
+
+                        # Retry logic for large files
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                blob_client = self.blob_service_client.get_blob_client(
+                                    container="session-backups",
+                                    blob=blob_name
+                                )
+                                with open(file_path, 'rb') as f:
+                                    # Set timeout to 5 minutes for large files
+                                    blob_client.upload_blob(f, overwrite=True, timeout=300)
+                                backup_count += 1
+                                break
+                            except Exception as upload_error:
+                                if attempt < max_retries - 1:
+                                    wait_time = 2 ** attempt
+                                    self._logger.warning(f"   ⚠️  Upload failed (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s: {file_path.name}")
+                                    time.sleep(wait_time)
+                                else:
+                                    self._logger.error(f"   ❌ Failed to upload {file_path.name} after {max_retries} attempts: {upload_error}")
+
+                self._logger.info(f"   ✅ Uploaded {backup_count} files to session-backups container")
+            else:
+                self._logger.warning(f"   ⚠️  Session backup directory not found: {session_backup_dir}")
+
+            # 2. Archive to archive container (mirrors local cache/web_scrapes structure)
+            self._logger.info(f"   📦 Archiving to {session_id}/...")
             archive_count = 0
             for request_id in self.session_request_ids[session_id]:
                 request_dir = self.cache_dir / request_id
                 if not request_dir.exists():
                     continue
 
-                # Archive all JSONL files from the request directory
                 for file_path in request_dir.glob('*.jsonl'):
+                    # Mirror local structure: cache/web_scrapes/{request_id}/{filename}
+                    # becomes: {session_id}/{request_id}/{filename}
                     blob_name = f"{session_id}/{request_id}/{file_path.name}"
 
-                    blob_client = self.blob_service_client.get_blob_client(
-                        container=self.archive_container,
-                        blob=blob_name
-                    )
+                    # Retry logic
+                    max_retries = 3
+                    for attempt in range(max_retries):
+                        try:
+                            blob_client = self.blob_service_client.get_blob_client(
+                                container="archive",
+                                blob=blob_name
+                            )
+                            with open(file_path, 'rb') as f:
+                                blob_client.upload_blob(f, overwrite=True, timeout=300)
+                            archive_count += 1
+                            break
+                        except Exception as upload_error:
+                            if attempt < max_retries - 1:
+                                wait_time = 2 ** attempt
+                                self._logger.warning(f"   ⚠️  Upload failed (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s: {file_path.name}")
+                                time.sleep(wait_time)
+                            else:
+                                self._logger.error(f"   ❌ Failed to upload {file_path.name} after {max_retries} attempts: {upload_error}")
 
-                    with open(file_path, 'rb') as f:
-                        blob_client.upload_blob(f, overwrite=True)
-
-                    archive_count += 1
-
-            self._logger.info(f"   ✅ Archived {archive_count} files to Azure {self.archive_container}")
+            self._logger.info(f"   ✅ Archived {archive_count} files to archive/{session_id}")
+            self._logger.info(f"☁️  Upload complete - {backup_count} backups, {archive_count} archived files")
 
         except Exception as e:
-            self._logger.error(f"Error archiving session {session_id}: {e}")
+            self._logger.error(f"Error archiving session {session_id}: {e}", exc_info=True)
 
     def _cleanup_session(self, session_id: str):
         """Clean up local cache directories for session."""
@@ -928,10 +984,18 @@ class KafkaIndexAggregatorConsumer(Base):
             for request_id in self.session_request_ids[session_id]:
                 request_dir = self.cache_dir / request_id
                 if request_dir.exists():
+                    self._logger.debug(f"   🗑️  Removing {request_dir}")
                     shutil.rmtree(request_dir)
                     cleanup_count += 1
 
             self._logger.info(f"   ✅ Cleaned up {cleanup_count} request directories")
+
+            # Clean up session backup directory
+            session_backup_dir = Path(f"cache/session_backups/{session_id}")
+            if session_backup_dir.exists():
+                self._logger.debug(f"   🗑️  Removing session backup: {session_backup_dir}")
+                shutil.rmtree(session_backup_dir)
+                self._logger.info(f"   ✅ Cleaned up session backup directory")
 
             # Clean up entire web_scrapes cache folder if it exists and has session dirs
             if self.cache_dir.exists():
@@ -950,7 +1014,7 @@ class KafkaIndexAggregatorConsumer(Base):
                     self._logger.debug(f"   📂 {len(remaining_dirs)} directories remaining in cache")
 
         except Exception as e:
-            self._logger.error(f"Error cleaning up session {session_id}: {e}")
+            self._logger.error(f"Error cleaning up session {session_id}: {e}", exc_info=True)
 
 
 def main():
