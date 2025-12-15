@@ -174,3 +174,123 @@ kafka_flush: ## Flush all Kafka topics and clear cache
 	@echo "Clearing cache..."
 	@rm -rf cache/web_scrapes/req_*
 	@echo "✓ Kafka topics flushed and cache cleared"
+
+
+# Docker/Kubernetes targets
+ACR_NAME ?= ragserviceneacr6881
+REGION ?= northeurope
+RESOURCE_GROUP ?= rapporteur-ne-rg
+IMAGE_NAME ?= scrape-consumer
+VERSION ?= v1.0.0
+ACR_LOGIN_SERVER = $(ACR_NAME).azurecr.io
+FULL_IMAGE = $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(VERSION)
+LATEST_IMAGE = $(ACR_LOGIN_SERVER)/$(IMAGE_NAME):latest
+
+
+.PHONY: docker_build
+docker_build: ## Build Docker image for consumers
+	@echo "$(YELLOW)$(BOLD)Building Docker image...$(RESET)"
+	docker build -t $(IMAGE_NAME):$(VERSION) .
+	@echo "✓ Docker image built: $(IMAGE_NAME):$(VERSION)"
+
+
+.PHONY: docker_tag
+docker_tag: ## Tag Docker image for ACR
+	@echo "$(YELLOW)$(BOLD)Tagging images for ACR...$(RESET)"
+	docker tag $(IMAGE_NAME):$(VERSION) $(FULL_IMAGE)
+	docker tag $(IMAGE_NAME):$(VERSION) $(LATEST_IMAGE)
+	@echo "✓ Tagged: $(FULL_IMAGE)"
+	@echo "✓ Tagged: $(LATEST_IMAGE)"
+
+
+.PHONY: docker_push
+docker_push: ## Push Docker image to ACR
+	@echo "$(YELLOW)$(BOLD)Pushing to ACR...$(RESET)"
+	@echo "Logging in to ACR: $(ACR_LOGIN_SERVER)..."
+	@az acr login --name $(ACR_NAME)
+	docker push $(FULL_IMAGE)
+	docker push $(LATEST_IMAGE)
+	@echo "✓ Successfully pushed to ACR!"
+	@echo ""
+	@echo "Images available at:"
+	@echo "  $(FULL_IMAGE)"
+	@echo "  $(LATEST_IMAGE)"
+
+
+.PHONY: docker_build_push
+docker_build_push: docker_build docker_tag docker_push ## Build, tag, and push Docker image to ACR
+	@echo ""
+	@echo "$(GREEN)$(BOLD)Docker image built and pushed successfully!$(RESET)"
+	@echo ""
+	@echo "Next steps:"
+	@echo "  1. Update k8s/05-consumer-deployments.yaml with image: $(LATEST_IMAGE)"
+	@echo "  2. Deploy to AKS: kubectl apply -f k8s/"
+
+
+.PHONY: azure_login
+azure_login: ## Login to Azure
+	@echo "$(YELLOW)$(BOLD)Logging in to Azure...$(RESET)"
+	@az login
+	@echo "✓ Azure login successful"
+
+
+# Kafka Docker images
+KAFKA_VERSION ?= 7.5.0
+KAFKA_IMAGE = kafka
+ZOOKEEPER_IMAGE = zookeeper
+KAFKA_FULL_IMAGE = $(ACR_LOGIN_SERVER)/$(KAFKA_IMAGE):$(KAFKA_VERSION)
+KAFKA_LATEST_IMAGE = $(ACR_LOGIN_SERVER)/$(KAFKA_IMAGE):latest
+ZOOKEEPER_FULL_IMAGE = $(ACR_LOGIN_SERVER)/$(ZOOKEEPER_IMAGE):$(KAFKA_VERSION)
+ZOOKEEPER_LATEST_IMAGE = $(ACR_LOGIN_SERVER)/$(ZOOKEEPER_IMAGE):latest
+
+
+.PHONY: kafka_docker_build
+kafka_docker_build: ## Build Kafka Docker images
+	@echo "$(YELLOW)$(BOLD)Building Kafka Docker image...$(RESET)"
+	docker build --platform linux/amd64 -f Dockerfile.kafka -t $(KAFKA_IMAGE):$(KAFKA_VERSION) .
+	@echo "$(YELLOW)$(BOLD)Building ZooKeeper Docker image...$(RESET)"
+	docker build --platform linux/amd64 -f Dockerfile.zookeeper -t $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) .
+	@echo "✓ Kafka images built"
+
+
+.PHONY: kafka_docker_tag
+kafka_docker_tag: ## Tag Kafka Docker images for ACR
+	@echo "$(YELLOW)$(BOLD)Tagging Kafka images for ACR...$(RESET)"
+	docker tag $(KAFKA_IMAGE):$(KAFKA_VERSION) $(KAFKA_FULL_IMAGE)
+	docker tag $(KAFKA_IMAGE):$(KAFKA_VERSION) $(KAFKA_LATEST_IMAGE)
+	docker tag $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) $(ZOOKEEPER_FULL_IMAGE)
+	docker tag $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) $(ZOOKEEPER_LATEST_IMAGE)
+	@echo "✓ Tagged: $(KAFKA_FULL_IMAGE)"
+	@echo "✓ Tagged: $(KAFKA_LATEST_IMAGE)"
+	@echo "✓ Tagged: $(ZOOKEEPER_FULL_IMAGE)"
+	@echo "✓ Tagged: $(ZOOKEEPER_LATEST_IMAGE)"
+
+
+.PHONY: kafka_docker_push
+kafka_docker_push: ## Push Kafka Docker images to ACR
+	@echo "$(YELLOW)$(BOLD)Pushing Kafka images to ACR...$(RESET)"
+	@echo "Logging in to ACR: $(ACR_LOGIN_SERVER)..."
+	@az acr login --name $(ACR_NAME)
+	docker push $(KAFKA_FULL_IMAGE)
+	docker push $(KAFKA_LATEST_IMAGE)
+	docker push $(ZOOKEEPER_FULL_IMAGE)
+	docker push $(ZOOKEEPER_LATEST_IMAGE)
+	@echo "✓ Successfully pushed Kafka images to ACR!"
+	@echo ""
+	@echo "Images available at:"
+	@echo "  $(KAFKA_FULL_IMAGE)"
+	@echo "  $(KAFKA_LATEST_IMAGE)"
+	@echo "  $(ZOOKEEPER_FULL_IMAGE)"
+	@echo "  $(ZOOKEEPER_LATEST_IMAGE)"
+
+
+.PHONY: kafka_docker_build_push
+kafka_docker_build_push: kafka_docker_build kafka_docker_tag kafka_docker_push ## Build, tag, and push Kafka images to ACR
+	@echo ""
+	@echo "$(GREEN)$(BOLD)Kafka images built and pushed successfully!$(RESET)"
+
+
+.PHONY: docker_build_all
+docker_build_all: docker_build_push kafka_docker_build_push ## Build and push all Docker images (consumers + Kafka)
+	@echo ""
+	@echo "$(GREEN)$(BOLD)All Docker images built and pushed successfully!$(RESET)"
