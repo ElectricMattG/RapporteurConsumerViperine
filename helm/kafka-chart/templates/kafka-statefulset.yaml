@@ -1,0 +1,136 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ include "kafka.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "kafka.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ include "kafka.fullname" . }}-headless
+  replicas: {{ .Values.kafka.replicas }}
+  selector:
+    matchLabels:
+      {{- include "kafka.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "kafka.selectorLabels" . | nindent 8 }}
+    spec:
+      enableServiceLinks: false  # Prevent K8s from auto-injecting KAFKA_PORT env var
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      serviceAccountName: {{ include "kafka.serviceAccountName" . }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      initContainers:
+      - name: cleanup-lost-found
+        image: busybox:latest
+        command:
+        - sh
+        - -c
+        - |
+          echo "Cleaning up lost+found directory..."
+          rm -rf /var/lib/kafka/data/lost+found
+          echo "Cleanup complete"
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+        securityContext:
+          runAsUser: 0  # Need root to delete lost+found
+      containers:
+      - name: kafka
+        image: {{ .Values.image.registry }}/{{ .Values.image.kafka.repository }}:{{ .Values.image.kafka.tag }}
+        imagePullPolicy: {{ .Values.image.kafka.pullPolicy }}
+        ports:
+        - containerPort: 9092
+          name: plaintext
+        - containerPort: 9093
+          name: controller
+        env:
+          # --- KRaft Configuration ---
+          - name: KAFKA_PROCESS_ROLES
+            value: "broker,controller"
+          - name: KAFKA_NODE_ID
+            value: "1"
+          - name: KAFKA_CLUSTER_ID
+            value: "MkU3OEVBNTcwNTJENDM2Qk"
+          - name: CLUSTER_ID
+            value: "MkU3OEVBNTcwNTJENDM2Qk"
+          - name: KAFKA_CONTROLLER_QUORUM_VOTERS
+            value: "1@{{ include "kafka.fullname" . }}-0.{{ include "kafka.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:9093"
+          # --- Listener Configuration ---
+          - name: KAFKA_CONTROLLER_LISTENER_NAMES
+            value: "CONTROLLER"
+          - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
+            value: "PLAINTEXT:PLAINTEXT,CONTROLLER:PLAINTEXT"
+          - name: KAFKA_LISTENERS
+            value: "PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093"
+          - name: KAFKA_ADVERTISED_LISTENERS
+            value: "PLAINTEXT://{{ include "kafka.fullname" . }}-0.{{ include "kafka.fullname" . }}-headless.{{ .Release.Namespace }}.svc.cluster.local:9092"
+          # --- Storage ---
+          - name: KAFKA_LOG_DIRS
+            value: "/var/lib/kafka/data"
+          # --- Additional Configuration ---
+          - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
+            value: {{ .Values.kafka.config.offsetsTopicReplicationFactor | quote }}
+          - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
+            value: {{ .Values.kafka.config.transactionStateLogMinIsr | quote }}
+          - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
+            value: {{ .Values.kafka.config.transactionStateLogReplicationFactor | quote }}
+          - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
+            value: {{ .Values.kafka.config.autoCreateTopicsEnable | quote }}
+          - name: KAFKA_LOG_RETENTION_HOURS
+            value: {{ .Values.kafka.config.logRetentionHours | quote }}
+          - name: KAFKA_NUM_PARTITIONS
+            value: {{ .Values.kafka.config.numPartitions | quote }}
+          - name: KAFKA_DEFAULT_REPLICATION_FACTOR
+            value: {{ .Values.kafka.config.defaultReplicationFactor | quote }}
+        volumeMounts:
+        - name: kafka-data
+          mountPath: /var/lib/kafka/data
+        resources:
+          {{- toYaml .Values.kafka.resources | nindent 10 }}
+        {{- if .Values.livenessProbe.kafka.enabled }}
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - kafka-broker-api-versions --bootstrap-server localhost:9092
+          initialDelaySeconds: {{ .Values.livenessProbe.kafka.initialDelaySeconds }}
+          periodSeconds: {{ .Values.livenessProbe.kafka.periodSeconds }}
+          timeoutSeconds: {{ .Values.livenessProbe.kafka.timeoutSeconds }}
+          failureThreshold: {{ .Values.livenessProbe.kafka.failureThreshold }}
+        {{- end }}
+        {{- if .Values.readinessProbe.kafka.enabled }}
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - kafka-broker-api-versions --bootstrap-server localhost:9092
+          initialDelaySeconds: {{ .Values.readinessProbe.kafka.initialDelaySeconds }}
+          periodSeconds: {{ .Values.readinessProbe.kafka.periodSeconds }}
+          timeoutSeconds: {{ .Values.readinessProbe.kafka.timeoutSeconds }}
+          failureThreshold: {{ .Values.readinessProbe.kafka.failureThreshold }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  volumeClaimTemplates:
+  - metadata:
+      name: kafka-data
+    spec:
+      accessModes:
+        - {{ .Values.kafka.persistence.accessMode }}
+      storageClassName: {{ .Values.kafka.persistence.storageClass }}
+      resources:
+        requests:
+          storage: {{ .Values.kafka.persistence.size }}

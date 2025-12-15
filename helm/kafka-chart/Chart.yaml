@@ -1,0 +1,13 @@
+apiVersion: v2
+name: kafka
+description: Kafka with ZooKeeper sidecar for Research Indexing Consumers pipeline
+type: application
+version: 1.0.0
+appVersion: "7.5.0"
+keywords:
+  - kafka
+  - zookeeper
+  - messaging
+  - streaming
+maintainers:
+  - name: Scrape Pipeline Team
