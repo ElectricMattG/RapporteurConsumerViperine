@@ -65,7 +65,13 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 from confluent_kafka import Consumer, KafkaError, Producer
-from sentence_transformers import SentenceTransformer
+
+# Import embedding client instead of sentence_transformers
+try:
+    from ..clients.embedding_client import EmbeddingServiceClient
+except ImportError:
+    sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from clients.embedding_client import EmbeddingServiceClient
 
 # Import components
 try:
@@ -91,8 +97,8 @@ class KafkaQAEmbedderConsumer(Base):
         self.producer = None
         self.running = False
 
-        # Initialize embedding model
-        self.embedding_model = None
+        # Initialize embedding client
+        self.embedding_client = None
         self.embedding_dimension = None
 
         # Setup signal handlers for graceful shutdown
@@ -202,14 +208,15 @@ class KafkaQAEmbedderConsumer(Base):
             self._logger.error(f"❌ Error publishing to DLQ: {e}")
 
     def _init_embedding_model(self):
-        """Initialize sentence transformer embedding model"""
+        """Initialize embedding service client"""
         try:
-            self._logger.info(f"🤖 Loading embedding model: {self.model_name}")
-            self.embedding_model = SentenceTransformer(self.model_name)
-            self.embedding_dimension = self.embedding_model.get_sentence_embedding_dimension()
-            self._logger.info(f"✅ Model loaded (dimension: {self.embedding_dimension})")
+            self._logger.info(f"🤖 Initializing embedding service client")
+            self.embedding_client = EmbeddingServiceClient()
+            # Embedding dimension will be determined from first response
+            self.embedding_dimension = 384  # Default dimension
+            self._logger.info(f"✅ Embedding client initialized")
         except Exception as e:
-            self._logger.error(f"❌ Error loading embedding model: {e}")
+            self._logger.error(f"❌ Error initializing embedding client: {e}")
             raise
 
     def _load_qa_pairs(self, qa_file: str) -> List[Dict[str, Any]]:
@@ -255,13 +262,13 @@ class KafkaQAEmbedderConsumer(Base):
         """
         return f"{question.strip()}{self.separator}{answer.strip()}"
 
-    def _generate_embeddings(
+    async def _generate_embeddings(
         self,
         qa_pairs: List[Dict[str, Any]],
         mode: str = 'all'
     ) -> List[Dict[str, Any]]:
         """
-        Generate embeddings for Q&A pairs.
+        Generate embeddings for Q&A pairs using embedding service.
 
         Args:
             qa_pairs: List of Q&A pair dictionaries
@@ -286,40 +293,48 @@ class KafkaQAEmbedderConsumer(Base):
             answers.append(answer)
             combined_texts.append(self._create_combined_text(question, answer))
 
-        # Generate embeddings based on mode
+        # Generate embeddings based on mode using embedding client
         question_embeddings = None
         answer_embeddings = None
         combined_embeddings = None
 
         if mode in ['question', 'all']:
             self._logger.info(f"   → Encoding {len(questions)} questions...")
-            question_embeddings = self.embedding_model.encode(
+            question_embeddings_array = await self.embedding_client.embed(
                 questions,
                 batch_size=self.batch_size,
-                convert_to_numpy=True,
-                show_progress_bar=False
+                show_progress=False
             )
+            question_embeddings = question_embeddings_array  # Already numpy array
             self._logger.info(f"   ✓ Question embeddings: {question_embeddings.shape}")
 
         if mode in ['answer', 'all']:
             self._logger.info(f"   → Encoding {len(answers)} answers...")
-            answer_embeddings = self.embedding_model.encode(
+            answer_embeddings_array = await self.embedding_client.embed(
                 answers,
                 batch_size=self.batch_size,
-                convert_to_numpy=True,
-                show_progress_bar=False
+                show_progress=False
             )
+            answer_embeddings = answer_embeddings_array
             self._logger.info(f"   ✓ Answer embeddings: {answer_embeddings.shape}")
 
         if mode in ['combined', 'all']:
             self._logger.info(f"   → Encoding {len(combined_texts)} combined texts...")
-            combined_embeddings = self.embedding_model.encode(
+            combined_embeddings_array = await self.embedding_client.embed(
                 combined_texts,
                 batch_size=self.batch_size,
-                convert_to_numpy=True,
-                show_progress_bar=False
+                show_progress=False
             )
+            combined_embeddings = combined_embeddings_array
             self._logger.info(f"   ✓ Combined embeddings: {combined_embeddings.shape}")
+
+        # Update embedding dimension from first response
+        if question_embeddings is not None:
+            self.embedding_dimension = question_embeddings.shape[1]
+        elif answer_embeddings is not None:
+            self.embedding_dimension = answer_embeddings.shape[1]
+        elif combined_embeddings is not None:
+            self.embedding_dimension = combined_embeddings.shape[1]
 
         # Create enriched Q&A pairs
         enriched_pairs = []
@@ -473,7 +488,7 @@ class KafkaQAEmbedderConsumer(Base):
 
         return summary
 
-    def _process_message(self, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    async def _process_message(self, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """
         Process a single message to generate Q&A pair embeddings.
 
@@ -510,8 +525,8 @@ class KafkaQAEmbedderConsumer(Base):
             if not qa_pairs:
                 raise ValueError("No Q&A pairs found in file")
 
-            # Generate embeddings
-            enriched_pairs = self._generate_embeddings(qa_pairs, mode=self.embedding_mode)
+            # Generate embeddings (async)
+            enriched_pairs = await self._generate_embeddings(qa_pairs, mode=self.embedding_mode)
 
             # Determine output directory (same as Q&A pairs file)
             qa_path = Path(qa_pairs_file)
@@ -557,8 +572,8 @@ class KafkaQAEmbedderConsumer(Base):
     async def consume_messages(self):
         """Main consumer loop"""
         try:
-            # Initialize embedding model
-            if not self.embedding_model:
+            # Initialize embedding client
+            if not self.embedding_client:
                 self._init_embedding_model()
 
             # Create Kafka consumer
@@ -587,8 +602,8 @@ class KafkaQAEmbedderConsumer(Base):
                     # Parse message
                     message_data = json.loads(msg.value().decode('utf-8'))
 
-                    # Process message
-                    result = self._process_message(message_data)
+                    # Process message (async)
+                    result = await self._process_message(message_data)
 
                     # Publish result to output topic if configured
                     if result and self.output_topic:
