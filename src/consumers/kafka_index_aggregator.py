@@ -954,30 +954,33 @@ class KafkaIndexAggregatorConsumer(Base):
                 if not request_dir.exists():
                     continue
 
-                for file_path in request_dir.glob('*.jsonl'):
-                    # Mirror local structure: cache/web_scrapes/{request_id}/{filename}
-                    # becomes: {session_id}/{request_id}/{filename}
-                    blob_name = f"{session_id}/{request_id}/{file_path.name}"
+                # Upload all relevant files: .jsonl, .json, .md
+                file_patterns = ['*.jsonl', '*.json', '*.md']
+                for pattern in file_patterns:
+                    for file_path in request_dir.glob(pattern):
+                        # Mirror local structure: cache/web_scrapes/{request_id}/{filename}
+                        # becomes: {session_id}/{request_id}/{filename}
+                        blob_name = f"{session_id}/{request_id}/{file_path.name}"
 
-                    # Retry logic
-                    max_retries = 3
-                    for attempt in range(max_retries):
-                        try:
-                            blob_client = self.blob_service_client.get_blob_client(
-                                container="archive",
-                                blob=blob_name
-                            )
-                            with open(file_path, 'rb') as f:
-                                blob_client.upload_blob(f, overwrite=True, timeout=300)
-                            archive_count += 1
-                            break
-                        except Exception as upload_error:
-                            if attempt < max_retries - 1:
-                                wait_time = 2 ** attempt
-                                self._logger.warning(f"   ⚠️  Upload failed (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s: {file_path.name}")
-                                time.sleep(wait_time)
-                            else:
-                                self._logger.error(f"   ❌ Failed to upload {file_path.name} after {max_retries} attempts: {upload_error}")
+                        # Retry logic
+                        max_retries = 3
+                        for attempt in range(max_retries):
+                            try:
+                                blob_client = self.blob_service_client.get_blob_client(
+                                    container="archive",
+                                    blob=blob_name
+                                )
+                                with open(file_path, 'rb') as f:
+                                    blob_client.upload_blob(f, overwrite=True, timeout=300)
+                                archive_count += 1
+                                break
+                            except Exception as upload_error:
+                                if attempt < max_retries - 1:
+                                    wait_time = 2 ** attempt
+                                    self._logger.warning(f"   ⚠️  Upload failed (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s: {file_path.name}")
+                                    time.sleep(wait_time)
+                                else:
+                                    self._logger.error(f"   ❌ Failed to upload {file_path.name} after {max_retries} attempts: {upload_error}")
 
             self._logger.info(f"   ✅ Archived {archive_count} files to archive/{session_id}")
             self._logger.info(f"☁️  Upload complete - {backup_count} backups, {archive_count} archived files")

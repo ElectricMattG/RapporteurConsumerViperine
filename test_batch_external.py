@@ -187,7 +187,7 @@ def main():
 
     # RAG response from user (October 21-28, 2023)
     rag_response = {
-        "session_id": f"external_test_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+        "session_id": f"external_test_updated_ii_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "request_id": "external_e2e_test_001",
         "query": "Get the news from the Israeli PM office 21 October 2023 - 28 October 2023 include any YouTube video from Israeli PM",
         "answer_preview": "## News from the Israeli Prime Minister's Office (October 21-28, 2023)\n\nDuring the week of October 21 to October 28, 2023...",

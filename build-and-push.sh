@@ -59,7 +59,7 @@ print_info "Step 4/4: Deploying with Helm..."
 # Force pods to restart by setting a timestamp annotation
 TIMESTAMP=$(date +%s)
 helm upgrade research-indexing-consumers ./helm/research-indexing-consumers -n consumers \
-    --set podAnnotations.deployedAt="$TIMESTAMP" \
+    --set-string podAnnotations.deployedAt="$TIMESTAMP" \
     --wait
 
 print_status "Helm deployment updated successfully"
