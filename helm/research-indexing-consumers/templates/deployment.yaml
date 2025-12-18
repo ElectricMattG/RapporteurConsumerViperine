@@ -18,6 +18,10 @@ spec:
       labels:
         app: {{ $name | kebabcase }}
         component: kafka-consumer
+      {{- if $.Values.podAnnotations }}
+      annotations:
+        {{- toYaml $.Values.podAnnotations | nindent 8 }}
+      {{- end }}
     spec:
       imagePullSecrets:
       - name: acr-secret

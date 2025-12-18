@@ -19,10 +19,24 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install runtime dependencies
+# Install runtime dependencies including Playwright dependencies
 RUN apt-get update && apt-get install -y \
     librdkafka1 \
     curl \
+    wget \
+    libnss3 \
+    libnspr4 \
+    libatk1.0-0 \
+    libatk-bridge2.0-0 \
+    libcups2 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxrandr2 \
+    libgbm1 \
+    libasound2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy Python dependencies from builder
@@ -37,6 +51,10 @@ COPY version .
 # Make sure scripts are in PATH
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
+
+# Install Playwright browsers
+RUN playwright install chromium && \
+    playwright install-deps chromium
 
 # Create cache directories
 RUN mkdir -p /app/cache/web_scrapes /app/cache/session_backups /app/cache/archive /app/cache/indices

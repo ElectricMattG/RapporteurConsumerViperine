@@ -56,7 +56,11 @@ print_status "Image pushed successfully"
 # Step 4: Deploy with Helm
 print_info "Step 4/4: Deploying with Helm..."
 
-helm upgrade research-indexing-consumers ./helm/research-indexing-consumers -n consumers
+# Force pods to restart by setting a timestamp annotation
+TIMESTAMP=$(date +%s)
+helm upgrade research-indexing-consumers ./helm/research-indexing-consumers -n consumers \
+    --set podAnnotations.deployedAt="$TIMESTAMP" \
+    --wait
 
 print_status "Helm deployment updated successfully"
 
