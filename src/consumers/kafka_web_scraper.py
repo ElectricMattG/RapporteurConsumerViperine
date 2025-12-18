@@ -217,9 +217,21 @@ class KafkaWebScraperConsumer(Base):
     def _create_consumer(self):
         """Create and configure Kafka consumer and producer"""
         try:
+            from confluent_kafka import TopicPartition
+
             self.consumer = Consumer(self.kafka_config)
-            self.consumer.subscribe([self.input_topic])
-            self._logger.info(f"✅ Subscribed to topic: {self.input_topic}")
+
+            # Use manual partition assignment instead of consumer group
+            # Get topic metadata to discover partitions
+            cluster_metadata = self.consumer.list_topics(self.input_topic, timeout=10)
+            topic_metadata = cluster_metadata.topics.get(self.input_topic)
+
+            if topic_metadata:
+                partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
+                self.consumer.assign(partitions)
+                self._logger.info(f"✅ Manually assigned {len(partitions)} partitions for topic: {self.input_topic}")
+            else:
+                raise Exception(f"Topic {self.input_topic} not found")
 
             # Create producer for publishing to output topic
             producer_config = {
@@ -1768,15 +1780,26 @@ class KafkaWebScraperConsumer(Base):
             self._shutdown()
 
     async def _consume_loop(self):
-        """Main message consumption loop"""
+        """Main message consumption loop with async processing"""
         self._logger.info("🔄 Starting message consumption loop...")
+        poll_count = 0
+
+        # Get event loop for running sync operations
+        loop = asyncio.get_event_loop()
 
         while self.running:
             try:
-                # Poll for messages
-                msg = self.consumer.poll(timeout=1.0)
+                poll_count += 1
+                if poll_count % 10 == 0:
+                    self._logger.debug(f"📊 Poll count: {poll_count}, still running...")
+
+                # Poll in executor to not block the event loop
+                # confluent_kafka poll() is synchronous, so run it in thread pool
+                msg = await loop.run_in_executor(None, self.consumer.poll, 1.0)
 
                 if msg is None:
+                    if poll_count <= 5:
+                        self._logger.debug(f"Poll {poll_count}: No message (expected during startup)")
                     continue
 
                 if msg.error():
@@ -1790,7 +1813,7 @@ class KafkaWebScraperConsumer(Base):
                 try:
                     message_data = json.loads(msg.value().decode('utf-8'))
 
-                    # Process message asynchronously
+                    # Process message asynchronously (truly async now)
                     result = await self._process_message(message_data)
 
                     if result['success']:

@@ -2,9 +2,6 @@ fastapi
 uvicorn
 pyconfs
 requests # tutorial
-transformers # tutorial
-ipykernel
-ipywidgets
 pyopenssl
 pyarrow
 starlette
@@ -12,7 +9,6 @@ pillow
 fastapi
 cryptography
 aiohttp
-tokenizers
 # Kafka dependencies
 confluent-kafka
 # Additional dependencies for URL resolution and scraping
@@ -26,7 +22,9 @@ pypdf2  # PDF text extraction
 google-generativeai
 google-genai
 openai  # OpenAI API client
-sentence-transformers
+
 youtube-transcript-api
 playwright  # JavaScript rendering for hard-to-scrape sites
 cloudscraper  # Cloudflare bypass
+# Azure Storage
+azure-storage-blob

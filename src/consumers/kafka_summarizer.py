@@ -130,9 +130,21 @@ class KafkaSummarizerConsumer(Base):
     def _create_consumer(self):
         """Create and configure Kafka consumer and producer"""
         try:
+            from confluent_kafka import TopicPartition
+
             self.consumer = Consumer(self.kafka_config)
-            self.consumer.subscribe([self.input_topic])
-            self._logger.info(f"✅ Subscribed to topic: {self.input_topic}")
+
+            # Manual partition assignment to bypass consumer group coordinator
+            cluster_metadata = self.consumer.list_topics(self.input_topic, timeout=10)
+            topic_metadata = cluster_metadata.topics.get(self.input_topic)
+
+            if topic_metadata:
+                partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
+                self.consumer.assign(partitions)
+                self._logger.info(f"✅ Manually assigned {len(partitions)} partitions for topic: {self.input_topic}")
+            else:
+                self._logger.error(f"❌ Topic {self.input_topic} not found")
+                raise RuntimeError(f"Topic {self.input_topic} not found")
 
             # Create producer for publishing summary content back to content-extracted
             producer_config = {

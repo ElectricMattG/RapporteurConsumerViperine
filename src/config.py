@@ -288,7 +288,7 @@ defaults = {
         "model": "gpt-4o",  # Model to use for generation
         "model_name": "gpt-4o",  # Specific model name for citation research (faster than gpt-5.1)
         "timeout": 180,  # Request timeout in seconds
-        "max_tokens": 16000,  # Maximum tokens in response (includes reasoning + output)
+        "max_tokens": 32000,  # Maximum tokens in response (increased to prevent truncation)
         "temperature": 0.7,  # Temperature for generation
         "reasoning_effort": "medium",  # Reasoning effort: low, medium, high
         "verbosity": "medium",  # Verbosity level: low, medium, high

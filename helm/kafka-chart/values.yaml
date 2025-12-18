@@ -5,7 +5,7 @@ image:
   registry: ragserviceneacr6881.azurecr.io
   kafka:
     repository: kafka
-    tag: "8.0.0"
+    tag: "7.5.0"
     pullPolicy: Always
 
 imagePullSecrets: []
@@ -28,6 +28,16 @@ kafka:
     logSegmentBytes: 1073741824  # 1GB
     numPartitions: 12
     defaultReplicationFactor: 1  # Single replica
+
+  # External access configuration (mirrors local PLAINTEXT_HOST listener)
+  external:
+    enabled: true
+    service:
+      type: LoadBalancer  # Or NodePort for testing
+      port: 9094  # External port (analogous to localhost:9092 in local)
+      # nodePort: 30094  # Uncomment if using NodePort
+      loadBalancerIP: ""  # Leave empty for dynamic IP
+      annotations: {}
 
   # Resource limits (adjusted for kafkapool: 2 cores, ~6GB allocatable)
   resources:
@@ -150,3 +160,31 @@ readinessProbe:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 6
+
+# Ingress configuration for external access
+ingress:
+  enabled: true
+  className: nginx  # Use nginx ingress controller
+  host: kafka.rappoteur.ai
+  # External IP for Kafka advertised listeners (NGINX Ingress Controller IP)
+  externalIP: "4.207.24.92"  # NGINX Ingress Controller LoadBalancer IP
+
+  # TLS configuration
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-prod  # cert-manager cluster issuer
+
+  # Authentication configuration
+  auth:
+    enabled: true
+    secretName: kafka-basic-auth
+    createSecret: true
+    # htpasswd format: username:password_hash
+    # Generate with: htpasswd -nb username password
+    # Default: kafka:kafka123 (CHANGE THIS IN PRODUCTION!)
+    htpasswd: "kafka:$apr1$H6uskkkW$IgXLP6ewTrSuBkTrqE8wj/"  # kafka:kafka123
+
+  # Additional annotations
+  annotations:
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"

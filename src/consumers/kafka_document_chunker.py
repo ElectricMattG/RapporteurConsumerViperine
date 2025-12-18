@@ -10,6 +10,7 @@ and saves chunked documents to cache.
 import asyncio
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -39,7 +40,7 @@ class KafkaDocumentChunkerConsumer(Base):
         self._logger.info("Initializing KafkaDocumentChunkerConsumer")
 
         # Get configuration
-        bootstrap_servers = self._app_config.get('kafka.bootstrap_servers') or 'localhost:9092'
+        bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS') or self._app_config.get('kafka.bootstrap_servers') or 'localhost:9092'
         consumer_group_id = self._app_config.get('chunker.consumer_group_id') or 'document-chunker-consumer'
         input_topic = self._app_config.get('chunker.input_topic') or 'content-extracted'
         self.output_topic = self._app_config.get('chunker.output_topic') or 'citation-extraction'
@@ -56,6 +57,9 @@ class KafkaDocumentChunkerConsumer(Base):
         self._logger.info(f"   Max chunk words: {max_chunk_words}")
 
         # Initialize Kafka consumer
+        # Initialize Kafka consumer with manual partition assignment
+        from confluent_kafka import TopicPartition
+
         self.consumer = Consumer({
             'bootstrap.servers': bootstrap_servers,
             'group.id': consumer_group_id,
@@ -68,9 +72,16 @@ class KafkaDocumentChunkerConsumer(Base):
             'bootstrap.servers': bootstrap_servers
         })
 
-        # Subscribe to topic
-        self.consumer.subscribe([input_topic])
-        self._logger.info(f"📡 Subscribed to topic: {input_topic}")
+        # Use manual partition assignment instead of consumer group subscription
+        cluster_metadata = self.consumer.list_topics(input_topic, timeout=10)
+        topic_metadata = cluster_metadata.topics.get(input_topic)
+
+        if topic_metadata:
+            partitions = [TopicPartition(input_topic, p) for p in topic_metadata.partitions.keys()]
+            self.consumer.assign(partitions)
+            self._logger.info(f"📡 Manually assigned {len(partitions)} partitions for topic: {input_topic}")
+        else:
+            raise Exception(f"Topic {input_topic} not found")
 
         # Initialize document chunker
         self.cache_dir = Path(cache_dir)

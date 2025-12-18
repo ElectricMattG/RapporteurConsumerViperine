@@ -145,3 +145,12 @@ dev
 cache/
 
 logs/
+k8s/00-namespace.yaml
+k8s/01-strimzi-kafka-cluster.yaml
+k8s/02-kafka-topics.yaml
+k8s/03-configmap.yaml
+k8s/04-secrets.yaml
+k8s/05-consumer-deployments.yaml
+k8s/06-keda-scalers.yaml
+k8s/kafka-kraft-direct.yaml
+k8s/README.md

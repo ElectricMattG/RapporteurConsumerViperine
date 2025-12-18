@@ -268,8 +268,9 @@ class EmbeddingServiceClient(Base):
             return embeddings
 
         # Otherwise, split into chunks and process in batches
+        num_chunks = (total_texts + MAX_TEXTS_PER_REQUEST - 1) // MAX_TEXTS_PER_REQUEST
+
         if show_progress:
-            num_chunks = (total_texts + MAX_TEXTS_PER_REQUEST - 1) // MAX_TEXTS_PER_REQUEST
             self._logger.info(
                 f"Splitting into {num_chunks} chunks of max {MAX_TEXTS_PER_REQUEST} texts"
             )
