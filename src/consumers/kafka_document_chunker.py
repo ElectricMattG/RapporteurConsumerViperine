@@ -268,8 +268,8 @@ class KafkaDocumentChunkerConsumer(Base):
 
                 self._logger.info(f"   💾 Chunks saved to: {chunks_file}")
 
-                # Save chunk statistics
-                stats_file = output_dir / 'chunk_stats.json'
+                # Save chunk statistics as JSONL
+                stats_file = output_dir / 'chunk_stats.jsonl'
 
                 # Calculate stats handling both Chunk objects and dicts
                 if chunks and hasattr(chunks[0], 'chunk_metadata'):
@@ -298,7 +298,7 @@ class KafkaDocumentChunkerConsumer(Base):
                 }
 
                 with open(stats_file, 'w', encoding='utf-8') as f:
-                    json.dump(stats, f, indent=2, ensure_ascii=False)
+                    f.write(json.dumps(stats, ensure_ascii=False) + '\n')
 
                 self._logger.info(f"   📊 Statistics saved to: {stats_file}")
                 self._logger.debug(f"   📈 Chunk type distribution: {stats['chunk_types']}")

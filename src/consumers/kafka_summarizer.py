@@ -229,23 +229,15 @@ class KafkaSummarizerConsumer(Base):
             self._logger.info(f"   ✅ Summary generated successfully")
             self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
 
-            # Save summary to cache
-            summary_file = request_dir / "summary.json"
+            # Save summary to cache as JSONL
+            summary_file = request_dir / "summary.jsonl"
             with open(summary_file, 'w', encoding='utf-8') as f:
-                json.dump(summary_result, f, ensure_ascii=False, indent=2)
+                f.write(json.dumps(summary_result, ensure_ascii=False) + '\n')
 
             self._logger.info(f"   💾 Summary saved to: {summary_file}")
 
-            # Also save just the markdown summary for easy access
-            markdown_file = request_dir / "summary.md"
-            with open(markdown_file, 'w', encoding='utf-8') as f:
-                f.write(summary_result.get('markdown_summary', ''))
-
-            self._logger.info(f"   📄 Markdown saved to: {markdown_file}")
-
             result['success'] = True
             result['summary_file'] = str(summary_file)
-            result['markdown_file'] = str(markdown_file)
 
             # CONTINGENCY: If extraction failed (403/404) but summary succeeded,
             # publish the summary content to content-extracted topic for chunking
