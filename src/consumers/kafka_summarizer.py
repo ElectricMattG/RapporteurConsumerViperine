@@ -31,11 +31,31 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Import components
 try:
@@ -66,6 +86,77 @@ class KafkaSummarizerConsumer(Base):
             llm_provider=llm_provider,
             web_searcher=None  # Summarizer doesn't need web search
         )
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"summarizer_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8006,
+                consumer_name='summarizer',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # Summarizer-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.documents_summarized = Counter(
+                'kafka_consumer_documents_summarized_total',
+                'Total documents successfully summarized',
+                ['consumer_id']
+            )
+
+            self.summarization_duration = Histogram(
+                'kafka_consumer_summarization_duration_seconds',
+                'Time spent generating summaries',
+                ['consumer_id', 'status'],
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+            )
+
+            self.llm_api_calls = Counter(
+                'kafka_consumer_llm_api_calls_total',
+                'Total LLM API calls made',
+                ['consumer_id', 'provider']
+            )
+
+            self.llm_api_errors = Counter(
+                'kafka_consumer_llm_api_errors_total',
+                'Total LLM API errors',
+                ['consumer_id', 'error_type']
+            )
+
+            self.llm_tokens_used = Counter(
+                'kafka_consumer_llm_tokens_used_total',
+                'Total LLM tokens consumed',
+                ['consumer_id', 'provider']
+            )
+
+            self.summary_length = Histogram(
+                'kafka_consumer_summary_length_chars',
+                'Summary length in characters',
+                ['consumer_id'],
+                buckets=[100, 500, 1000, 2000, 5000, 10000, 20000, 50000]
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8006")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Initialize Kafka consumer
         self.consumer = None
@@ -197,12 +288,23 @@ class KafkaSummarizerConsumer(Base):
         request_dir = self.cache_dir / request_id
         request_dir.mkdir(parents=True, exist_ok=True)
 
+        # Track summarization start time
+        summarization_start = time.time() if self.telemetry_enabled else None
+
         try:
             # Generate summary using LLM
             if extraction_failed:
                 self._logger.info("🌐 Generating summary from URL using Gemini web grounding...")
             else:
                 self._logger.info("🤖 Generating summary from extracted content...")
+
+            # Track LLM API call
+            if self.telemetry_enabled:
+                llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
+                self.llm_api_calls.labels(
+                    consumer_id=f"summarizer_{os.getpid()}",
+                    provider=llm_provider
+                ).inc()
 
             # Create a citation-like prompt from the content
             title = metadata.get('title', 'Untitled')
@@ -228,6 +330,37 @@ class KafkaSummarizerConsumer(Base):
 
             self._logger.info(f"   ✅ Summary generated successfully")
             self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
+
+            # Track successful summarization metrics
+            if self.telemetry_enabled and summarization_start:
+                summarization_duration = time.time() - summarization_start
+                consumer_id_label = f"summarizer_{os.getpid()}"
+                llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
+
+                # Record summarization duration
+                self.summarization_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='success'
+                ).observe(summarization_duration)
+
+                # Increment documents summarized
+                self.documents_summarized.labels(
+                    consumer_id=consumer_id_label
+                ).inc()
+
+                # Track summary length
+                summary_text = summary_result.get('markdown_summary', '')
+                self.summary_length.labels(
+                    consumer_id=consumer_id_label
+                ).observe(len(summary_text))
+
+                # Track token usage if available in summary_result
+                tokens_used = summary_result.get('tokens_used', 0)
+                if tokens_used > 0:
+                    self.llm_tokens_used.labels(
+                        consumer_id=consumer_id_label,
+                        provider=llm_provider
+                    ).inc(tokens_used)
 
             # Save summary to cache as JSONL
             summary_file = request_dir / "summary.jsonl"
@@ -260,6 +393,24 @@ class KafkaSummarizerConsumer(Base):
             self._logger.error(f"❌ Error generating summary: {e}")
             import traceback
             self._logger.error(traceback.format_exc())
+
+            # Track failed summarization metrics
+            if self.telemetry_enabled and summarization_start:
+                summarization_duration = time.time() - summarization_start
+                consumer_id_label = f"summarizer_{os.getpid()}"
+
+                # Record failed summarization duration
+                self.summarization_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='failure'
+                ).observe(summarization_duration)
+
+                # Track API error type
+                error_type = type(e).__name__
+                self.llm_api_errors.labels(
+                    consumer_id=consumer_id_label,
+                    error_type=error_type
+                ).inc()
 
         self._logger.info("=" * 80)
         return result
@@ -360,10 +511,17 @@ class KafkaSummarizerConsumer(Base):
             import traceback
             self._logger.error(traceback.format_exc())
 
+            # Track DLQ metric for failed publish
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter(self.output_topic, 'publish_failed')
+
     def _delivery_callback(self, err, msg):
         """Callback for Kafka producer delivery reports"""
         if err:
             self._logger.error(f"❌ Message delivery failed: {err}")
+            # Track delivery failure
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter(self.output_topic if hasattr(self, 'output_topic') else 'unknown', 'delivery_failed')
         else:
             self._logger.debug(f"✅ Message delivered to {msg.topic()} [{msg.partition()}]")
 
@@ -388,11 +546,25 @@ class KafkaSummarizerConsumer(Base):
         """Main message consumption loop with batch concurrency"""
         self._logger.info("🔄 Starting message consumption loop with CONCURRENT processing...")
 
+        # Start telemetry services if available
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("📊 Starting telemetry services...")
+                self.system_metrics.start()
+                self.metrics_server.start()
+                self.metrics.set_state(1)  # Set state to running
+                self._logger.info("✅ Telemetry services started")
+            except Exception as e:
+                self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
         batch_size = 10  # Process up to 10 summaries concurrently
         pending_tasks = []
 
         while self.running:
             try:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 # Collect batch of messages
                 messages = []
                 for _ in range(batch_size):
@@ -401,7 +573,19 @@ class KafkaSummarizerConsumer(Base):
                         messages.append(msg)
                     elif msg and msg.error():
                         if msg.error().code() != KafkaError._PARTITION_EOF:
+                            # Track connection errors
+                            if self.telemetry_enabled:
+                                self.metrics.increment_connection_errors(str(msg.error().code()))
                             raise KafkaException(msg.error())
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        len(messages)
+                    )
 
                 if not messages:
                     # Wait a bit before next poll
@@ -414,32 +598,101 @@ class KafkaSummarizerConsumer(Base):
                 tasks = []
                 for msg in messages:
                     try:
+                        # Track message age
+                        if self.telemetry_enabled:
+                            timestamp_type, timestamp_ms = msg.timestamp()
+                            # timestamp_type: 0=CreateTime, 1=LogAppendTime, -1=NotAvailable
+                            if timestamp_type != -1 and timestamp_ms > 0:
+                                message_timestamp = timestamp_ms / 1000.0
+                                self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                        # Calculate consumer lag
+                        if self.telemetry_enabled:
+                            try:
+                                from confluent_kafka import TopicPartition
+                                topic = msg.topic()
+                                partition = msg.partition()
+                                current_offset = msg.offset()
+
+                                # Get high water mark (latest offset)
+                                tp = TopicPartition(topic, partition)
+                                _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                                lag_messages = high_water_mark - current_offset - 1
+                                if lag_messages > 0:
+                                    # Estimate lag time (very rough, assumes 10 msg/sec processing rate)
+                                    lag_seconds = lag_messages / 10.0
+                                    self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                            except Exception as e:
+                                self._logger.debug(f"Could not calculate lag: {e}")
+
                         message_data = json.loads(msg.value().decode('utf-8'))
+
+                        # Increment messages consumed
+                        if self.telemetry_enabled:
+                            self.metrics.increment_messages_consumed(self.input_topic)
+                            self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
                         tasks.append(self._process_message(message_data))
+
                     except json.JSONDecodeError as e:
                         self._logger.error(f"❌ Invalid JSON in message: {e}")
+                        if self.telemetry_enabled:
+                            self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
 
                 # Execute all summaries concurrently
                 if tasks:
+                    # Track processing start time
+                    processing_start = time.time() if self.telemetry_enabled else None
+
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    # Log results
+                    # Log results and record metrics
                     success_count = 0
                     for result in results:
+                        # Decrement messages in flight
+                        if self.telemetry_enabled:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+
                         if isinstance(result, Exception):
                             self._logger.error(f"❌ Task exception: {result}")
+                            if self.telemetry_enabled:
+                                self.metrics.increment_failures(self.input_topic, 'task_exception')
                         elif result.get('success'):
                             success_count += 1
                             self._logger.info(f"✅ Successfully processed summary for request {result['request_id']}")
+
+                            # Record processing duration for success
+                            if self.telemetry_enabled and processing_start:
+                                duration = time.time() - processing_start
+                                self.metrics.record_duration(self.input_topic, duration, 'success')
                         else:
                             self._logger.warning(f"⚠️ Summary processing completed with errors: {result.get('error')}")
+                            if self.telemetry_enabled:
+                                self.metrics.increment_failures(self.input_topic, 'processing_error')
+                                if processing_start:
+                                    duration = time.time() - processing_start
+                                    self.metrics.record_duration(self.input_topic, duration, 'failure')
 
                     self._logger.info(f"📊 Batch complete: {success_count}/{len(tasks)} successful")
 
             except Exception as e:
                 self._logger.error(f"❌ Error in consume loop: {e}")
+                if self.telemetry_enabled:
+                    self.metrics.increment_connection_errors('consume_loop_error')
                 if not self.running:
                     break
+
+        # Shutdown telemetry on exit
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("🛑 Shutting down telemetry services...")
+                self.system_metrics.stop()
+                self.metrics_server.stop()
+                self.metrics.set_state(0)  # Set state to stopped
+                self._logger.info("✅ Telemetry services stopped")
+            except Exception as e:
+                self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
 
     def _shutdown(self):
         """Cleanup and shutdown"""
