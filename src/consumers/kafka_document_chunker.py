@@ -5,6 +5,18 @@ Kafka Document Chunker Consumer
 Consumes extracted web content from 'summarise-document' topic,
 chunks the content using DocumentChunkingUtility,
 and saves chunked documents to cache.
+
+TODO: TELEMETRY & OBSERVABILITY
+- [ ] Add Prometheus metrics (port 8002)
+- [ ] Track documents_chunked_total counter
+- [ ] Track chunks_created_total counter
+- [ ] Track chunking_duration_seconds histogram
+- [ ] Track cache_files_total gauge
+- [ ] Track cache_size_bytes gauge
+- [ ] Track messages_consumed_total counter
+- [ ] Track message_processing_duration_seconds histogram
+- [ ] Add structured JSON logging with trace_id
+- [ ] Expose /metrics endpoint on port 8002
 """
 
 import asyncio
@@ -12,10 +24,30 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, Producer
+
+# Telemetry imports
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError as e:
+    # Try relative import for direct execution
+    try:
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+        from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                    PrometheusMetrics, SystemMetricsCollector)
+        from src.monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
 
 # Add the src directory to the path
 src_dir = Path(__file__).parent.parent
@@ -107,6 +139,72 @@ class KafkaDocumentChunkerConsumer(Base):
         else:
             self.chunk_processor = None
             self._logger.info("   ⚠️  MarkdownChunkProcessor disabled")
+
+        # Initialize telemetry
+        self.input_topic = input_topic
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"document_chunker_{os.getpid()}"
+
+            # Configure structured logging
+            configure_logging(
+                format='json',
+                level=os.getenv('LOG_LEVEL', 'INFO'),
+                consumer_id=consumer_id
+            )
+
+            # Initialize Prometheus metrics
+            self.metrics = PrometheusMetrics(consumer_id=consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id=consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id=consumer_id)
+            self.metrics_server = MetricsServer(
+                port=8002,
+                consumer_name='document_chunker',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # Consumer-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.documents_chunked = Counter(
+                'kafka_consumer_documents_chunked_total',
+                'Total documents successfully chunked',
+                ['consumer_id']
+            )
+
+            self.chunks_created = Counter(
+                'kafka_consumer_chunks_created_total',
+                'Total chunks created from documents',
+                ['consumer_id']
+            )
+
+            self.chunking_duration = Histogram(
+                'kafka_consumer_chunking_duration_seconds',
+                'Time spent chunking documents',
+                ['consumer_id', 'status'],
+                buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
+            )
+
+            self.cache_files = Gauge(
+                'kafka_consumer_cache_files_total',
+                'Number of files in cache',
+                ['consumer_id']
+            )
+
+            self.cache_size_bytes = Gauge(
+                'kafka_consumer_cache_size_bytes',
+                'Total size of cache in bytes',
+                ['consumer_id']
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8002")
+        else:
+            self._logger.warning("⚠️ Telemetry not available - monitoring module not found")
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         self.running = True
 
@@ -227,12 +325,26 @@ class KafkaDocumentChunkerConsumer(Base):
 
             self._logger.info("🔪 Chunking document...")
 
+            # Track chunking duration
+            chunking_start = time.time()
+
             # Chunk the document
             result = self.chunker.chunk_single_document(url, cached_data)
+
+            chunking_duration = time.time() - chunking_start
 
             if result['status'] == 'success':
                 chunks = result['chunks']
                 self._logger.info(f"   ✅ Generated {len(chunks)} chunks")
+
+                # Track chunking metrics
+                if self.telemetry_enabled:
+                    self.documents_chunked.labels(consumer_id=f"document_chunker_{os.getpid()}").inc()
+                    self.chunks_created.labels(consumer_id=f"document_chunker_{os.getpid()}").inc(len(chunks))
+                    self.chunking_duration.labels(
+                        consumer_id=f"document_chunker_{os.getpid()}",
+                        status='success'
+                    ).observe(chunking_duration)
 
                 # Apply markdown chunk processor (filter noise and merge small chunks)
                 if self.process_markdown and self.chunk_processor:
@@ -328,12 +440,23 @@ class KafkaDocumentChunkerConsumer(Base):
                     self._logger.info(f"   📤 Published chunked document message to {self.output_topic}")
                 except Exception as e:
                     self._logger.error(f"   ⚠️ Failed to publish to Kafka: {e}")
+                    # Track DLQ metric
+                    if self.telemetry_enabled:
+                        self.metrics.increment_dead_letter(self.output_topic, 'publish_failed')
                     # Publish to dead letter queue
                     self._publish_to_dlq(message_data, 'chunker', str(e))
 
             else:
                 error = result.get('error', 'Unknown error')
                 self._logger.error(f"   ❌ Chunking failed: {error}")
+
+                # Track failure metrics
+                if self.telemetry_enabled:
+                    self.chunking_duration.labels(
+                        consumer_id=f"document_chunker_{os.getpid()}",
+                        status='failure'
+                    ).observe(chunking_duration)
+
                 # Publish to dead letter queue
                 self._publish_to_dlq(message_data, 'chunker', error)
 
@@ -377,10 +500,28 @@ class KafkaDocumentChunkerConsumer(Base):
         """Main consumer loop."""
         self._logger.info("🚀 Starting to consume messages...")
 
+        # Start telemetry services
+        if self.telemetry_enabled:
+            self._logger.info("📊 Starting telemetry services...")
+            self.system_metrics.start()
+            self.metrics_server.start()
+            self.metrics.set_state(1)  # Running
+            self._logger.info("✅ Telemetry services started")
+
         try:
             while self.running:
-                # Poll for messages
+                # Poll for messages with timing
+                poll_start = time.time()
                 msg = self.consumer.poll(timeout=1.0)
+                poll_duration = time.time() - poll_start
+
+                # Track poll metrics
+                if self.telemetry_enabled and msg is not None:
+                    self.kafka_metrics.record_poll(
+                        topic=self.input_topic,
+                        duration=poll_duration,
+                        message_count=1
+                    )
 
                 if msg is None:
                     # No message available
@@ -393,24 +534,97 @@ class KafkaDocumentChunkerConsumer(Base):
                         continue
                     else:
                         self._logger.error(f"❌ Kafka error: {msg.error()}")
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(
+                                error_type=msg.error().name()
+                            )
                         continue
 
                 try:
+                    # Track message age
+                    if self.telemetry_enabled:
+                        timestamp_type, timestamp_ms = msg.timestamp()
+                        if timestamp_type != -1 and timestamp_ms > 0:
+                            message_timestamp = timestamp_ms / 1000.0
+                            self.kafka_metrics.record_message_age(
+                                topic=self.input_topic,
+                                message_timestamp=message_timestamp
+                            )
+
+                    # Track consumer lag
+                    if self.telemetry_enabled:
+                        try:
+                            from confluent_kafka import TopicPartition
+                            partition = msg.partition()
+                            topic = msg.topic()
+                            tp = TopicPartition(topic, partition)
+                            high_watermark = self.consumer.get_watermark_offsets(tp)[1]
+                            current_offset = msg.offset()
+                            lag = high_watermark - current_offset - 1
+                            if lag >= 0:
+                                self.kafka_metrics.record_lag(
+                                    topic=topic,
+                                    partition=partition,
+                                    lag_messages=lag
+                                )
+                        except Exception as e:
+                            self._logger.debug(f"Could not calculate lag: {e}")
+
                     # Decode message
                     message_str = msg.value().decode('utf-8')
-                    message_data = json.loads(message_str)
+                    try:
+                        message_data = json.loads(message_str)
+                    except json.JSONDecodeError as e:
+                        self._logger.error(f"❌ Invalid JSON in message: {e}")
+                        if self.telemetry_enabled:
+                            self.metrics.increment_deserialization_errors(
+                                topic=self.input_topic,
+                                error_type='json_decode_error'
+                            )
+                        continue
 
-                    # Process the message
-                    await self.process_message(message_data)
+                    # Track messages consumed
+                    if self.telemetry_enabled:
+                        self.metrics.increment_messages_consumed(self.input_topic)
 
-                except json.JSONDecodeError as e:
-                    self._logger.error(f"❌ Invalid JSON in message: {e}")
+                    # Track messages in flight
+                    if self.telemetry_enabled:
+                        self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                    try:
+                        # Process the message with timing
+                        start_time = time.time()
+                        await self.process_message(message_data)
+
+                        # Record processing duration
+                        if self.telemetry_enabled:
+                            duration = time.time() - start_time
+                            self.metrics.record_duration(self.input_topic, duration, 'success')
+
+                    finally:
+                        # Decrement messages in flight
+                        if self.telemetry_enabled:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
+                    if self.telemetry_enabled:
+                        self.metrics.increment_failures(self.input_topic, type(e).__name__)
+                        try:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        except:
+                            pass
 
         except KeyboardInterrupt:
             self._logger.info("\n⚠️  Shutting down consumer...")
         finally:
+            # Shutdown telemetry
+            if self.telemetry_enabled:
+                self._logger.info("🛑 Shutting down telemetry...")
+                self.system_metrics.stop()
+                self.metrics_server.stop()
+                self.metrics.set_state(0)  # Stopped
+
             self.consumer.close()
             self._logger.info("👋 Consumer closed")
 
