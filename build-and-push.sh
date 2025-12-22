@@ -88,6 +88,7 @@ print_status "Image pushed successfully"
 print_info "Step 4/4: Deploying with Helm..."
 
 # Force pods to restart by setting a timestamp annotation
+# Note: This also deploys consumer-services.yaml for Prometheus scraping
 TIMESTAMP=$(date +%s)
 helm upgrade research-indexing-consumers ./helm/research-indexing-consumers -n consumers \
     --set-string podAnnotations.deployedAt="$TIMESTAMP" \

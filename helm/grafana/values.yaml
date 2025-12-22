@@ -1,0 +1,65 @@
+replicaCount: 1
+
+image:
+  repository: ragserviceneacr6881.azurecr.io/grafana
+  tag: 10.2.2
+  pullPolicy: IfNotPresent
+
+nodeSelector:
+  workload: monitoring
+
+resources:
+  requests:
+    memory: "256Mi"
+    cpu: "100m"
+  limits:
+    memory: "512Mi"
+    cpu: "250m"
+
+persistence:
+  enabled: true
+  storageClass: "managed-csi"
+  size: 10Gi
+  accessMode: ReadWriteOnce
+
+service:
+  type: ClusterIP
+  port: 3000
+
+ingress:
+  enabled: true
+  className: nginx
+  host: grafana.rapporteur.ai
+  annotations: {}
+  tls:
+    enabled: true
+    clusterIssuer: letsencrypt-prod
+  auth:
+    enabled: false
+
+# Admin credentials
+adminUser: admin
+adminPassword: admin123  # Change in production!
+
+# Plugins to install
+plugins:
+  - grafana-piechart-panel
+  - grafana-clock-panel
+
+# Prometheus datasource configuration
+datasources:
+  prometheus:
+    name: Prometheus
+    type: prometheus
+    url: http://prometheus:9090
+    access: proxy
+    isDefault: true
+
+# Security context
+securityContext:
+  fsGroup: 472
+  runAsUser: 472
+
+# Enable Prometheus as dependency
+prometheus:
+  enabled: false

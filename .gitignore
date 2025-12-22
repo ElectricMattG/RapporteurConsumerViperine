@@ -154,3 +154,5 @@ k8s/05-consumer-deployments.yaml
 k8s/06-keda-scalers.yaml
 k8s/kafka-kraft-direct.yaml
 k8s/README.md
+
+_dedup_check/

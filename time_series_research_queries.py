@@ -28,7 +28,7 @@ KAFKA_ENABLED = True  # Set to False to disable Kafka publishing
 
 # Time window configuration
 START_DATE = datetime(2023, 10, 7)  # October 7, 2023
-END_DATE = datetime(2025, 12, 17)   # December 17, 2025
+END_DATE = datetime(2025, 11, 4)   # December 17, 2025
 WINDOW_DAYS = 14  # 2 weeks
 
 # Query template

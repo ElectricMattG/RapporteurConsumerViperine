@@ -1,0 +1,169 @@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: monitoring
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 10s
+      evaluation_interval: 10s
+      external_labels:
+        cluster: 'embedding-aks-ne'
+        environment: 'production'
+
+    scrape_configs:
+      # Kafka Web Scraper Consumer
+      - job_name: 'kafka_web_scraper'
+        static_configs:
+          - targets: ['host.docker.internal:8001']
+            labels:
+              consumer: 'web_scraper'
+              service: 'kafka_consumer'
+
+      # Kafka Document Chunker Consumer
+      - job_name: 'kafka_document_chunker'
+        static_configs:
+          - targets: ['host.docker.internal:8002']
+            labels:
+              consumer: 'document_chunker'
+              service: 'kafka_consumer'
+
+      # Kafka Chunk Embedder Consumer
+      - job_name: 'kafka_chunk_embedder'
+        static_configs:
+          - targets: ['host.docker.internal:8003']
+            labels:
+              consumer: 'chunk_embedder'
+              service: 'kafka_consumer'
+
+      # Kafka QA Generator Consumer
+      - job_name: 'kafka_qa_generator'
+        static_configs:
+          - targets: ['host.docker.internal:8004']
+            labels:
+              consumer: 'qa_generator'
+              service: 'kafka_consumer'
+
+      # Kafka QA Embedder Consumer
+      - job_name: 'kafka_qa_embedder'
+        static_configs:
+          - targets: ['host.docker.internal:8005']
+            labels:
+              consumer: 'qa_embedder'
+              service: 'kafka_consumer'
+
+      # Kafka Summarizer Consumer
+      - job_name: 'kafka_summarizer'
+        static_configs:
+          - targets: ['host.docker.internal:8006']
+            labels:
+              consumer: 'summarizer'
+              service: 'kafka_consumer'
+
+      # Kafka Citation Extractor Consumer
+      - job_name: 'kafka_citation_extractor'
+        static_configs:
+          - targets: ['host.docker.internal:8007']
+            labels:
+              consumer: 'citation_extractor'
+              service: 'kafka_consumer'
+
+      # Kafka Index Aggregator Consumer
+      - job_name: 'kafka_index_aggregator'
+        static_configs:
+          - targets: ['host.docker.internal:8008']
+            labels:
+              consumer: 'index_aggregator'
+              service: 'kafka_consumer'
+
+      # Kafka Dead Letter Consumer
+      - job_name: 'kafka_dead_letter_consumer'
+        static_configs:
+          - targets: ['host.docker.internal:8009']
+            labels:
+              consumer: 'dead_letter'
+              service: 'kafka_consumer'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      nodeSelector:
+        workload: monitoring
+      containers:
+      - name: prometheus
+        image: prom/prometheus:v2.48.0
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+          - '--web.console.templates=/usr/share/prometheus/consoles'
+          - '--web.enable-lifecycle'
+        ports:
+        - name: web
+          containerPort: 9090
+          protocol: TCP
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+        - name: prometheus-storage
+          mountPath: /prometheus
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /-/healthy
+            port: 9090
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /-/ready
+            port: 9090
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: prometheus-config
+      - name: prometheus-storage
+        persistentVolumeClaim:
+          claimName: prometheus-storage
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: monitoring
+  labels:
+    app: prometheus
+spec:
+  type: ClusterIP
+  ports:
+  - port: 9090
+    targetPort: 9090
+    protocol: TCP
+    name: web
+  selector:
+    app: prometheus
