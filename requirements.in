@@ -28,3 +28,7 @@ playwright  # JavaScript rendering for hard-to-scrape sites
 cloudscraper  # Cloudflare bypass
 # Azure Storage
 azure-storage-blob
+# Telemetry and monitoring
+prometheus-client  # Prometheus metrics exporter
+psutil  # System resource monitoring
+python-json-logger  # Structured JSON logging

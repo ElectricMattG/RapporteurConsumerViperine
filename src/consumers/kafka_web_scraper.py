@@ -18,6 +18,18 @@ Usage:
 
     consumer = KafkaWebScraperConsumer()
     consumer.start()
+
+TODO: TELEMETRY & OBSERVABILITY
+- [ ] Add Prometheus metrics (port 8001)
+- [ ] Track urls_scraped_total counter
+- [ ] Track scraping_duration_seconds histogram
+- [ ] Track scraping_failures_total counter
+- [ ] Track cache_files_total gauge
+- [ ] Track cache_size_bytes gauge
+- [ ] Track messages_consumed_total counter
+- [ ] Track message_processing_duration_seconds histogram
+- [ ] Add structured JSON logging with trace_id
+- [ ] Expose /metrics endpoint on port 8001
 """
 
 import asyncio
@@ -36,6 +48,25 @@ import requests
 from bs4 import BeautifulSoup
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from PyPDF2 import PdfReader
+
+# Telemetry imports
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError as e:
+    # Try relative import for direct execution
+    try:
+        import os
+        import sys
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
+        from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                    PrometheusMetrics, SystemMetricsCollector)
+        from src.monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
 
 try:
     import cloudscraper
@@ -102,6 +133,64 @@ class KafkaWebScraperConsumer(Base):
         self.consumer = None
         self.producer = None
         self.running = False
+
+        # Initialize telemetry (Phase 1)
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"web_scraper_{os.getpid()}"
+
+            # Configure structured logging
+            configure_logging(
+                format='json',
+                level=os.getenv('LOG_LEVEL', 'INFO'),
+                consumer_id=consumer_id
+            )
+
+            # Initialize Prometheus metrics
+            self.metrics = PrometheusMetrics(consumer_id=consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id=consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id=consumer_id)
+            self.metrics_server = MetricsServer(
+                port=8001,
+                consumer_name='web_scraper',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # Consumer-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.urls_scraped = Counter(
+                'kafka_consumer_urls_scraped_total',
+                'Total URLs successfully scraped',
+                ['consumer_id']
+            )
+
+            self.scraping_duration = Histogram(
+                'kafka_consumer_scraping_duration_seconds',
+                'Time spent scraping URLs',
+                ['consumer_id', 'status'],
+                buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
+            )
+
+            self.cache_files = Gauge(
+                'kafka_consumer_cache_files_total',
+                'Number of files in cache',
+                ['consumer_id']
+            )
+
+            self.cache_size_bytes = Gauge(
+                'kafka_consumer_cache_size_bytes',
+                'Total size of cache in bytes',
+                ['consumer_id']
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8001")
+        else:
+            self._logger.warning("⚠️ Telemetry not available - monitoring module not found")
+            self.metrics = None
+            self.system_metrics = None
+            self.metrics_server = None
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -243,6 +332,47 @@ class KafkaWebScraperConsumer(Base):
             self._logger.error(f"❌ Error creating Kafka consumer/producer: {e}")
             raise
 
+    def _track_url_scraped(self, url: str, duration: float, extraction_method: str):
+        """
+        Track metrics for successfully scraped URL.
+
+        Args:
+            url: The scraped URL
+            duration: Time taken to scrape in seconds
+            extraction_method: Method used (cloudscraper, playwright, curl_cffi, etc.)
+        """
+        if self.telemetry_enabled:
+            self.urls_scraped.labels(consumer_id=f"web_scraper_{os.getpid()}").inc()
+            self.scraping_duration.labels(
+                consumer_id=f"web_scraper_{os.getpid()}",
+                status='success'
+            ).observe(duration)
+            self._logger.debug(f"📊 Metrics tracked: URL scraped in {duration:.2f}s using {extraction_method}")
+
+    def _update_cache_metrics(self):
+        """Update cache size and file count metrics."""
+        if self.telemetry_enabled:
+            try:
+                total_files = 0
+                total_size = 0
+
+                for root, dirs, files in os.walk(self.cache_dir):
+                    total_files += len(files)
+                    for file in files:
+                        file_path = os.path.join(root, file)
+                        try:
+                            total_size += os.path.getsize(file_path)
+                        except OSError:
+                            pass
+
+                consumer_id = f"web_scraper_{os.getpid()}"
+                self.cache_files.labels(consumer_id=consumer_id).set(total_files)
+                self.cache_size_bytes.labels(consumer_id=consumer_id).set(total_size)
+
+                self._logger.debug(f"📊 Cache metrics updated: {total_files} files, {total_size / 1024 / 1024:.2f} MB")
+            except Exception as e:
+                self._logger.warning(f"⚠️ Failed to update cache metrics: {e}")
+
     async def _process_message(self, message_data: Dict) -> Dict:
         """
         Process a single message from Kafka.
@@ -340,6 +470,7 @@ class KafkaWebScraperConsumer(Base):
             # Strategy 1: Try cloudscraper for sites with Cloudflare protection
             if needs_cloudflare_bypass and CLOUDSCRAPER_AVAILABLE:
                 self._logger.info("   🛡️ Attempting Cloudflare bypass with cloudscraper...")
+                cloudscraper_start_time = time.time()
                 try:
                     text_content, metadata = self._extract_with_cloudscraper(final_url)
                     if text_content and len(text_content) > 500:  # Minimum content threshold
@@ -375,6 +506,11 @@ class KafkaWebScraperConsumer(Base):
                         self._logger.info(f"   ✅ Successfully extracted with cloudscraper")
                         self._publish_to_kafka(extraction_result)
 
+                        # Track metrics
+                        scrape_duration = time.time() - cloudscraper_start_time
+                        self._track_url_scraped(final_url, scrape_duration, 'cloudscraper')
+                        self._update_cache_metrics()
+
                         result['scraped_content'] = [extraction_result]
                         result['content_count'] = 1
                         result['success'] = True
@@ -386,6 +522,7 @@ class KafkaWebScraperConsumer(Base):
             # Strategy 2: Try JavaScript rendering with enhanced Playwright stealth
             if not result['success'] and (use_js_rendering or needs_cloudflare_bypass) and PLAYWRIGHT_AVAILABLE:
                 self._logger.info("   🌐 Attempting JavaScript rendering with enhanced stealth...")
+                playwright_start_time = time.time()
                 try:
                     text_content, metadata = await self._extract_with_playwright(final_url)
                     if text_content and text_content != "No readable content found" and self._is_extraction_valid(text_content):
@@ -421,6 +558,11 @@ class KafkaWebScraperConsumer(Base):
                         self._logger.info(f"   ✅ Successfully extracted with Playwright")
                         self._publish_to_kafka(extraction_result)
 
+                        # Track metrics
+                        scrape_duration = time.time() - playwright_start_time
+                        self._track_url_scraped(final_url, scrape_duration, 'playwright')
+                        self._update_cache_metrics()
+
                         result['scraped_content'] = [extraction_result]
                         result['content_count'] = 1
                         result['success'] = True
@@ -433,6 +575,7 @@ class KafkaWebScraperConsumer(Base):
             if not result['success']:
                 self._logger.info("   📡 Using standard HTTP request (curl_cffi)...")
                 # Fetch the page using curl_cffi session
+                scrape_start_time = time.time()
                 try:
                     response = self.web_searcher.session.get(final_url, timeout=15)
 
@@ -504,6 +647,11 @@ class KafkaWebScraperConsumer(Base):
 
                         # Publish to Kafka for downstream processing (summarization)
                         self._publish_to_kafka(extraction_result)
+
+                        # Track metrics
+                        scrape_duration = time.time() - scrape_start_time
+                        self._track_url_scraped(final_url, scrape_duration, 'pdf_extraction' if is_pdf else 'curl_cffi')
+                        self._update_cache_metrics()
 
                         result['scraped_content'] = [extraction_result]
                         result['content_count'] = 1
@@ -1767,6 +1915,14 @@ class KafkaWebScraperConsumer(Base):
         self._logger.info("🚀 Starting Kafka Web Scraper Consumer")
 
         try:
+            # Start telemetry services
+            if self.telemetry_enabled:
+                self._logger.info("📊 Starting telemetry services...")
+                self.system_metrics.start()
+                self.metrics_server.start()
+                self.metrics.set_state(1)  # running
+                self._logger.info("✅ Telemetry services started")
+
             self._create_consumer()
             self.running = True
 
@@ -1775,6 +1931,8 @@ class KafkaWebScraperConsumer(Base):
 
         except Exception as e:
             self._logger.error(f"❌ Fatal error: {e}")
+            if self.telemetry_enabled:
+                self.metrics.set_state(2)  # error
             raise
         finally:
             self._shutdown()
@@ -1795,7 +1953,17 @@ class KafkaWebScraperConsumer(Base):
 
                 # Poll in executor to not block the event loop
                 # confluent_kafka poll() is synchronous, so run it in thread pool
+                poll_start = time.time()
                 msg = await loop.run_in_executor(None, self.consumer.poll, 1.0)
+                poll_duration = time.time() - poll_start
+
+                # Track poll metrics
+                if self.telemetry_enabled and msg is not None:
+                    self.kafka_metrics.record_poll(
+                        topic=self.input_topic,
+                        duration=poll_duration,
+                        message_count=1
+                    )
 
                 if msg is None:
                     if poll_count <= 5:
@@ -1806,25 +1974,108 @@ class KafkaWebScraperConsumer(Base):
                     if msg.error().code() == KafkaError._PARTITION_EOF:
                         self._logger.debug(f"Reached end of partition {msg.partition()}")
                     else:
+                        # Track connection errors
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(
+                                error_type=msg.error().name()
+                            )
                         raise KafkaException(msg.error())
                     continue
 
                 # Process the message
                 try:
-                    message_data = json.loads(msg.value().decode('utf-8'))
+                    # Track message age
+                    if self.telemetry_enabled:
+                        timestamp_type, timestamp_ms = msg.timestamp()
+                        # timestamp_type: 0=CreateTime, 1=LogAppendTime, -1=NotAvailable
+                        if timestamp_type != -1 and timestamp_ms > 0:
+                            message_timestamp = timestamp_ms / 1000.0  # Convert ms to seconds
+                            self.kafka_metrics.record_message_age(
+                                topic=self.input_topic,
+                                message_timestamp=message_timestamp
+                            )
 
-                    # Process message asynchronously (truly async now)
-                    result = await self._process_message(message_data)
+                    # Track consumer lag
+                    if self.telemetry_enabled:
+                        try:
+                            # Get partition metadata
+                            partition = msg.partition()
+                            topic = msg.topic()
 
-                    if result['success']:
-                        self._logger.info(f"✅ Successfully processed message for session {result['session_id']}")
-                    else:
-                        self._logger.warning(f"⚠️ Message processing completed with errors: {result['error']}")
+                            # Get high watermark (latest offset) using TopicPartition
+                            from confluent_kafka import TopicPartition
+                            tp = TopicPartition(topic, partition)
+                            high_watermark = self.consumer.get_watermark_offsets(tp)[1]
 
-                except json.JSONDecodeError as e:
-                    self._logger.error(f"❌ Invalid JSON in message: {e}")
+                            # Get current offset
+                            current_offset = msg.offset()
+
+                            # Calculate lag
+                            lag = high_watermark - current_offset - 1
+                            if lag >= 0:
+                                self.kafka_metrics.record_lag(
+                                    topic=topic,
+                                    partition=partition,
+                                    lag_messages=lag
+                                )
+                        except Exception as e:
+                            self._logger.debug(f"Could not calculate lag: {e}")
+
+                    # Parse message
+                    try:
+                        message_data = json.loads(msg.value().decode('utf-8'))
+                    except json.JSONDecodeError as e:
+                        self._logger.error(f"❌ Invalid JSON in message: {e}")
+                        if self.telemetry_enabled:
+                            self.metrics.increment_deserialization_errors(
+                                topic=self.input_topic,
+                                error_type='json_decode_error'
+                            )
+                        continue
+
+                    # Track message consumption
+                    if self.telemetry_enabled:
+                        self.metrics.increment_messages_consumed(self.input_topic)
+
+                    # Track messages in flight (increment before processing)
+                    if self.telemetry_enabled:
+                        self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                    try:
+                        # Time the message processing
+                        start_time = time.time()
+
+                        # Process message asynchronously (truly async now)
+                        result = await self._process_message(message_data)
+
+                        # Record processing duration
+                        if self.telemetry_enabled:
+                            duration = time.time() - start_time
+                            status = 'success' if result['success'] else 'failure'
+                            self.metrics.record_duration(self.input_topic, duration, status)
+
+                            if not result['success']:
+                                error_type = result.get('error', 'unknown')
+                                self.metrics.increment_failures(self.input_topic, error_type)
+
+                        if result['success']:
+                            self._logger.info(f"✅ Successfully processed message for session {result['session_id']}")
+                        else:
+                            self._logger.warning(f"⚠️ Message processing completed with errors: {result['error']}")
+
+                    finally:
+                        # Decrement messages in flight after processing completes
+                        if self.telemetry_enabled:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}")
+                    # Make sure to decrement if we're tracking
+                    if self.telemetry_enabled:
+                        try:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        except:
+                            pass
 
             except Exception as e:
                 self._logger.error(f"❌ Error in consume loop: {e}")
@@ -1834,6 +2085,14 @@ class KafkaWebScraperConsumer(Base):
     def _shutdown(self):
         """Cleanup and shutdown"""
         self._logger.info("🛑 Shutting down consumer...")
+
+        # Stop telemetry services
+        if self.telemetry_enabled:
+            self._logger.info("📊 Stopping telemetry services...")
+            self.metrics.set_state(0)  # stopped
+            self.system_metrics.stop()
+            self.metrics_server.stop()
+            self._logger.info("✅ Telemetry services stopped")
 
         if self.producer:
             try:
