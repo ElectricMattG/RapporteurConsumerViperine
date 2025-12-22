@@ -51,12 +51,32 @@ import os
 import re
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from urllib.parse import urljoin
 
 from confluent_kafka import Consumer, KafkaError, Producer
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Import components
 try:
@@ -76,6 +96,71 @@ class KafkaCitationExtractorConsumer(Base):
 
         # Load configuration
         self._load_config()
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"citation_extractor_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8007,
+                consumer_name='citation_extractor',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # Citation extractor-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.citations_extracted = Counter(
+                'kafka_consumer_citations_extracted_total',
+                'Total citations extracted from chunks',
+                ['consumer_id']
+            )
+
+            self.chunks_processed = Counter(
+                'kafka_consumer_chunks_processed_total',
+                'Total chunks processed for citation extraction',
+                ['consumer_id']
+            )
+
+            self.extraction_duration = Histogram(
+                'kafka_consumer_extraction_duration_seconds',
+                'Time spent extracting citations',
+                ['consumer_id', 'status'],
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+            )
+
+            self.citations_per_chunk = Histogram(
+                'kafka_consumer_citations_per_chunk',
+                'Number of citations found per chunk',
+                ['consumer_id'],
+                buckets=[0, 1, 2, 5, 10, 20, 50, 100]
+            )
+
+            self.documents_enriched = Counter(
+                'kafka_consumer_documents_enriched_total',
+                'Total documents enriched with citations',
+                ['consumer_id']
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8007")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Initialize Kafka consumer and producer
         self.consumer = None
@@ -317,6 +402,9 @@ class KafkaCitationExtractorConsumer(Base):
             result['error'] = error_msg
             return result
 
+        # Track extraction start time
+        extraction_start = time.time() if self.telemetry_enabled else None
+
         try:
             # Read chunks from JSONL file
             chunks = []
@@ -340,6 +428,39 @@ class KafkaCitationExtractorConsumer(Base):
                 total_citations += citation_count
 
             self._logger.info(f"   🔗 Extracted {total_citations} total citations from {len(chunks)} chunks")
+
+            # Track citation extraction metrics
+            if self.telemetry_enabled and extraction_start:
+                extraction_duration = time.time() - extraction_start
+                consumer_id_label = f"citation_extractor_{os.getpid()}"
+
+                # Record extraction duration
+                self.extraction_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='success'
+                ).observe(extraction_duration)
+
+                # Increment citations extracted
+                self.citations_extracted.labels(
+                    consumer_id=consumer_id_label
+                ).inc(total_citations)
+
+                # Increment chunks processed
+                self.chunks_processed.labels(
+                    consumer_id=consumer_id_label
+                ).inc(len(chunks))
+
+                # Track citations per chunk distribution
+                for chunk in enriched_chunks:
+                    citation_count = chunk.get('chunk_metadata', {}).get('citation_count', 0)
+                    self.citations_per_chunk.labels(
+                        consumer_id=consumer_id_label
+                    ).observe(citation_count)
+
+                # Increment documents enriched
+                self.documents_enriched.labels(
+                    consumer_id=consumer_id_label
+                ).inc()
 
             # Save enriched chunks to new file
             original_path = Path(chunks_file)
@@ -411,6 +532,18 @@ class KafkaCitationExtractorConsumer(Base):
             error_msg = f"Error processing citations: {e}"
             self._logger.error(f"   ❌ {error_msg}", exc_info=True)
             result['error'] = error_msg
+
+            # Track failed extraction metrics
+            if self.telemetry_enabled and extraction_start:
+                extraction_duration = time.time() - extraction_start
+                consumer_id_label = f"citation_extractor_{os.getpid()}"
+
+                # Record failed extraction duration
+                self.extraction_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='failure'
+                ).observe(extraction_duration)
+
             # Publish to dead letter queue
             self._publish_to_dlq(message_data, 'citation_extractor', error_msg)
             self._logger.info("=" * 80)
@@ -441,8 +574,15 @@ class KafkaCitationExtractorConsumer(Base):
             )
             self.producer.flush()
             self._logger.info(f"   📮 Published failure to dead-letter-queue")
+
+            # Track DLQ metric
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter('dead-letter-queue', stage)
         except Exception as e:
             self._logger.error(f"   ⚠️ Failed to publish to DLQ: {e}")
+            # Track DLQ publish failure
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter('dead-letter-queue', 'dlq_publish_failed')
 
     async def consume_messages(self):
         """Start consuming messages from Kafka"""
@@ -452,10 +592,34 @@ class KafkaCitationExtractorConsumer(Base):
         self.running = True
         self._logger.info("🚀 Starting to consume messages...")
 
+        # Start telemetry services if available
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("📊 Starting telemetry services...")
+                self.system_metrics.start()
+                self.metrics_server.start()
+                self.metrics.set_state(1)  # Set state to running
+                self._logger.info("✅ Telemetry services started")
+            except Exception as e:
+                self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
         try:
             while self.running:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 # Poll for messages
                 msg = self.consumer.poll(timeout=1.0)
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    message_count = 1 if msg and not msg.error() else 0
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        message_count
+                    )
 
                 if msg is None:
                     # No message available
@@ -468,29 +632,98 @@ class KafkaCitationExtractorConsumer(Base):
                         continue
                     else:
                         self._logger.error(f"❌ Kafka error: {msg.error()}")
+                        # Track connection errors
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(str(msg.error().code()))
                         continue
 
                 try:
+                    # Track message age
+                    if self.telemetry_enabled:
+                        timestamp_type, timestamp_ms = msg.timestamp()
+                        # timestamp_type: 0=CreateTime, 1=LogAppendTime, -1=NotAvailable
+                        if timestamp_type != -1 and timestamp_ms > 0:
+                            message_timestamp = timestamp_ms / 1000.0
+                            self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                    # Calculate consumer lag
+                    if self.telemetry_enabled:
+                        try:
+                            from confluent_kafka import TopicPartition
+                            topic = msg.topic()
+                            partition = msg.partition()
+                            current_offset = msg.offset()
+
+                            # Get high water mark (latest offset)
+                            tp = TopicPartition(topic, partition)
+                            _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                            lag_messages = high_water_mark - current_offset - 1
+                            if lag_messages > 0:
+                                # Estimate lag time (very rough, assumes 10 msg/sec processing rate)
+                                lag_seconds = lag_messages / 10.0
+                                self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                        except Exception as e:
+                            self._logger.debug(f"Could not calculate lag: {e}")
+
                     # Decode message
                     message_str = msg.value().decode('utf-8')
                     message_data = json.loads(message_str)
 
+                    # Increment messages consumed and messages in flight
+                    if self.telemetry_enabled:
+                        self.metrics.increment_messages_consumed(self.input_topic)
+                        self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                    # Track processing start time
+                    processing_start = time.time() if self.telemetry_enabled else None
+
                     # Process the message
                     result = await self._process_message(message_data)
 
-                    if result['success']:
-                        self._logger.info(f"✅ Successfully processed request {result['request_id']}")
+                    # Record processing duration and decrement messages in flight
+                    if self.telemetry_enabled:
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        if processing_start:
+                            duration = time.time() - processing_start
+                            if result['success']:
+                                self.metrics.record_duration(self.input_topic, duration, 'success')
+                                self._logger.info(f"✅ Successfully processed request {result['request_id']}")
+                            else:
+                                self.metrics.record_duration(self.input_topic, duration, 'failure')
+                                self.metrics.increment_failures(self.input_topic, 'processing_error')
+                                self._logger.warning(f"⚠️ Failed to process request {result['request_id']}: {result.get('error')}")
                     else:
-                        self._logger.warning(f"⚠️ Failed to process request {result['request_id']}: {result.get('error')}")
+                        if result['success']:
+                            self._logger.info(f"✅ Successfully processed request {result['request_id']}")
+                        else:
+                            self._logger.warning(f"⚠️ Failed to process request {result['request_id']}: {result.get('error')}")
 
                 except json.JSONDecodeError as e:
                     self._logger.error(f"❌ Invalid JSON in message: {e}")
+                    if self.telemetry_enabled:
+                        self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
+                    if self.telemetry_enabled:
+                        self.metrics.increment_failures(self.input_topic, 'exception')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
 
         except KeyboardInterrupt:
             self._logger.info("\n⚠️ Shutting down consumer...")
         finally:
+            # Shutdown telemetry on exit
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("🛑 Shutting down telemetry services...")
+                    self.system_metrics.stop()
+                    self.metrics_server.stop()
+                    self.metrics.set_state(0)  # Set state to stopped
+                    self._logger.info("✅ Telemetry services stopped")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
+
             self._shutdown()
 
     def run(self):
