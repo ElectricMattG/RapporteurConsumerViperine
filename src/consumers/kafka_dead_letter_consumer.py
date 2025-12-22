@@ -35,11 +35,30 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List
 
 from confluent_kafka import Consumer, KafkaError
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Add the src directory to the path
 src_dir = Path(__file__).parent.parent
@@ -55,6 +74,76 @@ class KafkaDeadLetterConsumer(Base):
         """Initialize the dead letter queue consumer"""
         super().__init__()
         self._logger.info("Initializing KafkaDeadLetterConsumer")
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"dead_letter_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Dead letter queue-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.dlq_messages_processed = Counter(
+                'kafka_consumer_dlq_messages_processed_total',
+                'Total dead letter queue messages processed',
+                ['consumer_id', 'failed_stage']
+            )
+
+            self.retry_attempts = Counter(
+                'kafka_consumer_dlq_retry_attempts_total',
+                'Total retry attempts for failed messages',
+                ['consumer_id', 'failed_stage']
+            )
+
+            self.messages_reprocessed = Counter(
+                'kafka_consumer_dlq_messages_reprocessed_total',
+                'Total messages successfully reprocessed',
+                ['consumer_id', 'failed_stage']
+            )
+
+            self.messages_discarded = Counter(
+                'kafka_consumer_dlq_messages_discarded_total',
+                'Total messages permanently discarded',
+                ['consumer_id', 'failed_stage']
+            )
+
+            self.failures_by_stage = Gauge(
+                'kafka_consumer_dlq_failures_by_stage',
+                'Current count of failures by pipeline stage',
+                ['consumer_id', 'stage']
+            )
+
+            self.dlq_processing_duration = Histogram(
+                'kafka_consumer_dlq_processing_duration_seconds',
+                'Time spent processing DLQ messages',
+                ['consumer_id', 'status'],
+                buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
+            )
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8009,
+                consumer_name='dead_letter',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8009")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Initialize Kafka consumer (will be set in _load_config)
         self.consumer = None
@@ -157,6 +246,9 @@ class KafkaDeadLetterConsumer(Base):
         Args:
             message_data: Failure message containing original_message, failed_stage, error
         """
+        # Track DLQ processing start time
+        dlq_start = time.time() if self.telemetry_enabled else None
+
         failed_stage = message_data.get('failed_stage', 'unknown')
         request_id = message_data.get('request_id', 'unknown')
         session_id = message_data.get('session_id', 'unknown')
@@ -174,6 +266,16 @@ class KafkaDeadLetterConsumer(Base):
         # Save failure
         self._append_failure(message_data)
 
+        # Track DLQ processing metrics
+        if self.telemetry_enabled:
+            consumer_id_label = f"dead_letter_{os.getpid()}"
+
+            # Increment DLQ messages processed counter
+            self.dlq_messages_processed.labels(
+                consumer_id=consumer_id_label,
+                failed_stage=failed_stage
+            ).inc()
+
         # Log statistics
         try:
             with open(self.failures_file, 'r', encoding='utf-8') as f:
@@ -188,8 +290,25 @@ class KafkaDeadLetterConsumer(Base):
             self._logger.info(f"   📊 Total failures: {len(failures)}")
             self._logger.info(f"   📊 Failures by stage: {stage_counts}")
 
+            # Update failures_by_stage gauge
+            if self.telemetry_enabled:
+                consumer_id_label = f"dead_letter_{os.getpid()}"
+                for stage, count in stage_counts.items():
+                    self.failures_by_stage.labels(
+                        consumer_id=consumer_id_label,
+                        stage=stage
+                    ).set(count)
+
         except Exception as e:
             self._logger.error(f"   ⚠️ Error calculating statistics: {e}")
+
+        # Track DLQ processing duration
+        if self.telemetry_enabled and dlq_start:
+            dlq_duration = time.time() - dlq_start
+            self.dlq_processing_duration.labels(
+                consumer_id=consumer_id_label,
+                status='success'
+            ).observe(dlq_duration)
 
         self._logger.info("=" * 80)
 
@@ -197,12 +316,36 @@ class KafkaDeadLetterConsumer(Base):
         """Main consumer loop"""
         self._logger.info("🚀 Starting to consume dead letter queue messages...")
 
+        # Start telemetry services if available
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("📊 Starting telemetry services...")
+                self.system_metrics.start()
+                self.metrics_server.start()
+                self.metrics.set_state(1)  # Set state to running
+                self._logger.info("✅ Telemetry services started")
+            except Exception as e:
+                self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
         try:
             self.running = True
 
             while self.running:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 # Poll for messages
                 msg = self.consumer.poll(timeout=1.0)
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    message_count = 1 if msg and not msg.error() else 0
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        message_count
+                    )
 
                 if msg is None:
                     # No message available
@@ -215,24 +358,84 @@ class KafkaDeadLetterConsumer(Base):
                         continue
                     else:
                         self._logger.error(f"❌ Kafka error: {msg.error()}")
+                        # Track connection errors
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(str(msg.error().code()))
                         continue
 
                 try:
+                    # Track message age
+                    if self.telemetry_enabled:
+                        timestamp_type, timestamp_ms = msg.timestamp()
+                        if timestamp_type != -1 and timestamp_ms > 0:
+                            message_timestamp = timestamp_ms / 1000.0
+                            self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                    # Calculate consumer lag
+                    if self.telemetry_enabled:
+                        try:
+                            from confluent_kafka import TopicPartition
+                            topic = msg.topic()
+                            partition = msg.partition()
+                            current_offset = msg.offset()
+
+                            tp = TopicPartition(topic, partition)
+                            _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                            lag_messages = high_water_mark - current_offset - 1
+                            if lag_messages > 0:
+                                lag_seconds = lag_messages / 10.0
+                                self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                        except Exception as e:
+                            self._logger.debug(f"Could not calculate lag: {e}")
+
                     # Decode message
                     message_str = msg.value().decode('utf-8')
                     message_data = json.loads(message_str)
 
+                    # Increment messages consumed and in flight
+                    if self.telemetry_enabled:
+                        self.metrics.increment_messages_consumed(self.input_topic)
+                        self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                    # Track processing start time
+                    processing_start = time.time() if self.telemetry_enabled else None
+
                     # Process the message
                     await self.process_message(message_data)
 
+                    # Record processing duration and decrement messages in flight
+                    if self.telemetry_enabled:
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        if processing_start:
+                            duration = time.time() - processing_start
+                            self.metrics.record_duration(self.input_topic, duration, 'success')
+
                 except json.JSONDecodeError as e:
                     self._logger.error(f"❌ Invalid JSON in message: {e}")
+                    if self.telemetry_enabled:
+                        self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
+                    if self.telemetry_enabled:
+                        self.metrics.increment_failures(self.input_topic, 'processing_error')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
 
         except KeyboardInterrupt:
             self._logger.info("\n⚠️  Shutting down consumer...")
         finally:
+            # Shutdown telemetry on exit
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("🛑 Shutting down telemetry services...")
+                    self.system_metrics.stop()
+                    self.metrics_server.stop()
+                    self.metrics.set_state(0)
+                    self._logger.info("✅ Telemetry services stopped")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
+
             if self.consumer:
                 self.consumer.close()
             self._logger.info("👋 Consumer closed")

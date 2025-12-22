@@ -18,6 +18,21 @@ Features:
 Output:
 - research_chunks_with_embeddings_combined.jsonl
 - research_qa_pairs_with_embeddings_combined.jsonl
+
+TODO: TELEMETRY & OBSERVABILITY
+- [ ] Add Prometheus metrics (port 8008)
+- [ ] Track chunks_aggregated_total counter
+- [ ] Track qa_pairs_aggregated_total counter
+- [ ] Track chunks_duplicates_filtered counter
+- [ ] Track qa_pairs_duplicates_filtered counter
+- [ ] Track azure_upload_duration_seconds histogram
+- [ ] Track session_backup_duration_seconds histogram
+- [ ] Track azure_storage_bytes gauge (per container)
+- [ ] Track messages_consumed_total counter
+- [ ] Track message_processing_duration_seconds histogram
+- [ ] Add structured JSON logging with trace_id
+- [ ] Expose /metrics endpoint on port 8008
+- [ ] Add /health and /ready endpoints
 """
 
 import json
@@ -38,6 +53,24 @@ from typing import Dict, List, Set
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from confluent_kafka import Consumer, KafkaError, KafkaException
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
@@ -63,6 +96,89 @@ class KafkaIndexAggregatorConsumer(Base):
         """Initialize the index aggregator consumer."""
         super().__init__()
         self._logger.info("Initializing KafkaIndexAggregatorConsumer")
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"index_aggregator_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Index aggregator-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.chunks_aggregated = Counter(
+                'kafka_consumer_chunks_aggregated_total',
+                'Total chunks aggregated into indices',
+                ['consumer_id']
+            )
+
+            self.qa_pairs_aggregated = Counter(
+                'kafka_consumer_qa_pairs_aggregated_total',
+                'Total Q&A pairs aggregated into indices',
+                ['consumer_id']
+            )
+
+            self.chunks_duplicates_filtered = Counter(
+                'kafka_consumer_chunks_duplicates_filtered_total',
+                'Total duplicate chunks filtered',
+                ['consumer_id']
+            )
+
+            self.qa_duplicates_filtered = Counter(
+                'kafka_consumer_qa_duplicates_filtered_total',
+                'Total duplicate Q&A pairs filtered',
+                ['consumer_id']
+            )
+
+            self.azure_upload_duration = Histogram(
+                'kafka_consumer_azure_upload_duration_seconds',
+                'Time spent uploading to Azure Blob Storage',
+                ['consumer_id', 'blob_type', 'status'],
+                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+            )
+
+            self.session_backup_duration = Histogram(
+                'kafka_consumer_session_backup_duration_seconds',
+                'Time spent backing up session data',
+                ['consumer_id', 'status'],
+                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0]
+            )
+
+            self.azure_storage_bytes = Gauge(
+                'kafka_consumer_azure_storage_bytes',
+                'Size of uploaded blobs in bytes',
+                ['consumer_id', 'container', 'blob_name']
+            )
+
+            self.sessions_aggregated = Counter(
+                'kafka_consumer_sessions_aggregated_total',
+                'Total research sessions aggregated',
+                ['consumer_id']
+            )
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8008,
+                consumer_name='index_aggregator',
+                health_check=lambda: True,  # Always healthy if running
+                ready_check=lambda: self.consumer is not None
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8008")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Load configuration from centralized config
         # Note: CustConf nested configs are accessed as attributes or via data dict
@@ -191,8 +307,32 @@ class KafkaIndexAggregatorConsumer(Base):
                 self._logger.error(f"❌ Topic {self.input_topic} not found")
                 raise RuntimeError(f"Topic {self.input_topic} not found")
 
+            # Start telemetry services if available
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("📊 Starting telemetry services...")
+                    self.system_metrics.start()
+                    self.metrics_server.start()
+                    self.metrics.set_state(1)  # Set state to running
+                    self._logger.info("✅ Telemetry services started")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
             while True:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 msg = self.consumer.poll(timeout=1.0)
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    message_count = 1 if msg and not msg.error() else 0
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        message_count
+                    )
 
                 if msg is None:
                     # Check for timed-out sessions
@@ -203,15 +343,59 @@ class KafkaIndexAggregatorConsumer(Base):
                     if msg.error().code() == KafkaError._PARTITION_EOF:
                         continue
                     else:
+                        # Track connection errors
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(str(msg.error().code()))
                         raise KafkaException(msg.error())
+
+                # Track message age
+                if self.telemetry_enabled:
+                    timestamp_type, timestamp_ms = msg.timestamp()
+                    if timestamp_type != -1 and timestamp_ms > 0:
+                        message_timestamp = timestamp_ms / 1000.0
+                        self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                # Calculate consumer lag
+                if self.telemetry_enabled:
+                    try:
+                        topic = msg.topic()
+                        partition = msg.partition()
+                        current_offset = msg.offset()
+
+                        tp = TopicPartition(topic, partition)
+                        _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                        lag_messages = high_water_mark - current_offset - 1
+                        if lag_messages > 0:
+                            lag_seconds = lag_messages / 10.0
+                            self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                    except Exception as e:
+                        self._logger.debug(f"Could not calculate lag: {e}")
+
+                # Increment messages consumed and in flight
+                if self.telemetry_enabled:
+                    self.metrics.increment_messages_consumed(self.input_topic)
+                    self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                # Track processing start time
+                processing_start = time.time() if self.telemetry_enabled else None
 
                 # Process message
                 self._process_message(msg)
+
+                # Record processing duration and decrement messages in flight
+                if self.telemetry_enabled:
+                    self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                    if processing_start:
+                        duration = time.time() - processing_start
+                        self.metrics.record_duration(self.input_topic, duration, 'success')
 
         except KeyboardInterrupt:
             self._logger.info("⚠️  Received interrupt signal")
         except Exception as e:
             self._logger.error(f"❌ Consumer error: {e}")
+            if self.telemetry_enabled:
+                self.metrics.increment_failures(self.input_topic, 'consumer_error')
             import traceback
             traceback.print_exc()
         finally:
@@ -219,6 +403,17 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info("Processing remaining sessions before shutdown...")
             for session_id in list(self.session_chunks.keys()):
                 self._aggregate_and_upload_session(session_id)
+
+            # Shutdown telemetry on exit
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("🛑 Shutting down telemetry services...")
+                    self.system_metrics.stop()
+                    self.metrics_server.stop()
+                    self.metrics.set_state(0)
+                    self._logger.info("✅ Telemetry services stopped")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
 
             self.consumer.close()
             self._logger.info("✅ Consumer stopped")
@@ -296,8 +491,14 @@ class KafkaIndexAggregatorConsumer(Base):
                     else:
                         self._logger.warning(f"⚠️  Delaying aggregation - waiting for remaining files to complete processing")
 
+        except json.JSONDecodeError as e:
+            self._logger.error(f"❌ Invalid JSON in message: {e}")
+            if self.telemetry_enabled:
+                self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
         except Exception as e:
             self._logger.error(f"Error processing message: {e}")
+            if self.telemetry_enabled:
+                self.metrics.increment_failures(self.input_topic, 'processing_error')
             import traceback
             traceback.print_exc()
 
@@ -425,6 +626,9 @@ class KafkaIndexAggregatorConsumer(Base):
     def _aggregate_and_upload_session(self, session_id: str):
         """Aggregate session documents and upload to Azure."""
         try:
+            # Track session aggregation start time
+            session_start = time.time() if self.telemetry_enabled else None
+
             self._logger.info("=" * 80)
             self._logger.info(f"📊 Aggregating session: {session_id}")
             self._logger.info(f"   Requests processed: {len(self.session_request_ids[session_id])}")
@@ -479,6 +683,11 @@ class KafkaIndexAggregatorConsumer(Base):
 
             self._logger.info(f"✅ Session aggregation complete: {session_id}")
             self._logger.info("=" * 80)
+
+            # Track session aggregation metrics
+            if self.telemetry_enabled and session_start:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.sessions_aggregated.labels(consumer_id=consumer_id_label).inc()
 
         except Exception as e:
             self._logger.error(f"Error aggregating session {session_id}: {e}")
@@ -604,8 +813,33 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   🔄 Duplicates skipped: {len(new_chunks) - new_count}")
             self._logger.info(f"   📈 Total chunks: {len(all_chunks)}")
 
+            # Track chunks aggregation metrics
+            if self.telemetry_enabled:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.chunks_aggregated.labels(consumer_id=consumer_id_label).inc(new_count)
+                self.chunks_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(len(new_chunks) - new_count)
+
             # Upload to Azure
+            upload_start = time.time() if self.telemetry_enabled else None
             self._upload_blob(self.chunks_blob_name, all_chunks)
+
+            # Track Azure upload metrics
+            if self.telemetry_enabled and upload_start:
+                upload_duration = time.time() - upload_start
+                self.azure_upload_duration.labels(
+                    consumer_id=consumer_id_label,
+                    blob_type='chunks',
+                    status='success'
+                ).observe(upload_duration)
+
+                # Track blob size
+                blob_size = len(json.dumps(all_chunks, ensure_ascii=False).encode('utf-8'))
+                self.azure_storage_bytes.labels(
+                    consumer_id=consumer_id_label,
+                    container=self.container_name,
+                    blob_name=self.chunks_blob_name
+                ).set(blob_size)
+
             self._logger.info(f"   ✅ Chunks uploaded successfully")
 
             # Clean up local cache after successful upload
@@ -616,6 +850,16 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning(f"⚠️  Falling back to local storage...")
             import traceback
             traceback.print_exc()
+
+            # Track failed upload metrics
+            if self.telemetry_enabled:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.azure_upload_duration.labels(
+                    consumer_id=consumer_id_label,
+                    blob_type='chunks',
+                    status='failure'
+                ).observe(0)
+
             # Fallback to local storage
             try:
                 self._save_chunks_locally(new_chunks)
@@ -679,8 +923,33 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   🔄 Duplicates skipped: {len(normalized_qa) - new_count}")
             self._logger.info(f"   📈 Total Q&A pairs: {len(all_qa)}")
 
+            # Track QA pairs aggregation metrics
+            if self.telemetry_enabled:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.qa_pairs_aggregated.labels(consumer_id=consumer_id_label).inc(new_count)
+                self.qa_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(len(normalized_qa) - new_count)
+
             # Upload to Azure
+            upload_start = time.time() if self.telemetry_enabled else None
             self._upload_blob(self.qa_blob_name, all_qa)
+
+            # Track Azure upload metrics
+            if self.telemetry_enabled and upload_start:
+                upload_duration = time.time() - upload_start
+                self.azure_upload_duration.labels(
+                    consumer_id=consumer_id_label,
+                    blob_type='qa_pairs',
+                    status='success'
+                ).observe(upload_duration)
+
+                # Track blob size
+                blob_size = len(json.dumps(all_qa, ensure_ascii=False).encode('utf-8'))
+                self.azure_storage_bytes.labels(
+                    consumer_id=consumer_id_label,
+                    container=self.container_name,
+                    blob_name=self.qa_blob_name
+                ).set(blob_size)
+
             self._logger.info(f"   ✅ Q&A pairs uploaded successfully")
 
             # Clean up local cache after successful upload (shared cleanup, only runs once per session)
@@ -691,6 +960,16 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning(f"⚠️  Falling back to local storage...")
             import traceback
             traceback.print_exc()
+
+            # Track failed upload metrics
+            if self.telemetry_enabled:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.azure_upload_duration.labels(
+                    consumer_id=consumer_id_label,
+                    blob_type='qa_pairs',
+                    status='failure'
+                ).observe(0)
+
             # Fallback to local storage
             try:
                 self._save_qa_pairs_locally(new_qa_pairs)

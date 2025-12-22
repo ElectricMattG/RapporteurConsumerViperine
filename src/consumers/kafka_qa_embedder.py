@@ -59,12 +59,32 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import numpy as np
 from confluent_kafka import Consumer, KafkaError, Producer
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Import embedding client instead of sentence_transformers
 try:
@@ -91,6 +111,71 @@ class KafkaQAEmbedderConsumer(Base):
 
         # Load configuration
         self._load_config()
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"qa_embedder_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8005,
+                consumer_name='qa_embedder',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # QA embedder-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.qa_pairs_embedded = Counter(
+                'kafka_consumer_qa_pairs_embedded_total',
+                'Total Q&A pairs embedded',
+                ['consumer_id', 'mode']
+            )
+
+            self.qa_embedding_duration = Histogram(
+                'kafka_consumer_qa_embedding_duration_seconds',
+                'Time spent generating Q&A embeddings',
+                ['consumer_id', 'status'],
+                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+            )
+
+            self.embedding_api_calls = Counter(
+                'kafka_consumer_embedding_api_calls_qa_total',
+                'Total embedding API calls for Q&A',
+                ['consumer_id']
+            )
+
+            self.qa_pairs_per_document_embedded = Histogram(
+                'kafka_consumer_qa_pairs_per_document_embedded',
+                'Number of Q&A pairs embedded per document',
+                ['consumer_id'],
+                buckets=[0, 5, 10, 20, 50, 100, 200, 500]
+            )
+
+            self.documents_embedded_qa = Counter(
+                'kafka_consumer_documents_embedded_qa_total',
+                'Total documents with Q&A embeddings',
+                ['consumer_id']
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8005")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Initialize Kafka consumer and producer
         self.consumer = None
@@ -204,8 +289,15 @@ class KafkaQAEmbedderConsumer(Base):
 
             self._logger.warning(f"📮 Published to DLQ: {failed_stage} - {error}")
 
+            # Track DLQ metric
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter(self.dlq_topic, failed_stage)
+
         except Exception as e:
             self._logger.error(f"❌ Error publishing to DLQ: {e}")
+            # Track DLQ publish failure
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter(self.dlq_topic, 'dlq_publish_failed')
 
     def _init_embedding_model(self):
         """Initialize embedding service client"""
@@ -515,6 +607,9 @@ class KafkaQAEmbedderConsumer(Base):
             self._logger.info(f"   Embedded chunks file: {embedded_chunks_file}")
             self._logger.info("="*80)
 
+            # Track QA embedding start time
+            qa_embedding_start = time.time() if self.telemetry_enabled else None
+
             # Validate Q&A pairs file exists
             if not qa_pairs_file or not Path(qa_pairs_file).exists():
                 raise FileNotFoundError(f"Q&A pairs file not found: {qa_pairs_file}")
@@ -562,10 +657,58 @@ class KafkaQAEmbedderConsumer(Base):
             self._logger.info(f"   Total pairs: {len(enriched_pairs)}")
             self._logger.info("="*80)
 
+            # Track QA embedding metrics
+            if self.telemetry_enabled and qa_embedding_start:
+                qa_embedding_duration = time.time() - qa_embedding_start
+                consumer_id_label = f"qa_embedder_{os.getpid()}"
+
+                # Record QA embedding duration
+                self.qa_embedding_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='success'
+                ).observe(qa_embedding_duration)
+
+                # Increment QA pairs embedded by mode
+                self.qa_pairs_embedded.labels(
+                    consumer_id=consumer_id_label,
+                    mode=self.embedding_mode
+                ).inc(len(enriched_pairs))
+
+                # Track QA pairs per document distribution
+                self.qa_pairs_per_document_embedded.labels(
+                    consumer_id=consumer_id_label
+                ).observe(len(enriched_pairs))
+
+                # Increment documents embedded
+                self.documents_embedded_qa.labels(
+                    consumer_id=consumer_id_label
+                ).inc()
+
+                # Track embedding API calls (estimate based on mode and batch size)
+                # Each mode (question, answer, combined) requires API calls
+                # With batch_size=32, calls = ceil(pairs / batch_size) * modes
+                modes_count = {'question-only': 1, 'answer-only': 1, 'combined': 1, 'all': 3}.get(self.embedding_mode, 3)
+                api_calls_estimate = ((len(enriched_pairs) + self.batch_size - 1) // self.batch_size) * modes_count
+                self.embedding_api_calls.labels(
+                    consumer_id=consumer_id_label
+                ).inc(api_calls_estimate)
+
             return result
 
         except Exception as e:
             self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
+
+            # Track failed QA embedding metrics
+            if self.telemetry_enabled and 'qa_embedding_start' in locals() and qa_embedding_start:
+                qa_embedding_duration = time.time() - qa_embedding_start
+                consumer_id_label = f"qa_embedder_{os.getpid()}"
+
+                # Record failed embedding duration
+                self.qa_embedding_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='failure'
+                ).observe(qa_embedding_duration)
+
             self._publish_to_dlq(message_data, str(e))
             return None
 
@@ -595,10 +738,34 @@ class KafkaQAEmbedderConsumer(Base):
 
             self._logger.info("🚀 Starting to consume Q&A embedding messages...")
 
+            # Start telemetry services if available
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("📊 Starting telemetry services...")
+                    self.system_metrics.start()
+                    self.metrics_server.start()
+                    self.metrics.set_state(1)  # Set state to running
+                    self._logger.info("✅ Telemetry services started")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
             self.running = True
 
             while self.running:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 msg = self.consumer.poll(timeout=1.0)
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    message_count = 1 if msg and not msg.error() else 0
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        message_count
+                    )
 
                 if msg is None:
                     continue
@@ -608,14 +775,60 @@ class KafkaQAEmbedderConsumer(Base):
                         continue
                     else:
                         self._logger.error(f"❌ Consumer error: {msg.error()}")
+                        # Track connection errors
+                        if self.telemetry_enabled:
+                            self.metrics.increment_connection_errors(str(msg.error().code()))
                         continue
 
                 try:
+                    # Track message age
+                    if self.telemetry_enabled:
+                        timestamp_type, timestamp_ms = msg.timestamp()
+                        if timestamp_type != -1 and timestamp_ms > 0:
+                            message_timestamp = timestamp_ms / 1000.0
+                            self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                    # Calculate consumer lag
+                    if self.telemetry_enabled:
+                        try:
+                            topic = msg.topic()
+                            partition = msg.partition()
+                            current_offset = msg.offset()
+
+                            tp = TopicPartition(topic, partition)
+                            _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                            lag_messages = high_water_mark - current_offset - 1
+                            if lag_messages > 0:
+                                lag_seconds = lag_messages / 10.0
+                                self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                        except Exception as e:
+                            self._logger.debug(f"Could not calculate lag: {e}")
+
                     # Parse message
                     message_data = json.loads(msg.value().decode('utf-8'))
 
+                    # Increment messages consumed and in flight
+                    if self.telemetry_enabled:
+                        self.metrics.increment_messages_consumed(self.input_topic)
+                        self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
+                    # Track processing start time
+                    processing_start = time.time() if self.telemetry_enabled else None
+
                     # Process message (async)
                     result = await self._process_message(message_data)
+
+                    # Record processing duration and decrement messages in flight
+                    if self.telemetry_enabled:
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        if processing_start:
+                            duration = time.time() - processing_start
+                            if result:
+                                self.metrics.record_duration(self.input_topic, duration, 'success')
+                            else:
+                                self.metrics.record_duration(self.input_topic, duration, 'failure')
+                                self.metrics.increment_failures(self.input_topic, 'processing_error')
 
                     # Publish result to output topic if configured
                     if result and self.output_topic:
@@ -632,15 +845,32 @@ class KafkaQAEmbedderConsumer(Base):
 
                 except json.JSONDecodeError as e:
                     self._logger.error(f"❌ Error decoding message: {e}")
+                    if self.telemetry_enabled:
+                        self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
                     continue
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
+                    if self.telemetry_enabled:
+                        self.metrics.increment_failures(self.input_topic, 'exception')
+                        self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
                     continue
 
         except Exception as e:
             self._logger.error(f"❌ Consumer error: {e}", exc_info=True)
             raise
         finally:
+            # Shutdown telemetry on exit
+            if self.telemetry_enabled:
+                try:
+                    self._logger.info("🛑 Shutting down telemetry services...")
+                    self.system_metrics.stop()
+                    self.metrics_server.stop()
+                    self.metrics.set_state(0)
+                    self._logger.info("✅ Telemetry services stopped")
+                except Exception as e:
+                    self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
+
             if self.consumer:
                 self.consumer.close()
                 self._logger.info("👋 Kafka consumer closed")

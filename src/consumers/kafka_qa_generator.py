@@ -20,6 +20,16 @@ Message Format (Input - from chunk embedder):
         "chunk_count": 4
     }
 
+TODO: TELEMETRY & OBSERVABILITY
+- [ ] Add Prometheus metrics (port 8004)
+- [ ] Track qa_pairs_generated_total counter
+- [ ] Track qa_generation_duration_seconds histogram
+- [ ] Track qa_generation_failures_total counter
+- [ ] Track messages_consumed_total counter
+- [ ] Track message_processing_duration_seconds histogram
+- [ ] Add structured JSON logging with trace_id
+- [ ] Expose /metrics endpoint on port 8004
+
 Usage:
     python run_kafka_qa_generator.py
 """
@@ -29,11 +39,31 @@ import json
 import os
 import signal
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, Producer
+
+# Telemetry imports with fallback
+try:
+    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.logging_config import configure_logging
+    TELEMETRY_AVAILABLE = True
+except ImportError:
+    # Fallback for environments where telemetry is not available
+    try:
+        import sys
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from monitoring import (KafkaMetricsWrapper, MetricsServer,
+                                PrometheusMetrics, SystemMetricsCollector)
+        from monitoring.logging_config import configure_logging
+        TELEMETRY_AVAILABLE = True
+    except ImportError:
+        TELEMETRY_AVAILABLE = False
+        print("⚠️ Telemetry modules not available - running without metrics")
 
 # Import components
 try:
@@ -55,6 +85,77 @@ class KafkaQAGeneratorConsumer(Base):
 
         # Load configuration
         self._load_config()
+
+        # Initialize telemetry components if available
+        self.telemetry_enabled = TELEMETRY_AVAILABLE
+        if self.telemetry_enabled:
+            consumer_id = f"qa_generator_{os.getpid()}"
+            configure_logging(
+                format='json',
+                level='INFO',
+                consumer_id=consumer_id
+            )
+
+            # Initialize metrics collectors
+            self.metrics = PrometheusMetrics(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
+
+            # Create metrics server with health checks
+            self.metrics_server = MetricsServer(
+                port=8004,
+                consumer_name='qa_generator',
+                health_check=lambda: self.running,
+                ready_check=lambda: self.consumer is not None and self.running
+            )
+
+            # QA generator-specific metrics
+            from prometheus_client import Counter, Gauge, Histogram
+
+            self.qa_pairs_generated = Counter(
+                'kafka_consumer_qa_pairs_generated_total',
+                'Total Q&A pairs generated from chunks',
+                ['consumer_id']
+            )
+
+            self.qa_generation_duration = Histogram(
+                'kafka_consumer_qa_generation_duration_seconds',
+                'Time spent generating Q&A pairs',
+                ['consumer_id', 'status'],
+                buckets=[1.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0, 600.0]
+            )
+
+            self.chunks_processed_for_qa = Counter(
+                'kafka_consumer_chunks_processed_for_qa_total',
+                'Total chunks processed for Q&A generation',
+                ['consumer_id']
+            )
+
+            self.qa_pairs_per_document = Histogram(
+                'kafka_consumer_qa_pairs_per_document',
+                'Number of Q&A pairs generated per document',
+                ['consumer_id'],
+                buckets=[0, 5, 10, 20, 50, 100, 200, 500]
+            )
+
+            self.llm_api_calls_qa = Counter(
+                'kafka_consumer_llm_api_calls_qa_total',
+                'Total LLM API calls for Q&A generation',
+                ['consumer_id', 'provider']
+            )
+
+            self.documents_processed_qa = Counter(
+                'kafka_consumer_documents_processed_qa_total',
+                'Total documents processed for Q&A generation',
+                ['consumer_id']
+            )
+
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8004")
+        else:
+            self.metrics = None
+            self.system_metrics = None
+            self.kafka_metrics = None
+            self.metrics_server = None
 
         # Initialize Kafka consumer
         self.consumer = None
@@ -173,8 +274,15 @@ class KafkaQAGeneratorConsumer(Base):
             )
             dlq_producer.flush()
             self._logger.info(f"   📮 Published failure to dead-letter-queue")
+
+            # Track DLQ metric
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter('dead-letter-queue', stage)
         except Exception as e:
             self._logger.error(f"   ⚠️ Failed to publish to DLQ: {e}")
+            # Track DLQ publish failure
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter('dead-letter-queue', 'dlq_publish_failed')
 
     def _process_message(self, message_data: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -222,6 +330,9 @@ class KafkaQAGeneratorConsumer(Base):
             self._publish_to_dlq(message_data, 'qa_generator', error_msg)
             return result
 
+        # Track QA generation start time
+        qa_generation_start = time.time() if self.telemetry_enabled else None
+
         try:
             # Determine output directory (same directory as input file)
             chunks_path = Path(embedded_chunks_file)
@@ -257,6 +368,47 @@ class KafkaQAGeneratorConsumer(Base):
             self._logger.info(f"   📄 Output file: {qa_file}")
             self._logger.info(f"   📈 Stats: {stats.get('chunks_processed', 0)} chunks processed, "
                             f"{stats.get('processing_errors', 0)} errors")
+
+            # Track QA generation metrics
+            if self.telemetry_enabled and qa_generation_start:
+                qa_generation_duration = time.time() - qa_generation_start
+                consumer_id_label = f"qa_generator_{os.getpid()}"
+
+                # Record QA generation duration
+                self.qa_generation_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='success'
+                ).observe(qa_generation_duration)
+
+                # Increment QA pairs generated
+                self.qa_pairs_generated.labels(
+                    consumer_id=consumer_id_label
+                ).inc(len(qa_pairs))
+
+                # Increment chunks processed
+                chunks_processed_count = stats.get('chunks_processed', 0)
+                if chunks_processed_count > 0:
+                    self.chunks_processed_for_qa.labels(
+                        consumer_id=consumer_id_label
+                    ).inc(chunks_processed_count)
+
+                # Track QA pairs per document distribution
+                self.qa_pairs_per_document.labels(
+                    consumer_id=consumer_id_label
+                ).observe(len(qa_pairs))
+
+                # Increment documents processed
+                self.documents_processed_qa.labels(
+                    consumer_id=consumer_id_label
+                ).inc()
+
+                # Track LLM API calls (estimate based on chunk count)
+                # Typically 1 API call per chunk for Q&A generation
+                if chunks_processed_count > 0:
+                    self.llm_api_calls_qa.labels(
+                        consumer_id=consumer_id_label,
+                        provider='openai'
+                    ).inc(chunks_processed_count)
 
             # Update result
             result['success'] = True
@@ -300,6 +452,18 @@ class KafkaQAGeneratorConsumer(Base):
             error_msg = f"Error generating Q&A pairs: {e}"
             self._logger.error(f"   ❌ {error_msg}", exc_info=True)
             result['error'] = error_msg
+
+            # Track failed QA generation metrics
+            if self.telemetry_enabled and qa_generation_start:
+                qa_generation_duration = time.time() - qa_generation_start
+                consumer_id_label = f"qa_generator_{os.getpid()}"
+
+                # Record failed generation duration
+                self.qa_generation_duration.labels(
+                    consumer_id=consumer_id_label,
+                    status='failure'
+                ).observe(qa_generation_duration)
+
             self._publish_to_dlq(message_data, 'qa_generator', error_msg)
             self._logger.info("=" * 80)
             return result
@@ -322,10 +486,24 @@ class KafkaQAGeneratorConsumer(Base):
         """Main message consumption loop with batch concurrency"""
         self._logger.info("🔄 Starting message consumption loop with CONCURRENT Q&A generation...")
 
+        # Start telemetry services if available
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("📊 Starting telemetry services...")
+                self.system_metrics.start()
+                self.metrics_server.start()
+                self.metrics.set_state(1)  # Set state to running
+                self._logger.info("✅ Telemetry services started")
+            except Exception as e:
+                self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
+
         batch_size = 5  # Process up to 5 documents concurrently (each may have 20-100 chunks)
 
         while self.running:
             try:
+                # Track poll start time
+                poll_start = time.time() if self.telemetry_enabled else None
+
                 # Collect batch of messages
                 messages = []
                 for _ in range(batch_size):
@@ -334,7 +512,19 @@ class KafkaQAGeneratorConsumer(Base):
                         messages.append(msg)
                     elif msg and msg.error():
                         if msg.error().code() != KafkaError._PARTITION_EOF:
+                            # Track connection errors
+                            if self.telemetry_enabled:
+                                self.metrics.increment_connection_errors(str(msg.error().code()))
                             raise KafkaException(msg.error())
+
+                # Record poll metrics
+                if self.telemetry_enabled and poll_start:
+                    poll_duration = time.time() - poll_start
+                    self.kafka_metrics.record_poll(
+                        self.input_topic,
+                        poll_duration,
+                        len(messages)
+                    )
 
                 if not messages:
                     # Wait a bit before next poll
@@ -347,34 +537,98 @@ class KafkaQAGeneratorConsumer(Base):
                 tasks = []
                 for msg in messages:
                     try:
+                        # Track message age
+                        if self.telemetry_enabled:
+                            timestamp_type, timestamp_ms = msg.timestamp()
+                            if timestamp_type != -1 and timestamp_ms > 0:
+                                message_timestamp = timestamp_ms / 1000.0
+                                self.kafka_metrics.record_message_age(self.input_topic, message_timestamp)
+
+                        # Calculate consumer lag
+                        if self.telemetry_enabled:
+                            try:
+                                from confluent_kafka import TopicPartition
+                                topic = msg.topic()
+                                partition = msg.partition()
+                                current_offset = msg.offset()
+
+                                tp = TopicPartition(topic, partition)
+                                _, high_water_mark = self.consumer.get_watermark_offsets(tp)
+
+                                lag_messages = high_water_mark - current_offset - 1
+                                if lag_messages > 0:
+                                    lag_seconds = lag_messages / 10.0
+                                    self.kafka_metrics.record_lag(topic, partition, lag_messages, lag_seconds)
+                            except Exception as e:
+                                self._logger.debug(f"Could not calculate lag: {e}")
+
                         message_data = json.loads(msg.value().decode('utf-8'))
+
+                        # Increment messages consumed and in flight
+                        if self.telemetry_enabled:
+                            self.metrics.increment_messages_consumed(self.input_topic)
+                            self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+
                         tasks.append(self._process_message_async(message_data))
+
                     except json.JSONDecodeError as e:
                         self._logger.error(f"❌ Invalid JSON in message: {e}")
+                        if self.telemetry_enabled:
+                            self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
 
                 # Execute all Q&A generations concurrently
                 if tasks:
+                    processing_start = time.time() if self.telemetry_enabled else None
                     results = await asyncio.gather(*tasks, return_exceptions=True)
 
-                    # Log results
+                    # Log results and track metrics
                     success_count = 0
                     total_pairs = 0
                     for result in results:
+                        # Decrement messages in flight
+                        if self.telemetry_enabled:
+                            self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+
                         if isinstance(result, Exception):
                             self._logger.error(f"❌ Task exception: {result}")
+                            if self.telemetry_enabled:
+                                self.metrics.increment_failures(self.input_topic, 'task_exception')
                         elif result.get('success'):
                             success_count += 1
                             total_pairs += result.get('qa_pairs_generated', 0)
                             self._logger.info(f"✅ Generated {result['qa_pairs_generated']} Q&A pairs for {result['request_id']}")
+
+                            # Record processing duration for success
+                            if self.telemetry_enabled and processing_start:
+                                duration = time.time() - processing_start
+                                self.metrics.record_duration(self.input_topic, duration, 'success')
                         else:
                             self._logger.warning(f"⚠️ Q&A generation failed: {result.get('error')}")
+                            if self.telemetry_enabled:
+                                self.metrics.increment_failures(self.input_topic, 'processing_error')
+                                if processing_start:
+                                    duration = time.time() - processing_start
+                                    self.metrics.record_duration(self.input_topic, duration, 'failure')
 
                     self._logger.info(f"📊 Batch complete: {success_count}/{len(tasks)} successful, {total_pairs} total Q&A pairs")
 
             except Exception as e:
                 self._logger.error(f"❌ Error in consume loop: {e}")
+                if self.telemetry_enabled:
+                    self.metrics.increment_connection_errors('consume_loop_error')
                 if not self.running:
                     break
+
+        # Shutdown telemetry on exit
+        if self.telemetry_enabled:
+            try:
+                self._logger.info("🛑 Shutting down telemetry services...")
+                self.system_metrics.stop()
+                self.metrics_server.stop()
+                self.metrics.set_state(0)
+                self._logger.info("✅ Telemetry services stopped")
+            except Exception as e:
+                self._logger.error(f"⚠️ Error shutting down telemetry: {e}")
 
     async def _process_message_async(self, message_data: Dict) -> Dict:
         """Async wrapper for _process_message to enable concurrent processing"""
