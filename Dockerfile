@@ -52,9 +52,9 @@ COPY version .
 ENV PATH=/root/.local/bin:$PATH
 ENV PYTHONPATH=/app
 
-# Install Playwright browsers
+# Install Playwright browsers (|| true allows build to continue if optional fonts fail)
 RUN playwright install chromium && \
-    playwright install-deps chromium
+    (playwright install-deps chromium || true)
 
 # Create cache directories
 RUN mkdir -p /app/cache/web_scrapes /app/cache/session_backups /app/cache/archive /app/cache/indices

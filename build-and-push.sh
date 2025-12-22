@@ -1,6 +1,32 @@
 #!/bin/bash
 
 set -e  # Exit on any error
+set -o pipefail  # Catch errors in pipes
+
+# Retry function for network operations
+retry() {
+    local max_attempts=3
+    local delay=5
+    local attempt=1
+    local cmd="$@"
+
+    while [ $attempt -le $max_attempts ]; do
+        echo "  Attempt $attempt/$max_attempts..."
+        if $cmd; then
+            return 0
+        fi
+
+        if [ $attempt -lt $max_attempts ]; then
+            echo "  Failed. Retrying in ${delay}s..."
+            sleep $delay
+            delay=$((delay * 2))  # Exponential backoff
+        fi
+        attempt=$((attempt + 1))
+    done
+
+    echo "  Command failed after $max_attempts attempts"
+    return 1
+}
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -36,7 +62,7 @@ print_status "Logged in to ACR"
 print_info "Step 2/4: Building Docker image..."
 print_info "Image: ${ACR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}"
 
-docker buildx build \
+retry docker buildx build \
     --platform linux/amd64 \
     -t ${ACR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG} \
     -t ${ACR_REGISTRY}/${IMAGE_NAME}:latest \
@@ -48,8 +74,13 @@ print_status "Image built successfully"
 # Step 3: Push to ACR
 print_info "Step 3/4: Pushing image to ACR..."
 
-docker push ${ACR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
-docker push ${ACR_REGISTRY}/${IMAGE_NAME}:latest
+# Push both tags (buildx automatically tags both during build, this just pushes them)
+retry docker push ${ACR_REGISTRY}/${IMAGE_NAME}:${IMAGE_TAG}
+
+# Only push latest tag separately if it's different from IMAGE_TAG
+if [ "${IMAGE_TAG}" != "latest" ]; then
+    retry docker push ${ACR_REGISTRY}/${IMAGE_NAME}:latest
+fi
 
 print_status "Image pushed successfully"
 

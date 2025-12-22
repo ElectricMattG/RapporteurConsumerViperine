@@ -485,6 +485,78 @@ class KafkaIndexAggregatorConsumer(Base):
             import traceback
             traceback.print_exc()
 
+    def _save_pre_append_index(self, session_id: str, index_data: List[Dict], index_type: str):
+        """
+        Save a snapshot of the index before appending new data.
+
+        This allows tracking what was added through diffs without additional Azure egress costs.
+        Saves to archive/{session_id}/indices_before_append/{index_type}.jsonl
+
+        Args:
+            session_id: Session identifier
+            index_data: Current index data (before append)
+            index_type: 'chunks' or 'qa_pairs'
+        """
+        try:
+            # Create local archive directory
+            archive_dir = Path(self.cache_dir).parent / "archive" / session_id / "indices_before_append"
+            archive_dir.mkdir(parents=True, exist_ok=True)
+
+            # Save locally first
+            local_file = archive_dir / f"{index_type}.jsonl"
+            with open(local_file, 'w', encoding='utf-8') as f:
+                for item in index_data:
+                    f.write(json.dumps(item, ensure_ascii=False) + '\n')
+
+            self._logger.info(f"   💾 Saved pre-append {index_type} index: {len(index_data)} items")
+
+            # Upload to Azure archive if configured
+            if self.upload_to_azure and self.blob_service_client:
+                blob_name = f"{session_id}/indices_before_append/{index_type}.jsonl"
+                max_retries = 3
+                for attempt in range(max_retries):
+                    try:
+                        blob_client = self.blob_service_client.get_blob_client(
+                            container="archive",
+                            blob=blob_name
+                        )
+                        with open(local_file, 'rb') as f:
+                            blob_client.upload_blob(f, overwrite=True, timeout=300)
+                        self._logger.info(f"   ☁️  Uploaded pre-append {index_type} to archive/{blob_name}")
+                        break
+                    except Exception as upload_error:
+                        if attempt < max_retries - 1:
+                            wait_time = 2 ** attempt
+                            self._logger.warning(f"   ⚠️  Upload failed (attempt {attempt+1}/{max_retries}), retrying in {wait_time}s")
+                            time.sleep(wait_time)
+                        else:
+                            self._logger.error(f"   ❌ Failed to upload pre-append {index_type} after {max_retries} attempts: {upload_error}")
+
+        except Exception as e:
+            self._logger.error(f"Error saving pre-append index for {index_type}: {e}")
+            import traceback
+            traceback.print_exc()
+
+    def _cleanup_local_indices_cache(self):
+        """Clean up local indices cache to prevent stale data confusion.
+
+        After uploading updated indices to Azure, remove local cached copies
+        since the source of truth is Azure Blob Storage. This prevents confusion
+        about which version is current.
+        """
+        try:
+            indices_dir = Path(self.cache_dir).parent / "indices"
+            if indices_dir.exists():
+                for index_file in indices_dir.glob("*.jsonl"):
+                    try:
+                        index_file.unlink()
+                        self._logger.debug(f"   🗑️  Removed stale local index: {index_file.name}")
+                    except Exception as e:
+                        self._logger.warning(f"   ⚠️  Failed to remove {index_file.name}: {e}")
+                self._logger.info(f"   🧹 Cleaned up local indices cache (source of truth: Azure)")
+        except Exception as e:
+            self._logger.warning(f"⚠️  Error cleaning up local indices cache: {e}")
+
     def _upload_chunks(self, session_id: str, new_chunks: List[Dict]):
         """Upload chunks to Azure research index."""
         if not self.upload_to_azure:
@@ -497,6 +569,10 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Download existing index
             existing_chunks = self._download_blob(self.chunks_blob_name)
+
+            # Save pre-append snapshot for diff tracking (avoids egress costs)
+            if existing_chunks:
+                self._save_pre_append_index(session_id, existing_chunks, "chunks")
 
             # Deduplicate by document_id and chunk_id
             existing_ids = set()
@@ -531,6 +607,9 @@ class KafkaIndexAggregatorConsumer(Base):
             # Upload to Azure
             self._upload_blob(self.chunks_blob_name, all_chunks)
             self._logger.info(f"   ✅ Chunks uploaded successfully")
+
+            # Clean up local cache after successful upload
+            self._cleanup_local_indices_cache()
 
         except Exception as e:
             self._logger.error(f"❌ Error uploading chunks to Azure: {e}")
@@ -570,6 +649,10 @@ class KafkaIndexAggregatorConsumer(Base):
             # Download existing index
             existing_qa = self._download_blob(self.qa_blob_name)
 
+            # Save pre-append snapshot for diff tracking (avoids egress costs)
+            if existing_qa:
+                self._save_pre_append_index(session_id, existing_qa, "qa_pairs")
+
             # Deduplicate by chunk_id (Q&A pairs use qa_{chunk_id}_{qa_index} as chunk_id)
             existing_ids = set()
             all_qa = []
@@ -599,6 +682,9 @@ class KafkaIndexAggregatorConsumer(Base):
             # Upload to Azure
             self._upload_blob(self.qa_blob_name, all_qa)
             self._logger.info(f"   ✅ Q&A pairs uploaded successfully")
+
+            # Clean up local cache after successful upload (shared cleanup, only runs once per session)
+            # Note: cleanup is idempotent and safe to call multiple times
 
         except Exception as e:
             self._logger.error(f"❌ Error uploading Q&A pairs to Azure: {e}")
