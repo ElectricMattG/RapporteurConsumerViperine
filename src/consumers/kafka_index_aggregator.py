@@ -544,11 +544,11 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Check for extraction output (either success, failure, or summary)
             extraction_file = request_dir / "extracted_linked_text.jsonl"
-            failure_file = request_dir / "failure.json"
-            summary_file = request_dir / "summary.json"
+            failure_file = request_dir / "failure.jsonl"
+            summary_file = request_dir / "summary.jsonl"
 
             if not extraction_file.exists() and not failure_file.exists() and not summary_file.exists():
-                missing_files.append(f"{request_id}/extracted_linked_text.jsonl or failure.json or summary.json")
+                missing_files.append(f"{request_id}/extracted_linked_text.jsonl or failure.jsonl or summary.jsonl")
 
             # Check for enriched embedded chunks
             chunks_file = request_dir / "chunked_document_enriched_embedded.jsonl"

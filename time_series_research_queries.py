@@ -39,7 +39,7 @@ PROCESSING_MODE = "research"
 TOP_K = 3
 ENABLE_QUERY_REFINEMENT = False
 REQUEST_TIMEOUT = 180  # 3 minutes
-DELAY_BETWEEN_WINDOWS = 90  # 90 seconds between each window/batch
+DELAY_BETWEEN_WINDOWS = 5  # 90 seconds between each window/batch
 
 
 def generate_time_windows(start_date, end_date, window_days):

@@ -43,10 +43,10 @@ kafka:
   resources:
     requests:
       memory: "1Gi"
-      cpu: "500m"
+      cpu: "1000m"
     limits:
       memory: "2Gi"
-      cpu: "1000m"
+      cpu: "2000m"
 
   # Persistent volume configuration
   persistence:
@@ -138,22 +138,22 @@ livenessProbe:
     enabled: true
     initialDelaySeconds: 60
     periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
+    timeoutSeconds: 15
+    failureThreshold: 10
   zookeeper:
     enabled: true
     initialDelaySeconds: 30
     periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
+    timeoutSeconds: 15
+    failureThreshold: 10
 
 readinessProbe:
   kafka:
     enabled: true
-    initialDelaySeconds: 30
+    initialDelaySeconds: 45
     periodSeconds: 10
-    timeoutSeconds: 5
-    failureThreshold: 6
+    timeoutSeconds: 15
+    failureThreshold: 10
   zookeeper:
     enabled: true
     initialDelaySeconds: 20
