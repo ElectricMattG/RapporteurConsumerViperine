@@ -98,6 +98,8 @@ class DocumentMetadata:
     classification_confidence: Optional[float] = None
     classification_reasoning: Optional[str] = None
     content_hash: Optional[str] = None
+    # Query identifier for multi-index support
+    query_id: Optional[str] = None
 
 
 @dataclass
@@ -1229,7 +1231,8 @@ class DocumentChunkingUtility(Base):
             source_type=source_type,
             classification_confidence=classification_confidence,
             classification_reasoning=classification_reasoning,
-            content_hash=content_hash
+            content_hash=content_hash,
+            query_id=cached_data.get('metadata', {}).get('query_id', 'default')
         )
 
     def create_chunk_metadata(self,

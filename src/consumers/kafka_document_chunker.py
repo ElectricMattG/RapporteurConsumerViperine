@@ -316,7 +316,8 @@ class KafkaDocumentChunkerConsumer(Base):
                     'description': metadata.get('description'),
                     'keywords': metadata.get('keywords'),
                     'content_source': metadata.get('content_source', 'extraction'),
-                    'data_lineage': data_lineage  # Preserve data lineage
+                    'data_lineage': data_lineage,  # Preserve data lineage
+                    'query_id': metadata.get('query_id', 'default')  # Propagate query_id for index naming
                 },
                 'method': extraction_method,  # Use the actual method (gemini_web_grounding or web_extraction)
                 'success': True,

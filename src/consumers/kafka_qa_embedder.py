@@ -470,7 +470,8 @@ class KafkaQAEmbedderConsumer(Base):
                 'related_chunk_ids': qa.get('related_chunk_ids'),
                 'used_enriched_text': qa.get('used_enriched_text'),
                 'word_count_source': qa.get('word_count_source'),
-                'word_count_context': qa.get('word_count_context')
+                'word_count_context': qa.get('word_count_context'),
+                'query_id': qa.get('query_id')
             }
 
             # Remove None values

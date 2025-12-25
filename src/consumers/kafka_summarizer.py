@@ -259,12 +259,17 @@ class KafkaSummarizerConsumer(Base):
         """
         session_id = message_data.get('session_id', 'unknown')
         request_id = message_data.get('request_id', f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        query_id = message_data.get('query_id', 'default')  # Read query_id for propagation
         extracted_content = message_data.get('extracted_content', {})
 
         url = extracted_content.get('url', 'unknown')
         text = extracted_content.get('text', '')
         metadata = extracted_content.get('metadata', {})
         extraction_failed = message_data.get('extraction_failed', False)  # Check if extraction failed
+
+        # Ensure query_id is in metadata for downstream propagation
+        if query_id and query_id != 'default':
+            metadata['query_id'] = query_id
 
         self._logger.info("=" * 80)
         self._logger.info(f"📝 Processing summary request")
@@ -330,6 +335,9 @@ class KafkaSummarizerConsumer(Base):
 
             self._logger.info(f"   ✅ Summary generated successfully")
             self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
+
+            # Add query_id to summary result for traceability
+            summary_result['query_id'] = query_id
 
             # Track successful summarization metrics
             if self.telemetry_enabled and summarization_start:
@@ -487,6 +495,11 @@ class KafkaSummarizerConsumer(Base):
                 # Optional: include full summary metadata for chunker to use
                 'summary_metadata': summary_metadata
             }
+
+            # Pass through query_id if present in original message
+            if 'query_id' in metadata:
+                message['query_id'] = metadata['query_id']
+                enhanced_metadata['query_id'] = metadata['query_id']
 
             # Serialize message
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')

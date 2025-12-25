@@ -213,6 +213,7 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_request_ids: Dict[str, Set[str]] = defaultdict(set)
         self.session_last_activity: Dict[str, float] = {}
         self.session_total_requests: Dict[str, int] = {}  # Expected total requests per session
+        self.session_query_id: Dict[str, str] = {}  # Track query_id per session for index naming
 
         # Directory configuration
         self.cache_dir = Path(aggregator_config.cache_dir)
@@ -287,6 +288,25 @@ class KafkaIndexAggregatorConsumer(Base):
 
         except Exception as e:
             self._logger.error(f"Error ensuring containers exist: {e}")
+
+    def _get_blob_names(self, query_id: str = None) -> tuple:
+        """
+        Generate blob names based on query_id.
+
+        Args:
+            query_id: Query identifier (e.g., 'israel_prime_minister')
+                     If None or 'default', uses 'research' prefix for backward compatibility
+
+        Returns:
+            Tuple of (chunks_blob_name, qa_blob_name)
+        """
+        # Use 'research' prefix for default/null query_id (backward compatibility)
+        prefix = query_id if query_id and query_id != "default" else "research"
+
+        chunks_blob = f"{prefix}_chunks_with_embeddings_combined.jsonl"
+        qa_blob = f"{prefix}_qa_pairs_with_embeddings_combined.jsonl"
+
+        return chunks_blob, qa_blob
 
     def run(self):
         """Start consuming messages."""
@@ -430,6 +450,13 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
+
+            # Track query_id for this session (for index naming)
+            query_id = message_data.get('query_id', 'default')
+            if session_id not in self.session_query_id:
+                self.session_query_id[session_id] = query_id
+                if query_id != 'default':
+                    self._logger.info(f"📋 Session {session_id}: query_id = {query_id}")
 
             # Track total expected requests if provided
             if 'total_requests' in message_data:
@@ -767,17 +794,24 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning(f"⚠️  Error cleaning up local indices cache: {e}")
 
     def _upload_chunks(self, session_id: str, new_chunks: List[Dict]):
-        """Upload chunks to Azure research index."""
+        """Upload chunks to Azure research index with dynamic naming based on query_id."""
         if not self.upload_to_azure:
             self._logger.warning("⚠️  No Azure credentials - saving locally instead")
             self._save_chunks_locally(new_chunks)
             return
 
         try:
-            self._logger.info(f"📤 Uploading chunks to Azure...")
+            # Get query_id for this session and determine blob names
+            query_id = self.session_query_id.get(session_id, 'default')
+            chunks_blob_name, _ = self._get_blob_names(query_id)
+
+            if query_id != 'default':
+                self._logger.info(f"📤 Uploading chunks to query-specific index: {chunks_blob_name}")
+            else:
+                self._logger.info(f"📤 Uploading chunks to default index: {chunks_blob_name}")
 
             # Download existing index
-            existing_chunks = self._download_blob(self.chunks_blob_name)
+            existing_chunks = self._download_blob(chunks_blob_name)
 
             # Save pre-append snapshot for diff tracking (avoids egress costs)
             if existing_chunks:
@@ -821,7 +855,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Upload to Azure
             upload_start = time.time() if self.telemetry_enabled else None
-            self._upload_blob(self.chunks_blob_name, all_chunks)
+            self._upload_blob(chunks_blob_name, all_chunks)
 
             # Track Azure upload metrics
             if self.telemetry_enabled and upload_start:
@@ -837,7 +871,7 @@ class KafkaIndexAggregatorConsumer(Base):
                 self.azure_storage_bytes.labels(
                     consumer_id=consumer_id_label,
                     container=self.container_name,
-                    blob_name=self.chunks_blob_name
+                    blob_name=chunks_blob_name
                 ).set(blob_size)
 
             self._logger.info(f"   ✅ Chunks uploaded successfully")
@@ -868,14 +902,21 @@ class KafkaIndexAggregatorConsumer(Base):
                 traceback.print_exc()
 
     def _upload_qa_pairs(self, session_id: str, new_qa_pairs: List[Dict]):
-        """Normalize and upload Q&A pairs to Azure research index."""
+        """Normalize and upload Q&A pairs to Azure research index with dynamic naming based on query_id."""
         if not self.upload_to_azure:
             self._logger.warning("⚠️  No Azure credentials - saving locally instead")
             self._save_qa_pairs_locally(new_qa_pairs)
             return
 
         try:
-            self._logger.info(f"❓ Uploading Q&A pairs to Azure...")
+            # Get query_id for this session and determine blob names
+            query_id = self.session_query_id.get(session_id, 'default')
+            _, qa_blob_name = self._get_blob_names(query_id)
+
+            if query_id != 'default':
+                self._logger.info(f"❓ Uploading Q&A pairs to query-specific index: {qa_blob_name}")
+            else:
+                self._logger.info(f"❓ Uploading Q&A pairs to default index: {qa_blob_name}")
 
             # Normalize Q&A pairs using index adapter
             self._logger.info(f"   🔄 Normalizing Q&A pairs to enriched chunks schema...")
@@ -891,7 +932,7 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   ✅ Normalized {len(normalized_qa)} Q&A pairs")
 
             # Download existing index
-            existing_qa = self._download_blob(self.qa_blob_name)
+            existing_qa = self._download_blob(qa_blob_name)
 
             # Save pre-append snapshot for diff tracking (avoids egress costs)
             if existing_qa:
@@ -931,7 +972,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Upload to Azure
             upload_start = time.time() if self.telemetry_enabled else None
-            self._upload_blob(self.qa_blob_name, all_qa)
+            self._upload_blob(qa_blob_name, all_qa)
 
             # Track Azure upload metrics
             if self.telemetry_enabled and upload_start:
@@ -947,7 +988,7 @@ class KafkaIndexAggregatorConsumer(Base):
                 self.azure_storage_bytes.labels(
                     consumer_id=consumer_id_label,
                     container=self.container_name,
-                    blob_name=self.qa_blob_name
+                    blob_name=qa_blob_name
                 ).set(blob_size)
 
             self._logger.info(f"   ✅ Q&A pairs uploaded successfully")
@@ -1040,6 +1081,7 @@ class KafkaIndexAggregatorConsumer(Base):
                     "author": qa_pair.get('author'),
                     "creation_date": qa_pair.get('creation_date'),
                     "content_type": qa_pair.get('content_type'),
+                    "query_id": qa_pair.get('query_id'),
                 },
                 "embedding_enrichment": {
                     "embedding_id": f"emb_{normalized_chunk_id}",

@@ -306,21 +306,12 @@ class KafkaWebScraperConsumer(Base):
     def _create_consumer(self):
         """Create and configure Kafka consumer and producer"""
         try:
-            from confluent_kafka import TopicPartition
-
             self.consumer = Consumer(self.kafka_config)
-
-            # Use manual partition assignment instead of consumer group
-            # Get topic metadata to discover partitions
-            cluster_metadata = self.consumer.list_topics(self.input_topic, timeout=10)
-            topic_metadata = cluster_metadata.topics.get(self.input_topic)
-
-            if topic_metadata:
-                partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
-                self.consumer.assign(partitions)
-                self._logger.info(f"✅ Manually assigned {len(partitions)} partitions for topic: {self.input_topic}")
-            else:
-                raise Exception(f"Topic {self.input_topic} not found")
+            # Subscribe to topic so replicas share partitions via consumer group
+            self.consumer.subscribe([self.input_topic])
+            self._logger.info(
+                f"✅ Subscribed to topic: {self.input_topic} (group.id={self.kafka_config['group.id']})"
+            )
 
             # Create producer for publishing to output topic
             producer_config = {
@@ -385,6 +376,7 @@ class KafkaWebScraperConsumer(Base):
         """
         session_id = message_data.get('session_id', 'unknown')
         request_id = message_data.get('request_id', f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        query_id = message_data.get('query_id', 'default')
         uri = message_data.get('uri')
         title = message_data.get('title', 'Untitled')
         context = message_data.get('context', [])
@@ -400,6 +392,7 @@ class KafkaWebScraperConsumer(Base):
         result = {
             'session_id': session_id,
             'request_id': request_id,
+            'query_id': query_id,
             'original_uri': uri,
             'title': title,
             'context': context,
@@ -473,6 +466,9 @@ class KafkaWebScraperConsumer(Base):
                 cloudscraper_start_time = time.time()
                 try:
                     text_content, metadata = self._extract_with_cloudscraper(final_url)
+                    # Add query_id to metadata for downstream propagation
+                    metadata['query_id'] = result.get('query_id', 'default')
+
                     if text_content and len(text_content) > 500:  # Minimum content threshold
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters with cloudscraper")
 
@@ -525,6 +521,9 @@ class KafkaWebScraperConsumer(Base):
                 playwright_start_time = time.time()
                 try:
                     text_content, metadata = await self._extract_with_playwright(final_url)
+                    # Add query_id to metadata for downstream propagation
+                    metadata['query_id'] = result.get('query_id', 'default')
+
                     if text_content and text_content != "No readable content found" and self._is_extraction_valid(text_content):
                         self._logger.debug(f"   📊 Extracted {len(text_content)} characters with Playwright")
 
@@ -588,6 +587,8 @@ class KafkaWebScraperConsumer(Base):
                             # Extract text from PDF
                             self._logger.info("   📄 Detected PDF - extracting text...")
                             text_content, metadata = self._extract_pdf_text(response.content, final_url)
+                            # Add query_id to PDF metadata for downstream propagation
+                            metadata['query_id'] = result.get('query_id', 'default')
                         else:
                             # Get HTML content
                             html_content = response.content.decode('utf-8', errors='ignore')
@@ -595,6 +596,9 @@ class KafkaWebScraperConsumer(Base):
 
                             # Extract metadata
                             metadata = self.web_searcher._extract_page_metadata(soup)
+
+                            # Add query_id to metadata for downstream propagation
+                            metadata['query_id'] = result.get('query_id', 'default')
 
                             # Try markdown conversion first if enabled
                             text_content = None
@@ -636,6 +640,7 @@ class KafkaWebScraperConsumer(Base):
                             'extracted_at': datetime.now().isoformat(),
                             'session_id': session_id,
                             'request_id': request_id,
+                            'query_id': result.get('query_id', 'default'),
                             'extraction_method': 'pdf_extraction' if is_pdf else 'curl_cffi'
                         }
                         if 'total_requests' in message_data:
@@ -666,7 +671,7 @@ class KafkaWebScraperConsumer(Base):
                         self._create_failure_document(request_dir, final_url, error_msg, response.status_code, session_id, request_id)
 
                         # Still attempt to generate summary from URL and title
-                        self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id)
+                        self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id, result.get('query_id', 'default'))
 
                 except Exception as e:
                     error_msg = f"Error fetching URL: {str(e)}"
@@ -677,7 +682,7 @@ class KafkaWebScraperConsumer(Base):
                     self._create_failure_document(request_dir, final_url, error_msg, None, session_id, request_id)
 
                     # Still attempt to generate summary from URL and title
-                    self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id)
+                    self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id, result.get('query_id', 'default'))
 
         except Exception as e:
             result['error'] = str(e)
@@ -821,7 +826,8 @@ class KafkaWebScraperConsumer(Base):
                 'language': transcript.language_code,
                 'is_generated': transcript.is_generated,
                 'segment_count': len(snippets),
-                'extraction_method': 'youtube_transcript_api'
+                'extraction_method': 'youtube_transcript_api',
+                'query_id': message_data.get('query_id', 'default')
             }
 
             # Create extraction result
@@ -833,6 +839,7 @@ class KafkaWebScraperConsumer(Base):
                 'extracted_at': datetime.now().isoformat(),
                 'session_id': session_id,
                 'request_id': request_id,
+                'query_id': message_data.get('query_id', 'default'),
                 'extraction_method': 'youtube_transcript_api'
             }
             if 'total_requests' in message_data:
@@ -1819,6 +1826,10 @@ class KafkaWebScraperConsumer(Base):
                 }
             }
 
+            # Pass through query_id for index naming
+            query_id = extraction_result.get('query_id') or extraction_result.get('metadata', {}).get('query_id', 'default')
+            message['query_id'] = query_id
+
             # Pass through total_requests for aggregator
             if 'total_requests' in extraction_result:
                 message['total_requests'] = extraction_result['total_requests']
@@ -1846,7 +1857,7 @@ class KafkaWebScraperConsumer(Base):
 
     def _publish_failed_url_for_summary(self, url: str, original_url: str, title: str,
                                        context: List[str], error_msg: str,
-                                       session_id: str, request_id: str):
+                                       session_id: str, request_id: str, query_id: str = 'default'):
         """
         Publish failed URL to Kafka for LLM summary generation attempt.
 
@@ -1861,6 +1872,7 @@ class KafkaWebScraperConsumer(Base):
             error_msg: The error message from failed extraction
             session_id: Session identifier
             request_id: Request identifier
+            query_id: The query identifier for multi-index support
         """
         try:
             # Don't pass any extracted text - just the URL and metadata
@@ -1869,6 +1881,7 @@ class KafkaWebScraperConsumer(Base):
                 'request_id': request_id,
                 'session_id': session_id,
                 'extraction_failed': True,
+                'query_id': query_id,
                 'extracted_content': {
                     'url': url,
                     'text': '',  # Empty - Gemini will fetch from URL
@@ -1878,7 +1891,8 @@ class KafkaWebScraperConsumer(Base):
                         'original_url': original_url,
                         'extraction_status': 'failed',
                         'error': error_msg,
-                        'context': context
+                        'context': context,
+                        'query_id': query_id,
                     },
                     'extracted_at': datetime.now().isoformat()
                 }

@@ -985,6 +985,8 @@ Format: JSON array [{{"question": "...", "answer": "..."}}]
                 enriched_qa['document_word_count'] = doc_metadata['document_word_count']
             if doc_metadata.get('metadata_id') is not None:
                 enriched_qa['metadata_id'] = doc_metadata['metadata_id']
+            if doc_metadata.get('query_id'):
+                enriched_qa['query_id'] = doc_metadata['query_id']
 
             enriched.append(enriched_qa)
 
