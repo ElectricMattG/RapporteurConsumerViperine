@@ -1,0 +1,67 @@
+image:
+  repository: ragserviceneacr6881.azurecr.io/time-series-indexer
+  tag: latest
+  pullPolicy: Always
+
+imagePullSecrets:
+  - name: acr-secret
+
+schedule: "0 1 * * *"  # Daily at 1 AM UTC
+concurrencyPolicy: Forbid
+successfulJobsHistoryLimit: 3
+failedJobsHistoryLimit: 3
+backoffLimit: 1
+activeDeadlineSeconds: 3600  # 1 hour timeout
+
+# Azure Storage
+azure:
+  storageConnectionString: ""  # Set via --set
+  container: config
+
+# RAG API
+rag:
+  apiUrl: "https://rag.rapporteur.ai/query"
+  apiKey: ""  # Set via --set
+  timeout: 180
+  processingMode: "research"
+  topK: 3
+  enableQueryRefinement: false
+
+# Kafka
+kafka:
+  bootstrapServers: "kafka.rapporteur.ai:9094"
+  enabled: true
+  webScrapeTopic: "web-scrape-requests"
+  sessionCompleteTopic: "session-complete"
+  messageDelaySeconds: 0.1  # Delay between messages to reduce throughput (helps manage API rate limits)
+
+# Configuration paths
+config:
+  queriesPath: "queries.json"
+  statePath: "state"
+  indicesPath: "indices"
+  defaultStartDate: "2023-09-01"
+  defaultWindowSize: 14
+  cacheDir: "/tmp/cronjob_cache"
+
+# Resources
+resources:
+  requests:
+    cpu: 200m
+    memory: 512Mi
+  limits:
+    cpu: 1000m
+    memory: 2Gi
+
+# Monitoring
+metrics:
+  port: 8010
+
+# Logging
+logging:
+  level: INFO
+
+# ServiceAccount
+serviceAccount:
+  create: true
+  name: time-series-indexer

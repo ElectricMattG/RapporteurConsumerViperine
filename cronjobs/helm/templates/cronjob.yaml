@@ -1,0 +1,100 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ include "time-series-indexer.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "time-series-indexer.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.schedule | quote }}
+  concurrencyPolicy: {{ .Values.concurrencyPolicy }}
+  successfulJobsHistoryLimit: {{ .Values.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ .Values.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      backoffLimit: {{ .Values.backoffLimit }}
+      activeDeadlineSeconds: {{ .Values.activeDeadlineSeconds }}
+      template:
+        metadata:
+          labels:
+            {{- include "time-series-indexer.labels" . | nindent 12 }}
+        spec:
+          serviceAccountName: {{ include "time-series-indexer.serviceAccountName" . }}
+          restartPolicy: OnFailure
+
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
+
+          containers:
+          - name: indexer
+            image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+            imagePullPolicy: {{ .Values.image.pullPolicy }}
+
+            env:
+            # Azure
+            - name: AZURE_STORAGE_CONNECTION_STRING
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "time-series-indexer.fullname" . }}-secrets
+                  key: azure-connection-string
+            - name: AZURE_CONTAINER
+              value: {{ .Values.azure.container | quote }}
+
+            # RAG
+            - name: RAG_API_URL
+              value: {{ .Values.rag.apiUrl | quote }}
+            - name: RAG_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "time-series-indexer.fullname" . }}-secrets
+                  key: rag-api-key
+            - name: RAG_TIMEOUT
+              value: {{ .Values.rag.timeout | quote }}
+            - name: PROCESSING_MODE
+              value: {{ .Values.rag.processingMode | quote }}
+            - name: TOP_K
+              value: {{ .Values.rag.topK | quote }}
+            - name: ENABLE_QUERY_REFINEMENT
+              value: {{ .Values.rag.enableQueryRefinement | quote }}
+
+            # Kafka
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: {{ .Values.kafka.bootstrapServers | quote }}
+            - name: KAFKA_ENABLED
+              value: {{ .Values.kafka.enabled | quote }}
+            - name: KAFKA_WEB_SCRAPE_TOPIC
+              value: {{ .Values.kafka.webScrapeTopic | quote }}
+            - name: KAFKA_SESSION_COMPLETE_TOPIC
+              value: {{ .Values.kafka.sessionCompleteTopic | quote }}
+            - name: KAFKA_MESSAGE_DELAY_SECONDS
+              value: {{ .Values.kafka.messageDelaySeconds | quote }}
+
+            # Config
+            - name: QUERIES_CONFIG_PATH
+              value: {{ .Values.config.queriesPath | quote }}
+            - name: STATE_PATH_PREFIX
+              value: {{ .Values.config.statePath | quote }}
+            - name: INDICES_PATH_PREFIX
+              value: {{ .Values.config.indicesPath | quote }}
+            - name: DEFAULT_START_DATE
+              value: {{ .Values.config.defaultStartDate | quote }}
+            - name: DEFAULT_WINDOW_SIZE_DAYS
+              value: {{ .Values.config.defaultWindowSize | quote }}
+            - name: CONFIG_CACHE_DIR
+              value: {{ .Values.config.cacheDir | quote }}
+
+            # Monitoring
+            - name: METRICS_PORT
+              value: {{ .Values.metrics.port | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.logging.level | quote }}
+
+            resources:
+              {{- toYaml .Values.resources | nindent 14 }}
+
+            ports:
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
+              protocol: TCP

@@ -167,6 +167,8 @@ topics=(
     "qa-embedding:12:1"
     "qa-indexed:12:1"
     "session-complete:12:1"
+    "summarise-document:12:1"
+    "dead-letter-queue:12:1"
 )
 
 for topic_config in "${topics[@]}"; do

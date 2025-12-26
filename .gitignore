@@ -156,3 +156,4 @@ k8s/kafka-kraft-direct.yaml
 k8s/README.md
 
 _dedup_check/
+research_results/

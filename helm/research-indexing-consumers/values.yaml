@@ -40,15 +40,15 @@ tolerations:
 consumers:
   webScraper:
     enabled: true
-    replicas: 1
+    replicas: 4
     command: ["python", "-u", "src/consumers/run_kafka_consumer.py"]
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 1200Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 3Gi
     env:
       - name: CONSUMER_TYPE
         value: "web_scraper"
@@ -60,10 +60,10 @@ consumers:
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 200Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 1Gi
 
   chunkEmbedder:
     enabled: true
@@ -72,10 +72,10 @@ consumers:
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 200Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 1Gi
 
   citationExtractor:
     enabled: true
@@ -84,22 +84,22 @@ consumers:
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 150Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 512Mi
 
   qaGenerator:
     enabled: true
-    replicas: 1
+    replicas: 3
     command: ["python", "-u", "src/consumers/run_kafka_qa_generator.py"]
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 300Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 1Gi
     env:
       - name: PROJECT_ID
         value: "another-project-472212"
@@ -108,27 +108,27 @@ consumers:
 
   qaEmbedder:
     enabled: true
-    replicas: 1
+    replicas: 3
     command: ["python", "-u", "src/consumers/run_kafka_qa_embedder.py"]
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 200Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 1Gi
 
   summarizer:
     enabled: true
-    replicas: 1
+    replicas: 3
     command: ["python", "-u", "src/consumers/run_kafka_summarizer.py"]
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 250Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 1Gi
     env:
       - name: PROJECT_ID
         value: "another-project-472212"
@@ -142,10 +142,10 @@ consumers:
     resources:
       requests:
         cpu: 400m
-        memory: 2500Mi
+        memory: 700Mi
       limits:
         cpu: 1000m
-        memory: 6Gi
+        memory: 2Gi
 
   deadLetterConsumer:
     enabled: false
