@@ -994,6 +994,19 @@ Format: JSON array [{{"question": "...", "answer": "..."}}]
 
     # ==================== Incremental Output ====================
 
+    def _sanitize_text(self, text: str) -> str:
+        """Sanitize text to ensure valid JSON serialization."""
+        if not isinstance(text, str):
+            return str(text) if text is not None else ""
+
+        # Remove any null bytes that can break JSON
+        text = text.replace('\x00', '')
+
+        # Normalize line endings
+        text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+        return text
+
     def _write_incremental(self, qa_pairs: List[Dict[str, Any]]):
         """Write Q&A pairs incrementally to JSONL file."""
         if not self.incremental_output:
@@ -1005,7 +1018,15 @@ Format: JSON array [{{"question": "...", "answer": "..."}}]
 
             with open(self.incremental_output, 'a', encoding='utf-8') as f:
                 for qa in qa_pairs:
-                    f.write(json.dumps(qa, ensure_ascii=False) + '\n')
+                    # Sanitize text fields before writing
+                    sanitized_qa = qa.copy()
+                    if 'question' in sanitized_qa:
+                        sanitized_qa['question'] = self._sanitize_text(sanitized_qa['question'])
+                    if 'answer' in sanitized_qa:
+                        sanitized_qa['answer'] = self._sanitize_text(sanitized_qa['answer'])
+
+                    json_str = json.dumps(sanitized_qa, ensure_ascii=False)
+                    f.write(json_str + '\n')
 
             self._logger.debug(f"   ✅ Wrote {len(qa_pairs)} Q&A pairs to {self.incremental_output}")
 
@@ -1029,7 +1050,15 @@ Format: JSON array [{{"question": "...", "answer": "..."}}]
         self._logger.info(f"💾 Saving {len(qa_pairs)} Q&A pairs to: {qa_file}")
         with open(qa_file, 'w', encoding='utf-8') as f:
             for qa in qa_pairs:
-                f.write(json.dumps(qa, ensure_ascii=False) + '\n')
+                # Sanitize text fields before writing
+                sanitized_qa = qa.copy()
+                if 'question' in sanitized_qa:
+                    sanitized_qa['question'] = self._sanitize_text(sanitized_qa['question'])
+                if 'answer' in sanitized_qa:
+                    sanitized_qa['answer'] = self._sanitize_text(sanitized_qa['answer'])
+
+                json_str = json.dumps(sanitized_qa, ensure_ascii=False)
+                f.write(json_str + '\n')
 
         # Save statistics
         self._logger.info(f"📊 Saving statistics to: {stats_file}")

@@ -8,8 +8,10 @@ using the google-genai SDK. Compatible interface with SimpleLLMClient.
 import asyncio
 import json
 import os
+import random
 import re
 import sys
+import time
 from typing import List, Optional
 
 from google import genai
@@ -143,90 +145,122 @@ class GeminiLLMClient(Base):
             Generated text response (or dict if return_grounding_metadata=True)
 
         Raises:
-            Exception: If generation fails
+            Exception: If generation fails after all retries
         """
-        try:
-            config_params = {
-                'temperature': temperature if temperature is not None else self.temperature,
-                'top_p': self.top_p,
-                'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
-            }
+        config_params = {
+            'temperature': temperature if temperature is not None else self.temperature,
+            'top_p': self.top_p,
+            'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
+        }
 
-            # Add Google Search grounding tool if enabled
-            tools = []
-            if enable_search:
-                self._logger.debug(f"      🔍 Enabling Google Search grounding")
-                # Google Search tool for real-time web grounding
-                # This allows the model to search the web and cite sources
-                tools.append(types.Tool(google_search=types.GoogleSearch()))
+        # Add Google Search grounding tool if enabled
+        tools = []
+        if enable_search:
+            self._logger.debug(f"      🔍 Enabling Google Search grounding")
+            # Google Search tool for real-time web grounding
+            # This allows the model to search the web and cite sources
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
 
-            config = types.GenerateContentConfig(
-                tools=tools if tools else None,
-                **config_params
-            )
+        config = types.GenerateContentConfig(
+            tools=tools if tools else None,
+            **config_params
+        )
 
-            # Run blocking Gemini API call in thread pool to avoid blocking event loop
-            # This enables true concurrent processing of multiple requests
-            loop = asyncio.get_event_loop()
-            response = await loop.run_in_executor(
-                None,  # Use default ThreadPoolExecutor
-                lambda: self.client.models.generate_content(
-                    model=self.model_name,
-                    contents=prompt,
-                    config=config
+        # Exponential backoff for rate limiting (429 errors)
+        max_retries = 5
+        base_delay = 2.0  # Start with 2 seconds
+        max_delay = 60.0  # Cap at 60 seconds
+
+        for attempt in range(max_retries):
+            try:
+                # Run blocking Gemini API call in thread pool to avoid blocking event loop
+                # This enables true concurrent processing of multiple requests
+                loop = asyncio.get_event_loop()
+                response = await loop.run_in_executor(
+                    None,  # Use default ThreadPoolExecutor
+                    lambda: self.client.models.generate_content(
+                        model=self.model_name,
+                        contents=prompt,
+                        config=config
+                    )
                 )
-            )
 
-            # Extract text and optional grounding metadata
-            text = response.text
+                # Extract text and optional grounding metadata
+                text = response.text
 
-            # If search was enabled and metadata requested, return full response
-            if return_grounding_metadata and enable_search:
-                grounding_metadata = {}
+                # If search was enabled and metadata requested, return full response
+                if return_grounding_metadata and enable_search:
+                    grounding_metadata = {}
 
-                # Extract grounding metadata if present
-                if hasattr(response, 'candidates') and response.candidates:
-                    candidate = response.candidates[0]
-                    if hasattr(candidate, 'grounding_metadata'):
-                        grounding_meta = candidate.grounding_metadata
+                    # Extract grounding metadata if present
+                    if hasattr(response, 'candidates') and response.candidates:
+                        candidate = response.candidates[0]
+                        if hasattr(candidate, 'grounding_metadata'):
+                            grounding_meta = candidate.grounding_metadata
 
-                        # Extract search queries used
-                        if hasattr(grounding_meta, 'search_entry_point'):
-                            search_queries = grounding_meta.search_entry_point.rendered_content if hasattr(grounding_meta.search_entry_point, 'rendered_content') else None
-                            grounding_metadata['search_queries'] = search_queries
+                            # Extract search queries used
+                            if hasattr(grounding_meta, 'search_entry_point'):
+                                search_queries = grounding_meta.search_entry_point.rendered_content if hasattr(grounding_meta.search_entry_point, 'rendered_content') else None
+                                grounding_metadata['search_queries'] = search_queries
 
-                        # Extract grounding chunks (citations)
-                        if hasattr(grounding_meta, 'grounding_chunks') and grounding_meta.grounding_chunks:
-                            chunks = []
-                            for chunk in grounding_meta.grounding_chunks:
-                                chunk_data = {}
-                                if hasattr(chunk, 'web'):
-                                    chunk_data['uri'] = chunk.web.uri if hasattr(chunk.web, 'uri') else None
-                                    chunk_data['title'] = chunk.web.title if hasattr(chunk.web, 'title') else None
-                                chunks.append(chunk_data)
-                            grounding_metadata['citations'] = chunks
+                            # Extract grounding chunks (citations)
+                            if hasattr(grounding_meta, 'grounding_chunks') and grounding_meta.grounding_chunks:
+                                chunks = []
+                                for chunk in grounding_meta.grounding_chunks:
+                                    chunk_data = {}
+                                    if hasattr(chunk, 'web'):
+                                        chunk_data['uri'] = chunk.web.uri if hasattr(chunk.web, 'uri') else None
+                                        chunk_data['title'] = chunk.web.title if hasattr(chunk.web, 'title') else None
+                                    chunks.append(chunk_data)
+                                grounding_metadata['citations'] = chunks
 
-                        # Extract grounding support scores
-                        if hasattr(grounding_meta, 'grounding_supports') and grounding_meta.grounding_supports:
-                            supports = []
-                            for support in grounding_meta.grounding_supports:
-                                support_data = {
-                                    'segment_text': support.segment.text if hasattr(support, 'segment') and hasattr(support.segment, 'text') else None,
-                                    'grounding_chunk_indices': list(support.grounding_chunk_indices) if hasattr(support, 'grounding_chunk_indices') else [],
-                                    'confidence_score': support.confidence_score if hasattr(support, 'confidence_score') else None
-                                }
-                                supports.append(support_data)
-                            grounding_metadata['grounding_supports'] = supports
+                            # Extract grounding support scores
+                            if hasattr(grounding_meta, 'grounding_supports') and grounding_meta.grounding_supports:
+                                supports = []
+                                for support in grounding_meta.grounding_supports:
+                                    support_data = {
+                                        'segment_text': support.segment.text if hasattr(support, 'segment') and hasattr(support.segment, 'text') else None,
+                                        'grounding_chunk_indices': list(support.grounding_chunk_indices) if hasattr(support, 'grounding_chunk_indices') else [],
+                                        'confidence_score': support.confidence_score if hasattr(support, 'confidence_score') else None
+                                    }
+                                    supports.append(support_data)
+                                grounding_metadata['grounding_supports'] = supports
 
-                return {
-                    'text': text,
-                    'grounding_metadata': grounding_metadata
-                }
+                    return {
+                        'text': text,
+                        'grounding_metadata': grounding_metadata
+                    }
 
-            return text
+                # Success - return text
+                return text
 
-        except Exception as e:
-            self._logger.error(f"❌ Gemini generation failed: {e}")
+            except Exception as e:
+                error_str = str(e)
+
+                # Check if it's a rate limit error (429)
+                if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:
+                    if attempt < max_retries - 1:
+                        # Calculate exponential backoff with jitter
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        # Add jitter: random value between 0 and 25% of delay
+                        jitter = random.uniform(0, delay * 0.25)
+                        total_delay = delay + jitter
+
+                        self._logger.warning(
+                            f"⏳ Rate limit hit (429), retrying in {total_delay:.1f}s "
+                            f"(attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(total_delay)
+                        continue
+                    else:
+                        self._logger.error(
+                            f"❌ Rate limit exhausted after {max_retries} attempts: {e}"
+                        )
+                        raise
+                else:
+                    # Non-rate-limit error, fail immediately
+                    self._logger.error(f"❌ Gemini generation failed: {e}")
+                    raise
             raise
 
     async def generate_queries(self, root_query, text_content: str, num_queries: int = 5,

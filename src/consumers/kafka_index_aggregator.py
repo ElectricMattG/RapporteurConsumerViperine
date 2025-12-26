@@ -451,12 +451,8 @@ class KafkaIndexAggregatorConsumer(Base):
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
 
-            # Track query_id for this session (for index naming)
-            query_id = message_data.get('query_id', 'default')
-            if session_id not in self.session_query_id:
-                self.session_query_id[session_id] = query_id
-                if query_id != 'default':
-                    self._logger.info(f"📋 Session {session_id}: query_id = {query_id}")
+            # Note: query_id will be extracted from chunk/QA metadata when loading files
+            # This ensures we use the correct query_id from the actual data, not just the message
 
             # Track total expected requests if provided
             if 'total_requests' in message_data:
@@ -482,10 +478,31 @@ class KafkaIndexAggregatorConsumer(Base):
             if chunks_file and Path(chunks_file).exists():
                 self._logger.info(f"  📦 Loading chunks from: {chunks_file}")
                 with open(chunks_file, 'r', encoding='utf-8') as f:
+                    line_num = 0
                     for line in f:
+                        line_num += 1
                         if line.strip():
-                            chunk = json.loads(line.strip())
-                            self.session_chunks[session_id].append(chunk)
+                            try:
+                                chunk = json.loads(line.strip())
+                                self.session_chunks[session_id].append(chunk)
+
+                                # Extract query_id from first chunk's document_metadata if not already set
+                                if session_id not in self.session_query_id and line_num == 1:
+                                    # Try document_metadata first, then top-level field
+                                    doc_meta_qid = chunk.get('document_metadata', {}).get('query_id')
+                                    top_level_qid = chunk.get('query_id')
+                                    chunk_query_id = doc_meta_qid or top_level_qid
+                                    self._logger.debug(f"   🔍 Chunk query_id check: doc_metadata={doc_meta_qid}, top_level={top_level_qid}, final={chunk_query_id}")
+                                    if chunk_query_id:
+                                        self.session_query_id[session_id] = chunk_query_id
+                                        self._logger.info(f"📋 Session {session_id}: query_id = {chunk_query_id} (from chunk metadata)")
+                                    else:
+                                        self._logger.warning(f"⚠️  No query_id found in first chunk for session {session_id}")
+
+                            except json.JSONDecodeError as e:
+                                self._logger.error(f"     ❌ JSON decode error in chunks file {chunks_file} line {line_num}: {e}")
+                                if self.telemetry_enabled:
+                                    self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
                 chunks_count = len(list(open(chunks_file)))
                 self._logger.info(f"     ✅ Loaded {chunks_count} chunks")
             else:
@@ -495,10 +512,31 @@ class KafkaIndexAggregatorConsumer(Base):
             if qa_file and Path(qa_file).exists():
                 self._logger.info(f"  ❓ Loading Q&A pairs from: {qa_file}")
                 with open(qa_file, 'r', encoding='utf-8') as f:
+                    line_num = 0
                     for line in f:
+                        line_num += 1
                         if line.strip():
-                            qa_pair = json.loads(line.strip())
-                            self.session_qa_pairs[session_id].append(qa_pair)
+                            try:
+                                qa_pair = json.loads(line.strip())
+                                self.session_qa_pairs[session_id].append(qa_pair)
+
+                                # Extract query_id from first QA pair's document_metadata if not already set
+                                if session_id not in self.session_query_id and line_num == 1:
+                                    # Try document_metadata first, then top-level field (QA pairs have it at top level)
+                                    doc_meta_qid = qa_pair.get('document_metadata', {}).get('query_id')
+                                    top_level_qid = qa_pair.get('query_id')
+                                    qa_query_id = doc_meta_qid or top_level_qid
+                                    self._logger.debug(f"   🔍 QA query_id check: doc_metadata={doc_meta_qid}, top_level={top_level_qid}, final={qa_query_id}")
+                                    if qa_query_id:
+                                        self.session_query_id[session_id] = qa_query_id
+                                        self._logger.info(f"📋 Session {session_id}: query_id = {qa_query_id} (from QA metadata)")
+                                    else:
+                                        self._logger.warning(f"⚠️  No query_id found in first QA pair for session {session_id}")
+
+                            except json.JSONDecodeError as e:
+                                self._logger.error(f"     ❌ JSON decode error in Q&A file {qa_file} line {line_num}: {e}")
+                                if self.telemetry_enabled:
+                                    self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
                 qa_count = len(list(open(qa_file)))
                 self._logger.info(f"     ✅ Loaded {qa_count} Q&A pairs")
             else:

@@ -307,11 +307,8 @@ class KafkaWebScraperConsumer(Base):
         """Create and configure Kafka consumer and producer"""
         try:
             self.consumer = Consumer(self.kafka_config)
-            # Subscribe to topic so replicas share partitions via consumer group
             self.consumer.subscribe([self.input_topic])
-            self._logger.info(
-                f"✅ Subscribed to topic: {self.input_topic} (group.id={self.kafka_config['group.id']})"
-            )
+            self._logger.info(f"✅ Consumer subscribed to topic: {self.input_topic}")
 
             # Create producer for publishing to output topic
             producer_config = {

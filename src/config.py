@@ -211,7 +211,7 @@ defaults = {
         "consumer_group_id": "index-aggregator-consumer",  # Consumer group ID for aggregator
         "input_topic": "qa-indexed",  # Topic to consume indexed Q&A pairs from
         "session_complete_topic": "session-complete",  # Topic for session completion signals
-        "session_timeout": 900,  # Session timeout in seconds (15 minutes for large PDFs)
+        "session_timeout": 900,  # Session timeout in seconds (2 minutes - aggregate even if incomplete)
         "cache_dir": "./cache/web_scrapes",  # Cache directory for processing files
         "session_backup_dir": "./cache/session_backups",  # Directory for session backups
         "archive_dir": "./cache/archive",  # Directory for archived session files
