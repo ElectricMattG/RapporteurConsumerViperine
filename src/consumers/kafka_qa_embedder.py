@@ -503,6 +503,9 @@ class KafkaQAEmbedderConsumer(Base):
             for enriched in enriched_pairs:
                 json.dump(enriched, f, ensure_ascii=False)
                 f.write('\n')
+            # Explicitly flush to ensure all data is written before file close
+            f.flush()
+            os.fsync(f.fileno())
 
         file_size = output_path.stat().st_size / (1024 * 1024)  # MB
         self._logger.info(f"✅ Saved {len(enriched_pairs)} pairs ({file_size:.2f} MB)")

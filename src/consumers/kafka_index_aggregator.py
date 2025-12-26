@@ -316,16 +316,33 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info("🚀 Starting index aggregation consumer...")
 
             # Manual partition assignment to bypass consumer group coordinator
+            # Need to consume from BOTH qa-indexed and session-complete topics
+            all_partitions = []
+
+            # Get partitions for qa-indexed topic
             cluster_metadata = self.consumer.list_topics(self.input_topic, timeout=10)
             topic_metadata = cluster_metadata.topics.get(self.input_topic)
-
             if topic_metadata:
-                partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
-                self.consumer.assign(partitions)
-                self._logger.info(f"✅ Manually assigned {len(partitions)} partitions for topic: {self.input_topic}")
+                qa_partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
+                all_partitions.extend(qa_partitions)
+                self._logger.info(f"✅ Found {len(qa_partitions)} partitions for topic: {self.input_topic}")
             else:
                 self._logger.error(f"❌ Topic {self.input_topic} not found")
                 raise RuntimeError(f"Topic {self.input_topic} not found")
+
+            # Get partitions for session-complete topic
+            cluster_metadata = self.consumer.list_topics(self.session_complete_topic, timeout=10)
+            topic_metadata = cluster_metadata.topics.get(self.session_complete_topic)
+            if topic_metadata:
+                session_partitions = [TopicPartition(self.session_complete_topic, p) for p in topic_metadata.partitions.keys()]
+                all_partitions.extend(session_partitions)
+                self._logger.info(f"✅ Found {len(session_partitions)} partitions for topic: {self.session_complete_topic}")
+            else:
+                self._logger.warning(f"⚠️  Topic {self.session_complete_topic} not found - session completion signals may not work")
+
+            # Assign all partitions
+            self.consumer.assign(all_partitions)
+            self._logger.info(f"✅ Manually assigned {len(all_partitions)} total partitions across both topics")
 
             # Start telemetry services if available
             if self.telemetry_enabled:
