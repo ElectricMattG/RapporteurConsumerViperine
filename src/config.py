@@ -170,7 +170,7 @@ defaults = {
         "input_topic": "citation-extraction",  # Topic to consume chunks from
         "output_topic": "chunk-embedding",  # Send enriched chunks to embedding consumer
         "cache_directory": "cache/citations",  # Directory for cached citations
-        "min_citation_length": 10,  # Minimum characters for a valid citation
+        "min_citation_length": 2,  # Minimum characters for a valid citation
         "max_citations_per_chunk": 50,  # Maximum citations to extract per chunk
     },
     "chunk_embedder": {
@@ -190,7 +190,7 @@ defaults = {
         "input_topic": "qa-generation",  # Topic to consume embedded chunks from
         "output_topic": "qa-embedding",  # Topic to publish Q&A pairs to embedder
         "cache_directory": "cache/qa_pairs",  # Directory for cached QA pairs
-        "pairs_per_chunk": 3,  # Target number of QA pairs per chunk
+        "pairs_per_chunk": 5,  # Target number of QA pairs per chunk
         "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini'
         "min_chunk_length": 50,  # Minimum chunk length to generate QA pairs
         "max_chunk_length": 10000,  # Maximum chunk length for QA generation
