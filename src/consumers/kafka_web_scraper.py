@@ -1057,6 +1057,110 @@ class KafkaWebScraperConsumer(Base):
             self._logger.error(f"   ❌ PDF extraction failed: {e}")
             return f"PDF extraction error: {str(e)}", {'error': str(e), 'source_url': url}
 
+    def _filter_html_to_main_content(self, html_content: str) -> str:
+        """
+        Lightweight filtering of HTML before markdown conversion.
+        Removes non-content elements (headers, footers, nav, etc.) while preserving main content.
+
+        Args:
+            html_content: Raw HTML content
+
+        Returns:
+            Filtered HTML focused on main content
+        """
+        try:
+            soup = BeautifulSoup(html_content, 'html.parser')
+
+            # Step 1: Remove structural elements that rarely contain content
+            for element in soup.find_all(['script', 'style', 'iframe', 'noscript']):
+                element.decompose()
+
+            # Step 2: Remove navigation, headers, and footers
+            for element in soup.find_all(['nav', 'header', 'footer']):
+                element.decompose()
+
+            # Step 3: Remove elements with specific classes/ids (case-insensitive patterns)
+            unwanted_patterns = [
+                'advertisement', 'ad-', 'ads-', 'banner', 'promo',
+                'sidebar', 'widget', 'related-posts',
+                'social-share', 'share-buttons', 'social-media',
+                'newsletter', 'subscribe', 'subscription',
+                'comment', 'feedback', 'rating',
+                'cookie', 'gdpr', 'consent',
+                'breadcrumb', 'pagination'
+            ]
+
+            for element in soup.find_all(True):  # Find all elements
+                # Check class attribute
+                element_classes = element.get('class', [])
+                if any(any(pattern.lower() in str(cls).lower() for pattern in unwanted_patterns)
+                       for cls in element_classes):
+                    element.decompose()
+                    continue
+
+                # Check id attribute
+                element_id = element.get('id', '')
+                if element_id and any(pattern.lower() in element_id.lower() for pattern in unwanted_patterns):
+                    element.decompose()
+
+            # Step 4: Try to focus on main content area
+            # Support both modern HTML5 and legacy HTML patterns
+            main_content = None
+            content_selectors = [
+                # Modern HTML5 semantic elements
+                'main',
+                'article',
+                '[role="main"]',
+                # Common class-based patterns (legacy and modern)
+                '.main-content',
+                '.main',
+                '.content',
+                '.post-content',
+                '.entry-content',
+                '.article-content',
+                '.article-body',
+                '.post-body',
+                '.page-content',
+                # Common id-based patterns (legacy)
+                '#main-content',
+                '#main',
+                '#content',
+                '#article',
+                '#post',
+                '#primary',
+                # Table-based layouts (very old sites)
+                'table.content',
+                'td.content',
+                # Div-based layouts (common in 2000s-2010s)
+                'div.main',
+                'div.wrapper',
+                'div.container > div.content',
+                # Fallback to body if nothing found
+                'body'
+            ]
+
+            for selector in content_selectors:
+                try:
+                    main_content = soup.select_one(selector)
+                    if main_content:
+                        self._logger.debug(f"   🎯 Found main content with selector: {selector}")
+                        break
+                except Exception:
+                    continue
+
+            # If we found a main content area, use it; otherwise use the whole soup
+            if main_content and main_content.name != 'body':
+                filtered_html = str(main_content)
+            else:
+                filtered_html = str(soup)
+
+            self._logger.debug(f"   ✂️ Filtered HTML: {len(html_content)} → {len(filtered_html)} chars")
+            return filtered_html
+
+        except Exception as e:
+            self._logger.warning(f"   ⚠️ HTML filtering failed: {e}, using original HTML")
+            return html_content
+
     async def _convert_html_to_markdown(self, html_content: str, url: str) -> Optional[str]:
         """
         Convert HTML content to markdown using docling (async to avoid blocking).
@@ -1075,7 +1179,10 @@ class KafkaWebScraperConsumer(Base):
             return None
 
         try:
-            self._logger.info(f"   📝 Converting HTML to markdown (async)...")
+            self._logger.info(f"   📝 Filtering HTML and converting to markdown (async)...")
+
+            # Filter HTML before markdown conversion to remove non-content elements
+            filtered_html = self._filter_html_to_main_content(html_content)
 
             # Use asyncio to run blocking docling conversion in thread pool
             # This prevents blocking the event loop
@@ -1083,7 +1190,7 @@ class KafkaWebScraperConsumer(Base):
             markdown_content = await loop.run_in_executor(
                 None,  # Use default executor
                 self._do_markdown_conversion,
-                html_content
+                filtered_html
             )
 
             if markdown_content:

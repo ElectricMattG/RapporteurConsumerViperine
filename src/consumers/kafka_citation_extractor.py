@@ -54,8 +54,8 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
+from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import parse_qs, urlencode, urljoin, urlparse, urlunparse
 
 from confluent_kafka import Consumer, KafkaError, Producer
 
@@ -220,14 +220,16 @@ class KafkaCitationExtractorConsumer(Base):
             self.cache_dir = Path(self._app_config.get('citation_extractor.cache_directory') or 'cache/citations')
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-            self.min_citation_length = self._app_config.get('citation_extractor.min_citation_length') or 10
+            self.min_citation_length = self._app_config.get('citation_extractor.min_citation_length') or 3
             self.max_citations_per_chunk = self._app_config.get('citation_extractor.max_citations_per_chunk') or 50
 
-            self._logger.info("✅ Configuration loaded:")
-            self._logger.info(f"   Kafka servers: {bootstrap_servers}")
-            self._logger.info(f"   Consumer group: {self.kafka_config['group.id']}")
-            self._logger.info(f"   Input topic: {self.input_topic}")
-            self._logger.info(f"   Output topic: {self.output_topic}")
+            # Global citation tracking for consistent numbering
+            self.url_to_citation_number = {}
+            self.global_citation_counter = 1
+            self.global_citation_metadata = {}
+            self.normalize_urls = True  # Enable URL normalization
+            self.current_document_id = None  # Track current document for per-document numbering
+
             self._logger.info(f"   Cache directory: {self.cache_dir}")
             self._logger.info(f"   Min citation length: {self.min_citation_length} chars")
             self._logger.info(f"   Max citations per chunk: {self.max_citations_per_chunk}")
@@ -281,31 +283,85 @@ class KafkaCitationExtractorConsumer(Base):
             self.consumer.close()
         self._logger.info("✅ Consumer shut down successfully")
 
-    def _extract_inline_citations(self, text: str, base_url: Optional[str] = None) -> List[Dict[str, Any]]:
+    def _normalize_url(self, url: str) -> str:
         """
-        Extract inline citations/URLs from markdown text.
+        Normalize URL for consistent processing.
+        Removes tracking parameters and fragments.
+        """
+        if not self.normalize_urls:
+            return url
 
-        Looks for markdown link patterns: [text](url)
+        try:
+            parsed = urlparse(url)
+
+            # Remove tracking parameters
+            if parsed.query:
+                query_params = parse_qs(parsed.query, keep_blank_values=True)
+
+                # Common tracking parameters to remove
+                tracking_params = {
+                    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content',
+                    'fbclid', 'gclid', 'msclkid', 'mc_cid', 'mc_eid',
+                    '_ga', '_gid', '_hsenc', '_hsmi',
+                    'ref', 'ref_src', 'ref_url', 'referrer',
+                    'share', 'source'
+                }
+
+                filtered_params = {k: v for k, v in query_params.items() if k not in tracking_params}
+                new_query = urlencode(filtered_params, doseq=True) if filtered_params else ''
+            else:
+                new_query = ''
+
+            # Remove fragment
+            normalized = urlunparse((
+                parsed.scheme,
+                parsed.netloc,
+                parsed.path,
+                parsed.params,
+                new_query,
+                ''  # Remove fragment
+            ))
+
+            return normalized
+        except Exception:
+            return url
+
+    def _extract_domain(self, url: str) -> str:
+        """Extract domain from URL."""
+        try:
+            return urlparse(url).netloc
+        except Exception:
+            return "unknown"
+
+    def _extract_inline_citations(self, content: str, base_url: Optional[str] = None,
+                                  source_chunk_id: str = None) -> Tuple[str, List[Dict[str, Any]]]:
+        """
+        Extract inline citations/URLs from markdown text and transform content.
+        Replaces [text](url) with text [N] where N is a global citation number.
+        Handles punctuation: [text](url). becomes text [N].
 
         Args:
-            text: Markdown text to extract citations from
+            content: Markdown text to extract citations from
             base_url: Base URL for resolving relative URLs
+            source_chunk_id: ID of the source chunk
 
         Returns:
-            List of citation dictionaries with url, text, and position
+            Tuple of (transformed_content, list_of_citation_dicts)
         """
+        # Pattern for markdown links with optional trailing punctuation: [text](url)[.,;:!?]?
+        link_pattern = r'\[([^\]]+)\]\(([^)]+)\)([.,;:!?]?)'
+
         citations = []
 
-        # Pattern for markdown links: [text](url)
-        link_pattern = r'\[([^\]]+)\]\(([^)]+)\)'
-
-        for match in re.finditer(link_pattern, text):
-            citation_text = match.group(1).strip()
+        def replace_citation(match):
+            anchor_text = match.group(1).strip()
             url = match.group(2).strip()
+            trailing_punct = match.group(3)  # Capture trailing punctuation
 
             # Skip if citation text is too short
-            if len(citation_text) < self.min_citation_length:
-                continue
+            if len(anchor_text) < self.min_citation_length:
+                # Return original markdown if too short
+                return match.group(0)
 
             # Resolve relative URLs
             if base_url and not url.startswith(('http://', 'https://', 'mailto:', 'tel:', '#')):
@@ -313,49 +369,105 @@ class KafkaCitationExtractorConsumer(Base):
 
             # Only keep HTTP(S) URLs (skip mailto:, tel:, anchors)
             if not url.startswith(('http://', 'https://')):
-                continue
+                return match.group(0)
 
+            # Normalize URL if enabled
+            normalized_url = self._normalize_url(url) if self.normalize_urls else url
+
+            # Get or assign global citation number
+            if normalized_url not in self.url_to_citation_number:
+                self.url_to_citation_number[normalized_url] = self.global_citation_counter
+                # Store metadata for this citation
+                self.global_citation_metadata[self.global_citation_counter] = {
+                    'url': normalized_url,
+                    'anchor_text': anchor_text,
+                    'domain': self._extract_domain(normalized_url),
+                    'source_chunk_id': source_chunk_id,
+                    'original_url': url,
+                    'all_anchor_texts': [anchor_text]
+                }
+                self.global_citation_counter += 1
+            else:
+                # URL already exists, add this anchor text if it's new
+                citation_num = self.url_to_citation_number[normalized_url]
+                existing_anchors = self.global_citation_metadata[citation_num]['all_anchor_texts']
+                if anchor_text not in existing_anchors:
+                    existing_anchors.append(anchor_text)
+
+            citation_num = self.url_to_citation_number[normalized_url]
+
+            # Track citation for this chunk
             citations.append({
-                'url': url,
-                'anchor_text': citation_text,  # Match schema: 'anchor_text' not 'text'
-                'position': match.start()
+                'citation_number': citation_num,
+                'url': normalized_url,
+                'anchor_text': anchor_text,
+                'domain': self._extract_domain(normalized_url),
+                'position': match.start(),
+                'original_url': url
             })
+
+            # Replace with: anchor_text [citation_num] + preserved punctuation
+            # If there's trailing punctuation, put it after the citation number
+            if trailing_punct:
+                return f"{anchor_text} [{citation_num}]{trailing_punct}"
+            else:
+                return f"{anchor_text} [{citation_num}]"
+
+        # Transform content
+        processed_content = re.sub(link_pattern, replace_citation, content)
 
         # Limit citations per chunk
         if len(citations) > self.max_citations_per_chunk:
             citations = citations[:self.max_citations_per_chunk]
 
-        return citations
+        return processed_content, citations
 
     def _enrich_chunk_with_citations(self, chunk: Dict[str, Any], base_url: Optional[str] = None) -> Dict[str, Any]:
         """
         Enrich a chunk by extracting citations from its content text.
+        Transforms content by replacing [text](url) with text [N].
+        Citation numbering resets per document.
 
         Args:
-            chunk: Chunk dictionary with 'content' and metadata (matching citation_extractor.py schema)
+            chunk: Chunk dictionary with 'content' and metadata
             base_url: Base URL for resolving relative URLs
 
         Returns:
-            Enriched chunk with citations in metadata
+            Enriched chunk with transformed content and citation metadata
         """
-        # Extract citations from chunk content (use 'content' key to match schema)
+        # Extract citations and transform content
         content = chunk.get('content', '')
-        citations = self._extract_inline_citations(content, base_url)
+        chunk_id = chunk.get('chunk_metadata', {}).get('chunk_id', 'unknown')
+        document_id = chunk.get('document_metadata', {}).get('document_id', 'unknown')
+
+        # Reset citation numbering when processing a new document
+        if document_id != self.current_document_id:
+            self.current_document_id = document_id
+            self.url_to_citation_number = {}
+            self.global_citation_counter = 1
+            self.global_citation_metadata = {}
+            self._logger.debug(f"   🔄 Reset citation numbering for new document: {document_id}")
+
+        processed_content, citations = self._extract_inline_citations(content, base_url, chunk_id)
+
+        # Create enriched chunk with transformed content
+        enriched_chunk = chunk.copy()
+        enriched_chunk['content'] = processed_content
 
         # Ensure chunk_metadata exists
-        if 'chunk_metadata' not in chunk:
-            chunk['chunk_metadata'] = {}
+        if 'chunk_metadata' not in enriched_chunk:
+            enriched_chunk['chunk_metadata'] = {}
 
-        # Add citation metadata (matching citation_extractor.py schema)
+        # Add citation metadata
         if citations:
-            chunk['chunk_metadata']['citations'] = citations
-            chunk['chunk_metadata']['citation_count'] = len(citations)
-            chunk['chunk_metadata']['has_citations'] = True
+            enriched_chunk['chunk_metadata']['citations'] = citations
+            enriched_chunk['chunk_metadata']['citation_count'] = len(citations)
+            enriched_chunk['chunk_metadata']['has_citations'] = True
         else:
-            chunk['chunk_metadata']['has_citations'] = False
-            chunk['chunk_metadata']['citation_count'] = 0
+            enriched_chunk['chunk_metadata']['has_citations'] = False
+            enriched_chunk['chunk_metadata']['citation_count'] = 0
 
-        return chunk
+        return enriched_chunk
 
     async def _process_message(self, message_data: Dict[str, Any]) -> Dict[str, Any]:
         """

@@ -241,17 +241,25 @@ class CitationExtractor:
             return "unknown"
 
     def _extract_inline_citations(self, content: str, source_chunk_id: str = None, doc_metadata: Dict = None) -> tuple[str, Dict[int, Dict[str, str]]]:
-        """Extract citations from content and replace with numbered references."""
-        # Pattern to match markdown links: [text](url)
-        pattern = r'\[([^\]]+)\]\(([^)]+)\)'
+        """
+        Extract citations from content and replace with numbered references.
+        Handles punctuation: [text](url). becomes text [N].
+        """
+        # Pattern to match markdown links with optional trailing punctuation: [text](url)[.,;:!?]?
+        pattern = r'\[([^\]]+)\]\(([^)]+)\)([.,;:!?]?)'
 
         metadata = {}
 
         def replace_citation(match):
             anchor_text = match.group(1)
             url = match.group(2)
+            trailing_punct = match.group(3)  # Capture trailing punctuation
 
-            # Normalize URL if enabled
+            # Resolve relative URLs to absolute URLs first
+            if self.base_url and not url.startswith(('http://', 'https://', 'mailto:', 'tel:', '#')):
+                url = urljoin(self.base_url, url)
+
+            # Normalize URL if enabled (remove tracking params, etc.)
             normalized_url = self._normalize_url(url) if self.normalize_urls else url
 
             # Get or assign global citation number
@@ -286,8 +294,12 @@ class CitationExtractor:
                 'original_url': url
             }
 
-            # Replace with: anchor_text [citation_num]
-            return f"{anchor_text} [{citation_num}]"
+            # Replace with: anchor_text [citation_num] + preserved punctuation
+            # If there's trailing punctuation, put it after the citation number
+            if trailing_punct:
+                return f"{anchor_text} [{citation_num}]{trailing_punct}"
+            else:
+                return f"{anchor_text} [{citation_num}]"
 
         # Replace all citations in content
         processed_content = re.sub(pattern, replace_citation, content)

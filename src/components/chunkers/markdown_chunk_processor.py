@@ -36,7 +36,8 @@ class ChunkMergerConfig:
                 'cookies', 'cookie', 'preferences', 'accept', 'decline',
                 'privacy', 'terms',
                 'subscribe', 'follow', 'share', 'tweet', 'like',
-                'newsletter', 'sign up', 'log in', 'register'
+                'newsletter', 'sign up', 'log in', 'register',
+                'advertisement', 'homepage'
             ]
 
         # Navigation and footer patterns (will match headers and content)
@@ -51,7 +52,8 @@ class ChunkMergerConfig:
                 'youtube video transcript', 'share', 'recent', 'keep in touch',
                 'support', 'privacy statement', 'cookie', 'technical storage',
                 'your voice at the united nations', 'copyright ©', 'un watch in the news',
-                'tags', 'resources', 'related', 'main navigation'
+                'tags', 'resources', 'related', 'main navigation',
+                'advertisement', 'homepage'
             ]
 
         if self.youtube_header_patterns is None:
@@ -239,6 +241,17 @@ class MarkdownChunkProcessor:
                         'chunks_merged': [chunk],
                         'word_count': word_count,
                         'is_header': is_header or is_numbered_header
+                    }
+                    continue
+
+                # If current merge IS a header, don't merge content into it - headers stand alone
+                if current_merge.get('is_header'):
+                    merged.append(self._create_merged_chunk(current_merge))
+                    current_merge = {
+                        'content': content,
+                        'chunks_merged': [chunk],
+                        'word_count': word_count,
+                        'is_header': False
                     }
                     continue
 
