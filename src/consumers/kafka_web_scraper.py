@@ -1909,7 +1909,11 @@ class KafkaWebScraperConsumer(Base):
 
     def _publish_to_kafka(self, extraction_result: Dict):
         """
-        Publish extraction result to Kafka output topic for downstream processing.
+        Publish extraction result to Kafka topics for downstream processing.
+
+        Publishes to BOTH:
+        1. summarise-document - for AI summary generation (always high quality)
+        2. content-extracted - for direct chunking (legacy/fallback)
 
         Args:
             extraction_result: The extraction result dictionary
@@ -1918,7 +1922,7 @@ class KafkaWebScraperConsumer(Base):
             request_id = extraction_result.get('request_id', 'unknown')
             session_id = extraction_result.get('session_id', 'unknown')
 
-            # Prepare message for summarizer consumer
+            # Prepare message
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
@@ -1941,7 +1945,16 @@ class KafkaWebScraperConsumer(Base):
             # Serialize message
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
 
-            # Publish to output topic
+            # Publish to BOTH topics to ensure always-on summarization
+            # 1. Summarization topic - AI will generate high-quality summary
+            self.producer.produce(
+                topic='summarise-document',
+                key=request_id.encode('utf-8'),
+                value=message_bytes,
+                callback=self._delivery_callback
+            )
+
+            # 2. Direct chunking topic (kept for backwards compatibility)
             self.producer.produce(
                 topic=self.output_topic,
                 key=request_id.encode('utf-8'),
@@ -1952,7 +1965,7 @@ class KafkaWebScraperConsumer(Base):
             # Flush to ensure delivery
             self.producer.poll(0)
 
-            self._logger.info(f"📤 Published to '{self.output_topic}' topic: request_id={request_id}")
+            self._logger.info(f"📤 Published to 'summarise-document' and '{self.output_topic}' topics: request_id={request_id}")
 
         except Exception as e:
             self._logger.error(f"❌ Error publishing to Kafka: {e}")

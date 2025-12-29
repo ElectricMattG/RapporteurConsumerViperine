@@ -1,0 +1,9 @@
+# Azure Blob Storage Configuration
+AZURE_STORAGE_CONNECTION_STRING=""
+
+# Kafka Configuration
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+
+# Optional: Set specific container names (defaults shown)
+# AZURE_INDICES_CONTAINER=indices
+# AZURE_ARCHIVE_CONTAINER=research-archive

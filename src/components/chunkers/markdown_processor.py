@@ -367,22 +367,8 @@ class HierarchicalChunkBuilder:
             # Build section hierarchy
             section_hierarchy = parent_sections + [node.text]
 
-            # Create chunk for header
-            header_chunk = self._create_chunk(
-                content=f"{'#' * node.level} {node.text}",
-                chunk_type=f"header_{node.level}",
-                start_pos=node.start_pos,
-                end_pos=node.start_pos + len(node.text),
-                chunk_index=chunk_index,
-                section_hierarchy=section_hierarchy,
-                parent_section=node.text,
-                document_metadata=document_metadata,
-                prev_chunk_id=prev_chunk_id
-            )
-
-            prev_chunk_id = header_chunk["chunk_metadata"]["chunk_id"]
-            chunks.append(header_chunk)
-            chunk_index += 1
+            # Don't create chunks for headers - they're already in section_hierarchy
+            # Headers are structural metadata, not content
 
             # Create chunks for content blocks
             for block in node.content_blocks:

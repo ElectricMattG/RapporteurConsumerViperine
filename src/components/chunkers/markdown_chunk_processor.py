@@ -53,7 +53,13 @@ class ChunkMergerConfig:
                 'support', 'privacy statement', 'cookie', 'technical storage',
                 'your voice at the united nations', 'copyright ©', 'un watch in the news',
                 'tags', 'resources', 'related', 'main navigation',
-                'advertisement', 'homepage'
+                # Common navigation/sidebar sections
+                'most viewed', 'most popular', 'most read', 'trending now',
+                'top stories', 'latest news', 'more from', 'more on',
+                'follow us on', 'us politics', 'uk politics', 'climate crisis',
+                'middle east', 'global development',
+                # Citation/metadata headers that shouldn't be content
+                'citation', 'unknown', 'jpost.com', 'theguardian.com'
             ]
 
         if self.youtube_header_patterns is None:
@@ -82,6 +88,59 @@ class MarkdownChunkProcessor:
             r'August|September|October|November|December)\s+\d{4}\s*$'
         )
         self.sentence_end_pattern = re.compile(r'[.!?]\s+')
+        self.markdown_link_pattern = re.compile(r'\[([^\]]+)\]\([^\)]+\)')
+
+    @staticmethod
+    def _strip_markdown_links(text: str) -> str:
+        """
+        Strip markdown links from text, extracting just the anchor text.
+
+        Converts [anchor text](url) to just "anchor text"
+
+        Args:
+            text: Text potentially containing markdown links
+
+        Returns:
+            Text with markdown links replaced by their anchor text
+        """
+        if not text:
+            return text
+
+        # Pattern: [anchor text](url)
+        # Replace with just the anchor text
+        pattern = re.compile(r'\[([^\]]+)\]\([^\)]+\)')
+        cleaned = pattern.sub(r'\1', text)
+
+        return cleaned
+
+    @staticmethod
+    def _strip_leading_headers(text: str) -> str:
+        """
+        Strip leading markdown headers from content.
+
+        Headers like "# Title" or "## Section" are already in section_hierarchy
+        and parent_section, so they shouldn't be duplicated in content.
+
+        Args:
+            text: Content text that may start with headers
+
+        Returns:
+            Text with leading headers removed
+        """
+        if not text:
+            return text
+
+        lines = text.split('\n')
+        # Skip leading header lines (lines starting with #)
+        content_start = 0
+        for i, line in enumerate(lines):
+            stripped = line.strip()
+            if stripped and not stripped.startswith('#'):
+                content_start = i
+                break
+
+        # Return content without leading headers
+        return '\n'.join(lines[content_start:]).strip()
 
     def process_chunks(self, chunks: List[Dict]) -> List[Dict]:
         """Filter and merge chunks."""
@@ -130,6 +189,11 @@ class MarkdownChunkProcessor:
         # Extract header text for comparison
         if content_stripped.startswith('#'):
             header_text = content_stripped.lstrip('#').strip().lower()
+
+            # Filter out EMPTY headers (just "#", "##", "###" with no text)
+            if not header_text:
+                return True
+
             # Check if header matches navigation patterns
             for pattern in self.config.navigation_patterns:
                 if pattern in header_text:
@@ -142,8 +206,12 @@ class MarkdownChunkProcessor:
                     if pattern in content_lower:
                         return True
 
-        # Keep markdown headers (they provide structure) if not navigation/footer
+        # Keep markdown headers (they provide structure) if not navigation/footer and not empty
         if content_stripped.startswith('#'):
+            # Only keep if it has actual text after the #
+            header_text = content_stripped.lstrip('#').strip()
+            if not header_text or len(header_text) < 2:  # No text or single character
+                return True
             return False
 
         # Word count check
@@ -319,11 +387,29 @@ class MarkdownChunkProcessor:
         content = merge_data['content']
         word_count = merge_data['word_count']
 
+        # Strip leading headers from content (they're already in section_hierarchy)
+        content = self._strip_leading_headers(content)
+
+        # Flatten content - remove newlines to create single-line chunks
+        content = content.replace('\n\n', ' ').replace('\n', ' ')
+        # Normalize whitespace
+        content = ' '.join(content.split())
+
         # Use first chunk as base
         base_chunk = merge_data['chunks_merged'][0]
 
         # Generate new chunk ID
         chunk_id = f"chunk_{hashlib.md5(content.encode()).hexdigest()[:12]}"
+
+        # Get section hierarchy and parent section, clean markdown links
+        section_hierarchy = base_chunk.get('chunk_metadata', {}).get('section_hierarchy', [])
+        parent_section = base_chunk.get('chunk_metadata', {}).get('parent_section')
+
+        # Strip markdown links from section hierarchy to get clean text
+        if section_hierarchy:
+            section_hierarchy = [self._strip_markdown_links(s) for s in section_hierarchy]
+        if parent_section:
+            parent_section = self._strip_markdown_links(parent_section)
 
         # Build merged chunk
         merged_chunk = {
@@ -336,8 +422,8 @@ class MarkdownChunkProcessor:
                 'word_count': word_count,
                 'char_count': len(content),
                 'line_count': content.count('\n') + 1,
-                'section_hierarchy': base_chunk.get('chunk_metadata', {}).get('section_hierarchy', []),
-                'parent_section': base_chunk.get('chunk_metadata', {}).get('parent_section'),
+                'section_hierarchy': section_hierarchy,
+                'parent_section': parent_section,
                 'prev_chunk_id': None,
                 'next_chunk_id': None,
                 'merged_from_count': len(merge_data['chunks_merged']),
