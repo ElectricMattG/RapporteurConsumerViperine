@@ -59,7 +59,14 @@ class ChunkMergerConfig:
                 'follow us on', 'us politics', 'uk politics', 'climate crisis',
                 'middle east', 'global development',
                 # Citation/metadata headers that shouldn't be content
-                'citation', 'unknown', 'jpost.com', 'theguardian.com'
+                'citation', 'unknown', 'jpost.com', 'theguardian.com',
+                # Wikipedia UI elements
+                'table of contents', 'contents', 'move to sidebar', 'toggle',
+                'view source', 'view history', 'what links here', 'upload file',
+                'permanent link', 'page information', 'cite this page',
+                'shortened url', 'download qr', 'printable version', 'wikimedia commons',
+                'wikidata item', 'coordinates', 'from wikipedia', 'bahasa indonesia',
+                'bahasa melayu', 'tiếng việt'
             ]
 
         if self.youtube_header_patterns is None:
@@ -178,6 +185,20 @@ class MarkdownChunkProcessor:
             return True
 
         content_lower = content_stripped.lower()
+
+        # Filter table of contents patterns
+        # TOC usually has many consecutive markdown links with anchor patterns
+        toc_patterns = [
+            r'\- \[\d+\.?\d*\s+[^\]]+\]\(#[^\)]+\)',  # - [1 Title](#anchor) or - [1.1 Title](#anchor)
+            r'\- \[\d+\s+[^\]]+\]\(#[^\)]+\).*\- \[\d+',  # Multiple consecutive TOC entries
+        ]
+        import re
+        for pattern in toc_patterns:
+            if re.search(pattern, content_stripped):
+                # Check if content has 3+ TOC-style links (strong TOC signal)
+                toc_link_count = len(re.findall(r'\- \[\d+\.?\d*\s+[^\]]+\]\(#', content_stripped))
+                if toc_link_count >= 3:
+                    return True
 
         # Keep numbered bold headers like **1. Title** or **2.  Title** FIRST (structural elements)
         # Check this before navigation patterns since some headers contain navigation words

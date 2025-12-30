@@ -849,44 +849,23 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning(f"⚠️  Error cleaning up local indices cache: {e}")
 
     def _upload_chunks(self, session_id: str, new_chunks: List[Dict]):
-        """Upload chunks to Azure research index with dynamic naming based on query_id."""
+        """Upload chunks to Azure research index using append-only pattern."""
         if not self.upload_to_azure:
             self._logger.warning("⚠️  No Azure credentials - saving locally instead")
             self._save_chunks_locally(new_chunks)
             return
 
         try:
-            # Get query_id for this session and determine blob names
-            query_id = self.session_query_id.get(session_id, 'default')
-            chunks_blob_name, _ = self._get_blob_names(query_id)
+            self._logger.info(f"📤 Appending chunks to Azure index...")
 
-            if query_id != 'default':
-                self._logger.info(f"📤 Uploading chunks to query-specific index: {chunks_blob_name}")
-            else:
-                self._logger.info(f"📤 Uploading chunks to default index: {chunks_blob_name}")
+            # Check for duplicates against local cache (no download needed)
+            existing_ids = self._get_existing_chunk_ids_from_cache(session_id)
 
-            # Download existing index
-            existing_chunks = self._download_blob(chunks_blob_name)
-
-            # Save pre-append snapshot for diff tracking (avoids egress costs)
-            if existing_chunks:
-                self._save_pre_append_index(session_id, existing_chunks, "chunks")
-
-            # Deduplicate by document_id and chunk_id
-            existing_ids = set()
-            all_chunks = []
-
-            for chunk in existing_chunks:
-                doc_id = chunk.get('document_metadata', {}).get('document_id')
-                chunk_id = chunk.get('chunk_metadata', {}).get('chunk_id')
-                if doc_id and chunk_id:
-                    key = f"{doc_id}:{chunk_id}"
-                    if key not in existing_ids:
-                        existing_ids.add(key)
-                        all_chunks.append(chunk)
-
-            # Add new chunks (skip duplicates)
+            # Filter out duplicates from new chunks
+            unique_chunks = []
             new_count = 0
+            duplicate_count = 0
+
             for chunk in new_chunks:
                 doc_id = chunk.get('document_metadata', {}).get('document_id')
                 chunk_id = chunk.get('chunk_metadata', {}).get('chunk_id')
@@ -894,45 +873,48 @@ class KafkaIndexAggregatorConsumer(Base):
                     key = f"{doc_id}:{chunk_id}"
                     if key not in existing_ids:
                         existing_ids.add(key)
-                        all_chunks.append(chunk)
+                        unique_chunks.append(chunk)
                         new_count += 1
+                    else:
+                        duplicate_count += 1
 
-            self._logger.info(f"   📊 Existing chunks: {len(existing_chunks)}")
             self._logger.info(f"   ➕ New chunks: {new_count}")
-            self._logger.info(f"   🔄 Duplicates skipped: {len(new_chunks) - new_count}")
-            self._logger.info(f"   📈 Total chunks: {len(all_chunks)}")
+            self._logger.info(f"   🔄 Duplicates skipped: {duplicate_count}")
 
             # Track chunks aggregation metrics
             if self.telemetry_enabled:
                 consumer_id_label = f"index_aggregator_{os.getpid()}"
                 self.chunks_aggregated.labels(consumer_id=consumer_id_label).inc(new_count)
-                self.chunks_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(len(new_chunks) - new_count)
+                self.chunks_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(duplicate_count)
 
-            # Upload to Azure
-            upload_start = time.time() if self.telemetry_enabled else None
-            self._upload_blob(chunks_blob_name, all_chunks)
+            # Append to Azure using append-only operation (no download/upload cycle)
+            if unique_chunks:
+                upload_start = time.time() if self.telemetry_enabled else None
+                self._append_to_blob(self.chunks_blob_name, unique_chunks)
 
-            # Track Azure upload metrics
-            if self.telemetry_enabled and upload_start:
-                upload_duration = time.time() - upload_start
-                self.azure_upload_duration.labels(
-                    consumer_id=consumer_id_label,
-                    blob_type='chunks',
-                    status='success'
-                ).observe(upload_duration)
+                # Update local cache with new IDs
+                self._update_chunk_id_cache(session_id, existing_ids)
 
-                # Track blob size
-                blob_size = len(json.dumps(all_chunks, ensure_ascii=False).encode('utf-8'))
-                self.azure_storage_bytes.labels(
-                    consumer_id=consumer_id_label,
-                    container=self.container_name,
-                    blob_name=chunks_blob_name
-                ).set(blob_size)
+                # Track Azure append metrics
+                if self.telemetry_enabled and upload_start:
+                    upload_duration = time.time() - upload_start
+                    self.azure_upload_duration.labels(
+                        consumer_id=consumer_id_label,
+                        blob_type='chunks',
+                        status='success'
+                    ).observe(upload_duration)
 
-            self._logger.info(f"   ✅ Chunks uploaded successfully")
+                    # Track appended data size (not full blob)
+                    appended_size = len(json.dumps(unique_chunks, ensure_ascii=False).encode('utf-8'))
+                    self.azure_storage_bytes.labels(
+                        consumer_id=consumer_id_label,
+                        container=self.container_name,
+                        blob_name=self.chunks_blob_name
+                    ).inc(appended_size)
 
-            # Clean up local cache after successful upload
-            self._cleanup_local_indices_cache()
+                self._logger.info(f"   ✅ Chunks appended successfully (no full download/upload)")
+            else:
+                self._logger.info(f"   ℹ️  No new chunks to append (all duplicates)")
 
         except Exception as e:
             self._logger.error(f"❌ Error uploading chunks to Azure: {e}")
@@ -957,21 +939,14 @@ class KafkaIndexAggregatorConsumer(Base):
                 traceback.print_exc()
 
     def _upload_qa_pairs(self, session_id: str, new_qa_pairs: List[Dict]):
-        """Normalize and upload Q&A pairs to Azure research index with dynamic naming based on query_id."""
+        """Normalize and upload Q&A pairs to Azure research index using append-only pattern."""
         if not self.upload_to_azure:
             self._logger.warning("⚠️  No Azure credentials - saving locally instead")
             self._save_qa_pairs_locally(new_qa_pairs)
             return
 
         try:
-            # Get query_id for this session and determine blob names
-            query_id = self.session_query_id.get(session_id, 'default')
-            _, qa_blob_name = self._get_blob_names(query_id)
-
-            if query_id != 'default':
-                self._logger.info(f"❓ Uploading Q&A pairs to query-specific index: {qa_blob_name}")
-            else:
-                self._logger.info(f"❓ Uploading Q&A pairs to default index: {qa_blob_name}")
+            self._logger.info(f"📤 Appending Q&A pairs to Azure index...")
 
             # Normalize Q&A pairs using index adapter
             self._logger.info(f"   🔄 Normalizing Q&A pairs to enriched chunks schema...")
@@ -986,73 +961,64 @@ class KafkaIndexAggregatorConsumer(Base):
 
             self._logger.info(f"   ✅ Normalized {len(normalized_qa)} Q&A pairs")
 
-            # Download existing index
-            existing_qa = self._download_blob(qa_blob_name)
+            # Check for duplicates against local cache (no download needed)
+            existing_ids = self._get_existing_qa_ids_from_cache(session_id)
 
-            # Save pre-append snapshot for diff tracking (avoids egress costs)
-            if existing_qa:
-                self._save_pre_append_index(session_id, existing_qa, "qa_pairs")
-
-            # Deduplicate by chunk_id (Q&A pairs use qa_{chunk_id}_{qa_index} as chunk_id)
-            existing_ids = set()
-            all_qa = []
-
-            for qa in existing_qa:
-                chunk_id = qa.get('chunk_metadata', {}).get('chunk_id')
-                if chunk_id:
-                    if chunk_id not in existing_ids:
-                        existing_ids.add(chunk_id)
-                        all_qa.append(qa)
-
-            # Add new Q&A pairs (skip duplicates)
+            # Filter out duplicates from new Q&A pairs
+            unique_qa = []
             new_count = 0
+            duplicate_count = 0
+
             for qa in normalized_qa:
                 chunk_id = qa.get('chunk_metadata', {}).get('chunk_id')
                 if chunk_id:
                     if chunk_id not in existing_ids:
                         existing_ids.add(chunk_id)
-                        all_qa.append(qa)
+                        unique_qa.append(qa)
                         new_count += 1
+                    else:
+                        duplicate_count += 1
 
-            self._logger.info(f"   📊 Existing Q&A pairs: {len(existing_qa)}")
             self._logger.info(f"   ➕ New Q&A pairs: {new_count}")
-            self._logger.info(f"   🔄 Duplicates skipped: {len(normalized_qa) - new_count}")
-            self._logger.info(f"   📈 Total Q&A pairs: {len(all_qa)}")
+            self._logger.info(f"   🔄 Duplicates skipped: {duplicate_count}")
 
             # Track QA pairs aggregation metrics
             if self.telemetry_enabled:
                 consumer_id_label = f"index_aggregator_{os.getpid()}"
                 self.qa_pairs_aggregated.labels(consumer_id=consumer_id_label).inc(new_count)
-                self.qa_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(len(normalized_qa) - new_count)
+                self.qa_duplicates_filtered.labels(consumer_id=consumer_id_label).inc(duplicate_count)
 
-            # Upload to Azure
-            upload_start = time.time() if self.telemetry_enabled else None
-            self._upload_blob(qa_blob_name, all_qa)
+            # Append to Azure using append-only operation (no download/upload cycle)
+            if unique_qa:
+                upload_start = time.time() if self.telemetry_enabled else None
+                self._append_to_blob(self.qa_blob_name, unique_qa)
 
-            # Track Azure upload metrics
-            if self.telemetry_enabled and upload_start:
-                upload_duration = time.time() - upload_start
-                self.azure_upload_duration.labels(
-                    consumer_id=consumer_id_label,
-                    blob_type='qa_pairs',
-                    status='success'
-                ).observe(upload_duration)
+                # Update local cache with new IDs
+                self._update_qa_id_cache(session_id, existing_ids)
 
-                # Track blob size
-                blob_size = len(json.dumps(all_qa, ensure_ascii=False).encode('utf-8'))
-                self.azure_storage_bytes.labels(
-                    consumer_id=consumer_id_label,
-                    container=self.container_name,
-                    blob_name=qa_blob_name
-                ).set(blob_size)
+                # Track Azure append metrics
+                if self.telemetry_enabled and upload_start:
+                    upload_duration = time.time() - upload_start
+                    self.azure_upload_duration.labels(
+                        consumer_id=consumer_id_label,
+                        blob_type='qa_pairs',
+                        status='success'
+                    ).observe(upload_duration)
 
-            self._logger.info(f"   ✅ Q&A pairs uploaded successfully")
+                    # Track appended data size (not full blob)
+                    appended_size = len(json.dumps(unique_qa, ensure_ascii=False).encode('utf-8'))
+                    self.azure_storage_bytes.labels(
+                        consumer_id=consumer_id_label,
+                        container=self.container_name,
+                        blob_name=self.qa_blob_name
+                    ).inc(appended_size)
 
-            # Clean up local cache after successful upload (shared cleanup, only runs once per session)
-            # Note: cleanup is idempotent and safe to call multiple times
+                self._logger.info(f"   ✅ Q&A pairs appended successfully (no full download/upload)")
+            else:
+                self._logger.info(f"   ℹ️  No new Q&A pairs to append (all duplicates)")
 
         except Exception as e:
-            self._logger.error(f"❌ Error uploading Q&A pairs to Azure: {e}")
+            self._logger.error(f"❌ Error appending Q&A pairs to Azure: {e}")
             self._logger.warning(f"⚠️  Falling back to local storage...")
             import traceback
             traceback.print_exc()
@@ -1318,8 +1284,38 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.warning(f"   ⚠️  Error downloading blob {blob_name}: {e}")
             return []
 
+    def _append_to_blob(self, blob_name: str, documents: List[Dict]):
+        """Append JSONL documents to Azure Append Blob (no download required)."""
+        try:
+            # Convert to JSONL
+            jsonl_content = '\n'.join(json.dumps(doc, ensure_ascii=False) for doc in documents) + '\n'
+
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.container_name,
+                blob=blob_name
+            )
+
+            # Check if blob exists, if not create as append blob
+            try:
+                properties = blob_client.get_blob_properties()
+                # Blob exists, append to it
+                blob_client.append_block(jsonl_content.encode('utf-8'))
+                self._logger.info(f"   📤 Appended {len(documents)} documents to {blob_name}")
+            except Exception:
+                # Blob doesn't exist, create it as append blob
+                self._logger.info(f"   📤 Creating new append blob: {blob_name}")
+                blob_client.create_append_blob(
+                    content_settings=ContentSettings(content_type='application/jsonl')
+                )
+                blob_client.append_block(jsonl_content.encode('utf-8'))
+                self._logger.info(f"   📤 Appended {len(documents)} documents to new blob {blob_name}")
+
+        except Exception as e:
+            self._logger.error(f"Error appending to blob {blob_name}: {e}")
+            raise
+
     def _upload_blob(self, blob_name: str, documents: List[Dict]):
-        """Upload JSONL documents to Azure blob."""
+        """Upload JSONL documents to Azure blob (legacy method for full replacement)."""
         try:
             # Convert to JSONL
             jsonl_content = '\n'.join(json.dumps(doc, ensure_ascii=False) for doc in documents)
@@ -1341,6 +1337,52 @@ class KafkaIndexAggregatorConsumer(Base):
         except Exception as e:
             self._logger.error(f"Error uploading blob {blob_name}: {e}")
             raise
+
+    def _get_existing_chunk_ids_from_cache(self, session_id: str) -> Set[str]:
+        """Get existing chunk IDs from local cache to avoid downloading full index."""
+        try:
+            cache_file = Path(self.cache_dir) / "chunk_ids_cache.txt"
+            if cache_file.exists():
+                with open(cache_file, 'r') as f:
+                    return set(line.strip() for line in f if line.strip())
+            return set()
+        except Exception as e:
+            self._logger.warning(f"⚠️  Error loading chunk ID cache: {e}")
+            return set()
+
+    def _update_chunk_id_cache(self, session_id: str, chunk_ids: Set[str]):
+        """Update local cache with new chunk IDs."""
+        try:
+            cache_file = Path(self.cache_dir) / "chunk_ids_cache.txt"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, 'w') as f:
+                for chunk_id in sorted(chunk_ids):
+                    f.write(f"{chunk_id}\n")
+        except Exception as e:
+            self._logger.warning(f"⚠️  Error updating chunk ID cache: {e}")
+
+    def _get_existing_qa_ids_from_cache(self, session_id: str) -> Set[str]:
+        """Get existing Q&A IDs from local cache to avoid downloading full index."""
+        try:
+            cache_file = Path(self.cache_dir) / "qa_ids_cache.txt"
+            if cache_file.exists():
+                with open(cache_file, 'r') as f:
+                    return set(line.strip() for line in f if line.strip())
+            return set()
+        except Exception as e:
+            self._logger.warning(f"⚠️  Error loading Q&A ID cache: {e}")
+            return set()
+
+    def _update_qa_id_cache(self, session_id: str, qa_ids: Set[str]):
+        """Update local cache with new Q&A IDs."""
+        try:
+            cache_file = Path(self.cache_dir) / "qa_ids_cache.txt"
+            cache_file.parent.mkdir(parents=True, exist_ok=True)
+            with open(cache_file, 'w') as f:
+                for qa_id in sorted(qa_ids):
+                    f.write(f"{qa_id}\n")
+        except Exception as e:
+            self._logger.warning(f"⚠️  Error updating Q&A ID cache: {e}")
 
     def _archive_session(self, session_id: str):
         """Archive session files to Azure or local archive directory."""

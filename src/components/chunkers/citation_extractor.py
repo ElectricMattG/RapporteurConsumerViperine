@@ -240,6 +240,48 @@ class CitationExtractor:
         except Exception:
             return "unknown"
 
+    def _is_wikipedia_internal_link(self, url: str, anchor_text: str) -> bool:
+        """Check if this is a Wikipedia UI/internal link that should be filtered."""
+        # Filter Wikipedia action links (edit, history, etc.)
+        wiki_action_patterns = [
+            '/w/index.php?',  # Edit, history, etc.
+            'action=edit',
+            'action=history',
+            'action=info',
+            'Special:',  # Special pages
+            'File_Upload_Wizard',
+            'WhatLinksHere',
+            'CiteThisPage',
+            'UrlShortener',
+            'QrCode',
+            'DownloadAsPdf',
+        ]
+
+        url_lower = url.lower()
+        for pattern in wiki_action_patterns:
+            if pattern.lower() in url_lower:
+                return True
+
+        # Filter language/interwiki links by anchor text
+        wiki_ui_anchors = [
+            'view source', 'view history', 'what links here', 'upload file',
+            'permanent link', 'page information', 'cite this page',
+            'get shortened url', 'download qr', 'printable version',
+            'wikimedia commons', 'wikidata item', 'bahasa indonesia',
+            'bahasa melayu', 'oʻzbekcha', 'tiếng việt',
+        ]
+
+        anchor_lower = anchor_text.lower()
+        for ui_text in wiki_ui_anchors:
+            if ui_text in anchor_lower:
+                return True
+
+        # Filter geographic coordinates
+        if 'geohack.toolforge.org' in url_lower or 'geographic coordinate' in anchor_lower:
+            return True
+
+        return False
+
     def _extract_inline_citations(self, content: str, source_chunk_id: str = None, doc_metadata: Dict = None) -> tuple[str, Dict[int, Dict[str, str]]]:
         """
         Extract citations from content and replace with numbered references.
@@ -258,6 +300,11 @@ class CitationExtractor:
             # Resolve relative URLs to absolute URLs first
             if self.base_url and not url.startswith(('http://', 'https://', 'mailto:', 'tel:', '#')):
                 url = urljoin(self.base_url, url)
+
+            # Skip Wikipedia internal/UI links
+            if self._is_wikipedia_internal_link(url, anchor_text):
+                # Return just the anchor text without citation number
+                return anchor_text + trailing_punct if trailing_punct else anchor_text
 
             # Normalize URL if enabled (remove tracking params, etc.)
             normalized_url = self._normalize_url(url) if self.normalize_urls else url
