@@ -151,6 +151,7 @@ defaults = {
     "summarizer": {
         # Summarizer consumer configuration
         "consumer_group_id": "summarizer-consumer",  # Consumer group ID for summarizer
+        "summary_completed_topic": "summary-completed",  # Topic to publish summary completion messages
         "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini' (Gemini has native web grounding)
         "summary_word_count": 100,  # Target word count for summaries
     },
@@ -206,6 +207,14 @@ defaults = {
         "batch_size": 32,  # Batch size for encoding
         "separator": " [SEP] ",  # Separator for combining question+answer
         "mode": "all",  # Embedding mode: 'question', 'answer', 'combined', or 'all'
+    },
+    "summary_indexer": {
+        # Summary indexer consumer configuration
+        "consumer_group_id": "summary-indexer-consumer",  # Consumer group ID for summary indexer
+        "input_topic": "summary-completed",  # Topic to consume summary completion messages from
+        "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
+        "cache_directory": "cache/summaries",  # Directory for summary index files
+        "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
     },
     "index_aggregator": {
         # Index aggregator consumer configuration

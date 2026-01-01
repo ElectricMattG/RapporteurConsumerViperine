@@ -316,19 +316,24 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info("🚀 Starting index aggregation consumer...")
 
             # Manual partition assignment to bypass consumer group coordinator
-            # Need to consume from BOTH qa-indexed and session-complete topics
+            # Subscribe to BOTH qa-indexed and session-complete topics
+            topics_to_subscribe = [self.input_topic, self.session_complete_topic]
             all_partitions = []
 
-            # Get partitions for qa-indexed topic
-            cluster_metadata = self.consumer.list_topics(self.input_topic, timeout=10)
-            topic_metadata = cluster_metadata.topics.get(self.input_topic)
-            if topic_metadata:
-                qa_partitions = [TopicPartition(self.input_topic, p) for p in topic_metadata.partitions.keys()]
-                all_partitions.extend(qa_partitions)
-                self._logger.info(f"✅ Found {len(qa_partitions)} partitions for topic: {self.input_topic}")
-            else:
-                self._logger.error(f"❌ Topic {self.input_topic} not found")
-                raise RuntimeError(f"Topic {self.input_topic} not found")
+            for topic in topics_to_subscribe:
+                cluster_metadata = self.consumer.list_topics(topic, timeout=10)
+                topic_metadata = cluster_metadata.topics.get(topic)
+
+                if topic_metadata:
+                    partitions = [TopicPartition(topic, p) for p in topic_metadata.partitions.keys()]
+                    all_partitions.extend(partitions)
+                    self._logger.info(f"✅ Found {len(partitions)} partitions for topic: {topic}")
+                else:
+                    self._logger.error(f"❌ Topic {topic} not found")
+                    raise RuntimeError(f"Topic {topic} not found")
+
+            self.consumer.assign(all_partitions)
+            self._logger.info(f"✅ Subscribed to {len(all_partitions)} total partitions across topics: {topics_to_subscribe}")
 
             # Get partitions for session-complete topic
             cluster_metadata = self.consumer.list_topics(self.session_complete_topic, timeout=10)
@@ -464,19 +469,34 @@ class KafkaIndexAggregatorConsumer(Base):
 
             session_id = message_data.get('session_id', 'unknown')
             request_id = message_data.get('request_id', 'unknown')
+            index_type = message_data.get('index_type')  # NEW: 'summaries' or None (for chunks/QA)
 
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
 
-            # Note: query_id will be extracted from chunk/QA metadata when loading files
-            # This ensures we use the correct query_id from the actual data, not just the message
+            # Handle summary index completion (from Summary Indexer)
+            if index_type == 'summaries':
+                summary_index_file = message_data.get('summary_index_file')
+                total_summaries = message_data.get('total_summaries', 0)
 
-            # Track total expected requests if provided
+                self._logger.info(f"📚 Summary index complete for session: {session_id}")
+                self._logger.info(f"   Summary index: {summary_index_file}")
+                self._logger.info(f"   Total summaries: {total_summaries}")
+
+                # Store summary index file for later aggregation
+                if not hasattr(self, 'session_summary_indices'):
+                    self.session_summary_indices = defaultdict(str)
+                self.session_summary_indices[session_id] = summary_index_file
+
+                # Note: We don't trigger aggregation here - wait for chunks/QA to complete
+                return
+
+            # Track total expected requests if provided (for chunks/QA pipeline)
             if 'total_requests' in message_data:
                 self.session_total_requests[session_id] = message_data['total_requests']
                 self._logger.info(f"📊 Session {session_id}: Expecting {message_data['total_requests']} total requests")
 
-            # Check if this is a session complete signal
+            # Check if this is a session complete signal (from QA Embedder)
             if message_data.get('session_complete'):
                 self._logger.info(f"🏁 Session complete signal received: {session_id}")
                 self._aggregate_and_upload_session(session_id)
@@ -717,9 +737,25 @@ class KafkaIndexAggregatorConsumer(Base):
             self._logger.info(f"   Total chunks: {len(self.session_chunks[session_id])}")
             self._logger.info(f"   Total Q&A pairs: {len(self.session_qa_pairs[session_id])}")
 
+            # Check for summary index
+            summary_count = 0
+            if hasattr(self, 'session_summary_indices') and session_id in self.session_summary_indices:
+                summary_index_file = self.session_summary_indices[session_id]
+                if Path(summary_index_file).exists():
+                    with open(summary_index_file, 'r', encoding='utf-8') as f:
+                        summary_count = sum(1 for _ in f)
+                    self._logger.info(f"   Total summaries: {summary_count}")
+
             # Always save local backup copies for verification
             if self.session_chunks[session_id] or self.session_qa_pairs[session_id]:
                 self._save_session_backup(session_id, self.session_chunks[session_id], self.session_qa_pairs[session_id])
+
+            # Process summary index (if available)
+            if hasattr(self, 'session_summary_indices') and session_id in self.session_summary_indices:
+                summary_index_file = self.session_summary_indices[session_id]
+                if Path(summary_index_file).exists():
+                    self._logger.info(f"📚 Processing summary index...")
+                    self._upload_summary_index(session_id, summary_index_file)
 
             # Process chunks
             if self.session_chunks[session_id]:
@@ -1038,6 +1074,125 @@ class KafkaIndexAggregatorConsumer(Base):
             except Exception as fallback_error:
                 self._logger.error(f"❌ CRITICAL: Local storage fallback also failed: {fallback_error}")
                 traceback.print_exc()
+
+    def _upload_summary_index(self, session_id: str, summary_index_file: str):
+        """Upload summary index to Azure as a separate blob."""
+        if not self.upload_to_azure:
+            self._logger.warning("⚠️  No Azure credentials - summary index saved locally only")
+            return
+
+        try:
+            self._logger.info(f"📤 Uploading summary index to Azure...")
+
+            # Load summaries from file
+            summaries = []
+            with open(summary_index_file, 'r', encoding='utf-8') as f:
+                for line in f:
+                    if line.strip():
+                        summaries.append(json.loads(line.strip()))
+
+            self._logger.info(f"   📚 Loaded {len(summaries)} summaries from index")
+
+            # Check for duplicates against existing summary index
+            existing_doc_ids = self._get_existing_summary_ids()
+
+            # Filter duplicates
+            unique_summaries = []
+            new_count = 0
+            duplicate_count = 0
+
+            for summary in summaries:
+                doc_id = summary.get('document_id')
+                if doc_id and doc_id not in existing_doc_ids:
+                    existing_doc_ids.add(doc_id)
+                    unique_summaries.append(summary)
+                    new_count += 1
+                else:
+                    duplicate_count += 1
+
+            self._logger.info(f"   ➕ New summaries: {new_count}")
+            self._logger.info(f"   🔄 Duplicates skipped: {duplicate_count}")
+
+            # Append to Azure blob
+            if unique_summaries:
+                summary_blob_name = "research_summaries_with_embeddings_combined.jsonl"
+                upload_start = time.time() if self.telemetry_enabled else None
+
+                self._append_to_blob(summary_blob_name, unique_summaries)
+
+                # Track metrics
+                if self.telemetry_enabled and upload_start:
+                    consumer_id_label = f"index_aggregator_{os.getpid()}"
+                    upload_duration = time.time() - upload_start
+
+                    self.azure_upload_duration.labels(
+                        consumer_id=consumer_id_label,
+                        blob_type='summaries',
+                        status='success'
+                    ).observe(upload_duration)
+
+                    appended_size = len(json.dumps(unique_summaries, ensure_ascii=False).encode('utf-8'))
+                    self.azure_storage_bytes.labels(
+                        consumer_id=consumer_id_label,
+                        container=self.container_name,
+                        blob_name=summary_blob_name
+                    ).inc(appended_size)
+
+                self._logger.info(f"   ✅ Summary index appended successfully")
+            else:
+                self._logger.info(f"   ℹ️  No new summaries to append (all duplicates)")
+
+            # Clean up summary index from session tracking
+            if hasattr(self, 'session_summary_indices') and session_id in self.session_summary_indices:
+                del self.session_summary_indices[session_id]
+
+        except Exception as e:
+            self._logger.error(f"❌ Error uploading summary index: {e}")
+            import traceback
+            traceback.print_exc()
+
+            # Track failed upload
+            if self.telemetry_enabled:
+                consumer_id_label = f"index_aggregator_{os.getpid()}"
+                self.azure_upload_duration.labels(
+                    consumer_id=consumer_id_label,
+                    blob_type='summaries',
+                    status='failure'
+                ).observe(0)
+
+    def _get_existing_summary_ids(self) -> set:
+        """Get set of existing document IDs from summary index (memory-efficient check)."""
+        existing_ids = set()
+
+        if not self.upload_to_azure:
+            return existing_ids
+
+        try:
+            summary_blob_name = "research_summaries_with_embeddings_combined.jsonl"
+            blob_client = self.blob_service_client.get_blob_client(
+                container=self.container_name,
+                blob=summary_blob_name
+            )
+
+            # Stream and parse only document_id field
+            if blob_client.exists():
+                stream = blob_client.download_blob()
+                for line in stream.readall().decode('utf-8').split('\n'):
+                    if line.strip():
+                        try:
+                            entry = json.loads(line.strip())
+                            doc_id = entry.get('document_id')
+                            if doc_id:
+                                existing_ids.add(doc_id)
+                        except json.JSONDecodeError:
+                            continue
+
+                self._logger.info(f"   📋 Found {len(existing_ids)} existing summaries in Azure")
+
+        except Exception as e:
+            self._logger.warning(f"   ⚠️  Could not check existing summaries: {e}")
+
+        return existing_ids
 
     def _normalize_qa_pair(self, qa_pair: Dict) -> Dict:
         """

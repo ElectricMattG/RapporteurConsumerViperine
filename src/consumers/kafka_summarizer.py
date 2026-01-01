@@ -198,6 +198,10 @@ class KafkaSummarizerConsumer(Base):
             # Topic configuration
             self.input_topic = self._app_config.get('kafka.output_topic') or 'summarise-document'
             self.output_topic = 'content-extracted'  # Publish summary back for chunking when extraction failed
+            self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'summary-completed'
+
+            # Session state tracking for summary indexer
+            self.session_counts = {}  # {session_id: {count: int, total: int}}
 
             # Cache configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
@@ -380,6 +384,16 @@ class KafkaSummarizerConsumer(Base):
             result['success'] = True
             result['summary_file'] = str(summary_file)
 
+            # Publish summary-completed message for Summary Indexer
+            await self._publish_summary_completed(
+                request_id=request_id,
+                session_id=session_id,
+                document_id=metadata.get('document_id', request_id),
+                source_url=url,
+                summary_file=str(summary_file),
+                message_data=message_data
+            )
+
             # CONTINGENCY: If extraction failed (403/404) but summary succeeded,
             # publish the summary content to content-extracted topic for chunking
             # This ensures 100% coverage even when direct scraping fails
@@ -527,6 +541,66 @@ class KafkaSummarizerConsumer(Base):
             # Track DLQ metric for failed publish
             if self.telemetry_enabled:
                 self.metrics.increment_dead_letter(self.output_topic, 'publish_failed')
+
+    async def _publish_summary_completed(
+        self,
+        request_id: str,
+        session_id: str,
+        document_id: str,
+        source_url: str,
+        summary_file: str,
+        message_data: Dict
+    ):
+        """
+        Publish summary-completed message for Summary Indexer.
+
+        Args:
+            request_id: Request identifier
+            session_id: Session identifier
+            document_id: Document identifier
+            source_url: Source URL
+            summary_file: Path to saved summary file
+            message_data: Original message data (to extract total_requests)
+        """
+        try:
+            # Get or initialize session count
+            if session_id not in self.session_counts:
+                total_requests = message_data.get('total_requests', 1)
+                self.session_counts[session_id] = {'count': 0, 'total': total_requests}
+
+            # Increment count
+            self.session_counts[session_id]['count'] += 1
+            current_count = self.session_counts[session_id]['count']
+            total_requests = self.session_counts[session_id]['total']
+
+            # Create message
+            message = {
+                'request_id': request_id,
+                'session_id': session_id,
+                'document_id': document_id,
+                'source_url': source_url,
+                'summary_file': summary_file,
+                'current_count': current_count,
+                'total_requests': total_requests,
+                'completed_at': datetime.now().isoformat()
+            }
+
+            # Publish to summary-completed topic
+            self.producer.produce(
+                topic=self.summary_completed_topic,
+                key=session_id.encode('utf-8'),
+                value=json.dumps(message).encode('utf-8'),
+                callback=self._delivery_callback
+            )
+
+            self.producer.poll(0)
+
+            self._logger.info(f"   📤 Published to '{self.summary_completed_topic}' ({current_count}/{total_requests})")
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing summary-completed: {e}")
+            import traceback
+            self._logger.error(traceback.format_exc())
 
     def _delivery_callback(self, err, msg):
         """Callback for Kafka producer delivery reports"""
