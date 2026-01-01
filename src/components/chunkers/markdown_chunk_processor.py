@@ -6,6 +6,7 @@ more meaningful text segments.
 """
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
 from typing import Dict, List, Optional
@@ -84,8 +85,28 @@ class ChunkMergerConfig:
 class MarkdownChunkProcessor:
     """Post-process markdown chunks: filter noise and merge small chunks."""
 
-    def __init__(self, config: Optional[ChunkMergerConfig] = None):
+    def __init__(self, config: Optional[ChunkMergerConfig] = None, llm_client=None, enable_llm_validation: bool = True):
         self.config = config or ChunkMergerConfig()
+        self.llm_client = llm_client
+
+        # Check environment variable first, then fall back to parameter
+        import os
+        env_llm_validation = os.getenv('ENABLE_LLM_VALIDATION', '').lower()
+        if env_llm_validation in ('true', '1', 'yes'):
+            self.enable_llm_validation = True
+        elif env_llm_validation in ('false', '0', 'no'):
+            self.enable_llm_validation = False
+        else:
+            self.enable_llm_validation = enable_llm_validation
+
+        # Initialize logger
+        import logging
+        self.logger = logging.getLogger(__name__)
+
+        if not self.enable_llm_validation:
+            self.logger.info("⚠️ LLM validation is DISABLED")
+        else:
+            self.logger.info("✅ LLM validation is ENABLED")
 
         # Compile patterns
         self.standalone_link_pattern = re.compile(r'^\s*\[([^\]]*)\]\([^)]+\)\s*$')
@@ -149,18 +170,319 @@ class MarkdownChunkProcessor:
         # Return content without leading headers
         return '\n'.join(lines[content_start:]).strip()
 
-    def process_chunks(self, chunks: List[Dict]) -> List[Dict]:
-        """Filter and merge chunks."""
+    async def process_chunks(self, chunks: List[Dict], source_url: str = "") -> List[Dict]:
+        """Filter and merge chunks with optional LLM validation."""
         # Step 1: Filter noise
         filtered_chunks = self._filter_noise(chunks)
 
         # Step 2: Merge small chunks
         merged_chunks = self._merge_chunks(filtered_chunks)
 
-        # Step 3: Update metadata
+        # Step 3: LLM validation on merged chunks (optional)
+        if self.llm_client and self.enable_llm_validation and merged_chunks:
+            try:
+                validated_chunks = []
+                for i in range(0, len(merged_chunks), 2):
+                    batch = merged_chunks[i:i+2]
+                    validation_results = await self._validate_content_batch(batch, source_url)
+                    if validation_results:  # Only apply if we got results
+                        batch_validated = self._apply_validation_results(batch, validation_results)
+                        validated_chunks.extend(batch_validated)
+                    else:
+                        # Validation failed - keep originals unvalidated
+                        self.logger.warning(f"Batch validation returned no results - keeping {len(batch)} chunks unvalidated")
+                        validated_chunks.extend(batch)
+                merged_chunks = validated_chunks
+            except Exception as e:
+                self.logger.error(f"LLM validation failed: {str(e)[:100]}")
+                # Continue with unvalidated chunks on error
+
+        # Step 4: Update metadata
         self._update_chunk_metadata(merged_chunks)
 
         return merged_chunks
+
+    async def _validate_content_batch(self, chunks: List[Dict], source_url: str = "") -> List[Dict]:
+        """Validate chunk content using LLM."""
+        if not self.llm_client or not self.enable_llm_validation:
+            return [{"chunk_id": c.get('chunk_metadata', {}).get('chunk_id', f'chunk_{i}'),
+                    "classification": "valid", "extracted_content": None, "reason": "validation_disabled"}
+                    for i, c in enumerate(chunks)]
+
+        chunks = chunks[:5]  # Batch size limit - smaller batches for reliable parsing
+
+        # Build chunks data
+        chunks_data = []
+        for i, chunk in enumerate(chunks):
+            content = chunk.get('content', '').strip()
+            content = content[:1000].replace('\n', ' ').replace('\r', '')
+            chunk_id = chunk.get('chunk_metadata', {}).get('chunk_id', f'chunk_{i}')
+            chunks_data.append({"chunk_id": chunk_id, "content": content})
+
+        # Build prompt
+        prompt = f"""Classify these content chunks as VALID (substantive news/legal content), MIXED (has content but also UI noise or other lists of content headers not directly related to the articles it;s), or INVALID (pure navigation/UI or lists of other articles with NO substantive content).
+
+CLASSIFICATION RULES:
+1. VALID: Coherent paragraph(s) about ONE topic with depth and context, minimal UI noise
+2. MIXED: Contains ANY news/article content (even 1 sentence) mixed with UI elements - ALWAYS extract the content. Or perhaps intermediate elements with recommended content, or sign-up and other linked activity for a web-site.
+3. INVALID: ONLY for pure UI with ZERO substantive information - navigation bars, login forms, footers. Sign-up pages and or lists or related content, but not the articles main body. Contains membership notification, photo caption, and multiple article teasers. Multiple article teasers and photo captions are present. Contains multiple article teasers and photo captions.
+
+CRITICAL DECISION RULE:
+- Does the chunk contain ANY sentences about news events, facts, or article information? → MIXED (extract it)
+- Is it ONLY navigation links, buttons, or form fields with NO article content? → INVALID (discard)
+- When in doubt, classify as MIXED and extract what you can
+
+When extracting content for MIXED chunks, include ALL substantive information:
+- Article text (keep it)
+- Article teasers/headlines (keep them)
+- Photo captions with context (keep them)
+- Related article titles (keep them as they are content)
+But exclude:
+- Navigation menus
+- "Sign in" / "Subscribe" UI
+- Social media buttons
+- Cookie notices
+
+INVALID EXAMPLES (ONLY pure UI with NO content):
+
+Example 1 - Pure navigation:
+"Home | News | Politics | Business | Subscribe | Sign In | Facebook Twitter Instagram"
+Classification: INVALID
+Reason: Pure navigation menu, zero article content
+
+Example 2 - Pure login form:
+"Enter your email: _____ Password: _____ Remember me [ ] Forgot password? Sign Up"
+Classification: INVALID
+Reason: Pure form UI, zero article content
+
+MIXED EXAMPLES (ANY content + UI):
+
+Example 1 - News + navigation:
+"Netanyahu announces ground offensive in Gaza. Related: Iran tensions | Syria updates | Subscribe to newsletter"
+Classification: MIXED
+Extracted: "Netanyahu announces ground offensive in Gaza. Related: Iran tensions | Syria updates"
+Reason: Has news content and related topics - extract both, discard subscribe button
+
+Example 2 - Photo caption + article + UI:
+"Prime Minister Benjamin Netanyahu at press conference, Oct 28. Israeli forces launched strikes in Gaza targeting Hamas. Click here to share: Facebook Twitter"
+Classification: MIXED
+Extracted: "Prime Minister Benjamin Netanyahu at press conference, Oct 28. Israeli forces launched strikes in Gaza targeting Hamas."
+Reason: Has photo caption and news - extract both, discard social buttons
+
+Example 3 - Multiple article teasers:
+"5:18pm Gaza strikes continue 5:01pm Syrian conflict 4:50pm Lebanon tensions Sign in | Subscribe"
+Classification: MIXED
+Extracted: "5:18pm Gaza strikes continue 5:01pm Syrian conflict 4:50pm Lebanon tensions"
+Reason: Multiple article teasers ARE content - extract all, discard sign in UI
+
+OUTPUT FORMAT - wrap your JSON array in markdown code block:
+```json
+[{{"chunk_id":"id","classification":"valid|mixed|invalid","extracted_content":"text or null","reason":"one simple sentence"}}]
+```
+
+EXAMPLES:
+
+```json
+[{{"chunk_id":"abc123","classification":"valid","extracted_content":null,"reason":"Coherent news story."}}]
+```
+
+```json
+[{{"chunk_id":"def456","classification":"invalid","extracted_content":null,"reason":"Pure navigation menu."}}]
+```
+
+```json
+[{{"chunk_id":"ghi789","classification":"mixed","extracted_content":"Netanyahu announced the war has entered a second phase.","reason":"News content with trailing UI links."}}]
+```
+
+CRITICAL RULES:
+- Wrap JSON in ```json code block
+- Reason: ONE simple sentence, under 10 words
+- Use null (not "null") for extracted_content when not extracting
+- Keep all strings on single lines
+- If chunk lists 4+ unrelated topics = INVALID
+
+Now classify these chunks:
+"""
+        for i, chunk_data in enumerate(chunks_data):
+            prompt += f"\n{i+1}. ID: {chunk_data['chunk_id']}\nContent: {chunk_data['content'][:800]}\n"
+
+        try:
+            response = await self.llm_client.generate_content(
+                prompt=prompt,
+                temperature=0.0,
+                max_tokens=16000  # Increased to handle batches with multiple long extracted_content strings
+            )
+
+            # Log full response for debugging
+            self.logger.info(f"LLM raw response (length: {len(response)} chars): {response}")
+
+            # Pre-process response - extract JSON from markdown code blocks or pure JSON
+            import re
+            cleaned_response = response.strip()
+
+            # Try multiple patterns to extract JSON
+            # Pattern 1: ```json ... ```
+            markdown_match = re.search(r'```json\s*\n(.*?)```', cleaned_response, re.DOTALL)
+            if markdown_match:
+                cleaned_response = markdown_match.group(1).strip()
+                self.logger.info(f"✅ Extracted JSON from ```json block (length: {len(cleaned_response)} chars)")
+            else:
+                # Pattern 2: ``` ... ``` (without json keyword)
+                markdown_match = re.search(r'```\s*\n(.*?)```', cleaned_response, re.DOTALL)
+                if markdown_match:
+                    cleaned_response = markdown_match.group(1).strip()
+                    self.logger.info(f"✅ Extracted JSON from ``` block (length: {len(cleaned_response)} chars)")
+                else:
+                    # Pattern 3: Try to find JSON array directly (starts with [ and ends with ])
+                    # This handles pure JSON responses without markdown
+                    if cleaned_response.startswith('[') and cleaned_response.endswith(']'):
+                        self.logger.info(f"✅ Using response as pure JSON array (length: {len(cleaned_response)} chars)")
+                    else:
+                        self.logger.warning("⚠️ No markdown code block found, trying to extract JSON array")
+                        # Fallback: try to find JSON array within the response
+                        array_match = re.search(r'(\[\s*\{.*?\}\s*\])', cleaned_response, re.DOTALL)
+                        if array_match:
+                            cleaned_response = array_match.group(1).strip()
+                            self.logger.info(f"✅ Extracted JSON array from response (length: {len(cleaned_response)} chars)")
+                        else:
+                            self.logger.error(f"❌ Could not extract JSON. Full response: {cleaned_response}")
+
+            if not cleaned_response:
+                self.logger.error("❌ Cleaned response is empty after extraction!")
+                return []
+
+            # Try to parse JSON - handle malformed responses
+            try:
+                results = json.loads(cleaned_response)
+            except json.JSONDecodeError as je:
+                # Try multiple repair strategies
+                self.logger.warning(f"Initial JSON parse failed, attempting repair: {str(je)[:100]}")
+
+                # Strategy 1: Aggressively remove ALL newlines and whitespace between tokens
+                try:
+                    # Remove newlines everywhere
+                    fixed_response = cleaned_response.replace('\n', ' ').replace('\r', ' ').replace('\\n', ' ').replace('\\r', ' ').replace('\t', ' ')
+                    # Collapse multiple spaces
+                    fixed_response = re.sub(r'\s+', ' ', fixed_response).strip()
+                    results = json.loads(fixed_response)
+                    self.logger.info("✅ JSON repair successful (newline removal)")
+                except json.JSONDecodeError:
+                    # Strategy 2: Extract array and try again
+                    try:
+                        match = re.search(r'\[.*\]', cleaned_response, re.DOTALL)
+                        if match:
+                            json_str = match.group(0)
+                            # Remove newlines
+                            json_str = json_str.replace('\n', ' ').replace('\r', ' ').replace('\\n', ' ').replace('\\r', ' ').replace('\t', ' ')
+                            json_str = re.sub(r'\s+', ' ', json_str).strip()
+                            results = json.loads(json_str)
+                            self.logger.info("✅ JSON repair successful (array extraction)")
+                        else:
+                            raise ValueError("No JSON array found")
+                    except Exception:
+                        # Strategy 3: Try to fix common patterns - replace literal newlines in quoted strings
+                        try:
+                            # This regex finds string values and replaces newlines within them
+                            def fix_string(match):
+                                content = match.group(1)
+                                # Replace newlines with spaces inside the captured string
+                                return '"' + content.replace('\n', ' ').replace('\r', ' ') + '"'
+
+                            fixed_response = re.sub(r'"([^"]*(?:\n[^"]*)*)"', fix_string, cleaned_response)
+                            # Now collapse remaining whitespace
+                            fixed_response = re.sub(r'\s+', ' ', fixed_response).strip()
+                            results = json.loads(fixed_response)
+                            self.logger.info("✅ JSON repair successful (string newline fix)")
+                        except Exception as final_error:
+                            self.logger.error(f"All JSON repair strategies failed: {final_error}")
+                            return []
+
+            if not isinstance(results, list):
+                self.logger.warning(f"LLM returned non-list: {type(results)}")
+                return [{"chunk_id": cd['chunk_id'], "classification": "valid",
+                        "extracted_content": None, "reason": "format_error"} for cd in chunks_data]
+
+            # Match by chunk_id
+            results_by_id = {r.get('chunk_id'): r for r in results if isinstance(r, dict) and 'chunk_id' in r}
+            matched_results = []
+            for chunk_data in chunks_data:
+                result = results_by_id.get(chunk_data['chunk_id'])
+                if result:
+                    matched_results.append(result)
+                else:
+                    matched_results.append({
+                        "chunk_id": chunk_data['chunk_id'],
+                        "classification": "valid",
+                        "extracted_content": None,
+                        "reason": "missing_from_llm"
+                    })
+
+            self.logger.info(f"✅ LLM validated {len(matched_results)} chunks")
+            return matched_results
+
+        except json.JSONDecodeError as e:
+            self.logger.error(f"JSON parse failed: {e}\nResponse: {response[:500]}")
+            # Return empty list to trigger fallback - don't assume valid!
+            return []
+        except asyncio.TimeoutError:
+            self.logger.warning(f"LLM timeout for {len(chunks_data)} chunks")
+            return [{"chunk_id": cd['chunk_id'], "classification": "valid",
+                    "extracted_content": None, "reason": "timeout"} for cd in chunks_data]
+        except Exception as e:
+            self.logger.error(f"LLM error: {str(e)[:100]}")
+            return [{"chunk_id": cd['chunk_id'], "classification": "valid",
+                    "extracted_content": None, "reason": "error"} for cd in chunks_data]
+
+    def _apply_validation_results(self, chunks: List[Dict], validation_results: List[Dict]) -> List[Dict]:
+        """Apply validation results to chunks."""
+        validation_by_id = {v.get('chunk_id'): v for v in validation_results if v.get('chunk_id')}
+
+        filtered_chunks = []
+        invalid_count = 0
+
+        for chunk in chunks:
+            chunk_id = chunk.get('chunk_metadata', {}).get('chunk_id')
+            validation = validation_by_id.get(chunk_id, {})
+            classification = validation.get('classification', 'valid').lower()
+
+            if classification == 'invalid':
+                invalid_count += 1
+                self.logger.debug(f"Filtered invalid chunk: {validation.get('reason', '')}")
+                continue
+            elif classification == 'mixed':
+                extracted = validation.get('extracted_content')
+                # Always keep mixed chunks and save metadata
+                chunk['chunk_metadata']['validation_status'] = 'mixed'
+                chunk['chunk_metadata']['validation_reason'] = validation.get('reason', '')
+                chunk['chunk_metadata']['extracted_content'] = extracted
+
+                # Replace content with cleaned extraction if available
+                if extracted and extracted.strip():
+                    # Check for truncation (ends mid-word without punctuation)
+                    if extracted and len(extracted) > 20:
+                        last_chars = extracted[-20:].strip()
+                        ends_with_word = last_chars and last_chars[-1].isalnum()
+                        if ends_with_word:
+                            self.logger.warning(f"⚠️ Extracted content may be truncated (ends with '{extracted[-30:]}') for chunk {chunk_id}")
+
+                    chunk['content'] = extracted.strip()
+                    self.logger.debug(f"Replaced content with extraction: {validation.get('reason', '')}")
+                else:
+                    self.logger.warning(f"Mixed chunk kept with original content (no extraction): {validation.get('reason', '')}")
+
+                filtered_chunks.append(chunk)
+            else:  # valid
+                chunk['chunk_metadata']['validation_status'] = 'valid'
+                chunk['chunk_metadata']['validation_reason'] = validation.get('reason', '')
+                filtered_chunks.append(chunk)
+
+        # Warn if excessive filtering
+        if invalid_count > 0 and len(chunks) > 0:
+            filter_rate = (invalid_count / len(chunks)) * 100
+            if filter_rate > 80:
+                self.logger.warning(f"⚠️ High filter rate: {invalid_count}/{len(chunks)} ({filter_rate:.1f}%) marked INVALID - verify not discarding article content")
+
+        return filtered_chunks
 
     def _filter_noise(self, chunks: List[Dict]) -> List[Dict]:
         """Remove noisy chunks."""

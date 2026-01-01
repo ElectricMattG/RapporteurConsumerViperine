@@ -131,7 +131,7 @@ class GeminiLLMClient(Base):
 
     async def generate_content(self, prompt: str, temperature: Optional[float] = None,
                         max_tokens: Optional[int] = None, enable_search: bool = False,
-                        return_grounding_metadata: bool = False) -> str:
+                        return_grounding_metadata: bool = False, response_mime_type: Optional[str] = None) -> str:
         """Generate content using Gemini with specified parameters (async).
 
         Args:
@@ -140,6 +140,7 @@ class GeminiLLMClient(Base):
             max_tokens: Maximum tokens to generate. If None, uses default max_length.
             enable_search: Enable Google Search grounding for real-time web search
             return_grounding_metadata: Return dict with text and grounding metadata instead of just text
+            response_mime_type: Force response format (e.g., 'application/json')
 
         Returns:
             Generated text response (or dict if return_grounding_metadata=True)
@@ -153,13 +154,17 @@ class GeminiLLMClient(Base):
             'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
         }
 
-        # Add Google Search grounding tool if enabled
-        tools = []
-        if enable_search:
-            self._logger.debug(f"      🔍 Enabling Google Search grounding")
-            # Google Search tool for real-time web grounding
-            # This allows the model to search the web and cite sources
-            tools.append(types.Tool(google_search=types.GoogleSearch()))
+            # Add JSON mode if requested
+            if response_mime_type:
+                config_params['response_mime_type'] = response_mime_type
+
+            # Add Google Search grounding tool if enabled
+            tools = []
+            if enable_search:
+                self._logger.debug(f"      🔍 Enabling Google Search grounding")
+                # Google Search tool for real-time web grounding
+                # This allows the model to search the web and cite sources
+                tools.append(types.Tool(google_search=types.GoogleSearch()))
 
         config = types.GenerateContentConfig(
             tools=tools if tools else None,

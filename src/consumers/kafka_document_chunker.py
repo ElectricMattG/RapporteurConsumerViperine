@@ -59,6 +59,13 @@ from components.chunkers.markdown_chunk_processor import (
     ChunkMergerConfig, MarkdownChunkProcessor)
 from config_handler import Base
 
+# Try to import LLM client
+try:
+    from clients.llm_gcp_client import GeminiLLMClient
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
+
 
 class KafkaDocumentChunkerConsumer(Base):
     """Consumer for chunking web-extracted documents via Kafka."""
@@ -134,7 +141,37 @@ class KafkaDocumentChunkerConsumer(Base):
                 filter_date_only=True,
                 filter_youtube_headers=True
             )
-            self.chunk_processor = MarkdownChunkProcessor(config=chunk_processor_config)
+
+            # Initialize LLM client for validation
+            llm_client = None
+
+            # Check environment variable first, then config, then default to True
+            env_llm_validation = os.getenv('ENABLE_LLM_VALIDATION', '').lower()
+            if env_llm_validation in ('true', '1', 'yes'):
+                enable_llm_validation = True
+            elif env_llm_validation in ('false', '0', 'no'):
+                enable_llm_validation = False
+            else:
+                enable_llm_validation = self._app_config.get('chunker.enable_llm_validation')
+                if enable_llm_validation is None:
+                    enable_llm_validation = True
+
+            self._logger.info(f"   🔧 LLM validation: {'✅ ENABLED' if enable_llm_validation else '⚠️  DISABLED'}")
+
+            if enable_llm_validation and GEMINI_AVAILABLE:
+                try:
+                    llm_client = GeminiLLMClient()
+                    self._logger.info(f"   ✅ Gemini LLM client initialized for content validation")
+                except Exception as e:
+                    self._logger.warning(f"   ⚠️  Failed to initialize LLM client: {e}")
+            elif not GEMINI_AVAILABLE:
+                self._logger.warning(f"   ⚠️  Gemini client not available, skipping LLM validation")
+
+            self.chunk_processor = MarkdownChunkProcessor(
+                config=chunk_processor_config,
+                llm_client=llm_client,
+                enable_llm_validation=enable_llm_validation and llm_client is not None
+            )
             self._logger.info(f"   ✅ MarkdownChunkProcessor enabled (min_words={chunk_processor_config.min_words}, max={max_chunk_words})")
         else:
             self.chunk_processor = None
@@ -353,9 +390,9 @@ class KafkaDocumentChunkerConsumer(Base):
                     original_count = len(chunks)
                     original_words = sum(c.chunk_metadata.word_count for c in chunks)
 
-                    # Convert chunks to dicts, process, then back
+                    # Convert chunks to dicts, process with async, then back
                     chunk_dicts = [c.to_dict() for c in chunks]
-                    processed_dicts = self.chunk_processor.process_chunks(chunk_dicts)
+                    processed_dicts = await self.chunk_processor.process_chunks(chunk_dicts, source_url=url)
 
                     # For now, we'll save the processed dicts directly
                     # (avoiding complex Chunk object reconstruction)

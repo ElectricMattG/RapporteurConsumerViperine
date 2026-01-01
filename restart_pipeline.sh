@@ -33,6 +33,7 @@ echo "🗑️  Step 3: Creating and flushing Kafka topics..."
 
 TOPICS=(
     "web-scrape-requests"
+    "summarise-document"
     "content-extracted"
     "citation-extraction"
     "chunk-embedding"
@@ -66,8 +67,8 @@ cd "$(dirname "$0")"
 python3 src/consumers/run_kafka_consumer.py > logs/web_scraper.log 2>&1 &
 echo "   ✅ Web Scraper (PID: $!)"
 
-python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
-echo "   ✅ Document Chunker (PID: $!)"
+ENABLE_LLM_VALIDATION=true python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
+echo "   ✅ Document Chunker (PID: $!) - LLM validation: ON"
 
 python3 src/consumers/run_kafka_citation_extractor.py > logs/citation_extractor.log 2>&1 &
 echo "   ✅ Citation Extractor (PID: $!)"

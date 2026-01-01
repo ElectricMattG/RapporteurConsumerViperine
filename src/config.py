@@ -163,6 +163,7 @@ defaults = {
         "max_chunk_words": 350,  # Maximum words per chunk before splitting at sentence boundary
         "process_markdown_chunks": True,  # Apply MarkdownChunkProcessor to filter noise and merge small chunks
         "min_chunk_words": 3,  # Minimum words for a chunk (used by MarkdownChunkProcessor)
+        "enable_llm_validation": True,  # Use Gemini LLM to validate chunk content quality (filters nav/UI/off-topic)
     },
     "citation_extractor": {
         # Citation extraction consumer configuration
