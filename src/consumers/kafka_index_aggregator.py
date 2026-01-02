@@ -470,9 +470,15 @@ class KafkaIndexAggregatorConsumer(Base):
             session_id = message_data.get('session_id', 'unknown')
             request_id = message_data.get('request_id', 'unknown')
             index_type = message_data.get('index_type')  # NEW: 'summaries' or None (for chunks/QA)
+            signal = message_data.get('signal')  # Session complete signal from test script
 
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
+
+            # Ignore session-complete signals from test scripts (these don't have data, just signals)
+            if signal == 'session_complete':
+                self._logger.debug(f"🏁 Session complete signal received: {session_id}")
+                return
 
             # Handle summary index completion (from Summary Indexer)
             if index_type == 'summaries':
