@@ -34,6 +34,7 @@ echo "🗑️  Step 3: Creating and flushing Kafka topics..."
 TOPICS=(
     "web-scrape-requests"
     "summarise-document"
+    "summary-completed"
     "content-extracted"
     "citation-extraction"
     "chunk-embedding"
@@ -67,7 +68,7 @@ cd "$(dirname "$0")"
 python3 src/consumers/run_kafka_consumer.py > logs/web_scraper.log 2>&1 &
 echo "   ✅ Web Scraper (PID: $!)"
 
-ENABLE_LLM_VALIDATION=true python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
+ENABLE_LLM_VALIDATION=false python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
 echo "   ✅ Document Chunker (PID: $!) - LLM validation: ON"
 
 python3 src/consumers/run_kafka_citation_extractor.py > logs/citation_extractor.log 2>&1 &
@@ -85,6 +86,9 @@ echo "   ✅ Q&A Embedder (PID: $!)"
 python3 src/consumers/run_kafka_summarizer.py > logs/summarizer.log 2>&1 &
 echo "   ✅ Summarizer (PID: $!)"
 
+python3 src/consumers/run_kafka_summary_indexer.py > logs/summary_indexer.log 2>&1 &
+echo "   ✅ Summary Indexer (PID: $!)"
+
 sleep 3
 
 python3 src/consumers/run_kafka_index_aggregator.py > logs/index_aggregator.log 2>&1 &
@@ -96,12 +100,12 @@ echo ""
 echo "🔍 Step 5: Verifying consumer status..."
 
 RUNNING_COUNT=$(ps aux | grep "python3 src/consumers" | grep -v grep | wc -l)
-echo "   Running consumers: $RUNNING_COUNT/8"
+echo "   Running consumers: $RUNNING_COUNT/9"
 
-if [ "$RUNNING_COUNT" -eq 8 ]; then
+if [ "$RUNNING_COUNT" -eq 9 ]; then
     echo "   ✅ All consumers started successfully"
 else
-    echo "   ⚠️  Expected 8 consumers, found $RUNNING_COUNT"
+    echo "   ⚠️  Expected 9 consumers, found $RUNNING_COUNT"
     echo ""
     echo "   Active consumers:"
     ps aux | grep "python3 src/consumers" | grep -v grep | awk '{print "     • " $NF}' | sed 's|src/consumers/||' | sed 's|run_||' | sed 's|.py||'
@@ -119,4 +123,5 @@ echo "   • Chunk Embedder:    logs/chunk_embedder.log"
 echo "   • Q&A Generator:     logs/qa_generator.log"
 echo "   • Q&A Embedder:      logs/qa_embedder.log"
 echo "   • Summarizer:        logs/summarizer.log"
+echo "   • Summary Indexer:   logs/summary_indexer.log"
 echo "   • Index Aggregator:  logs/index_aggregator.log"

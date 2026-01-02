@@ -165,7 +165,7 @@ def main():
     """Main entry point."""
     # RAG response from user (October 21-28, 2023)
     rag_response = {
-        "session_id": "sess_e0fc67c87f00",
+        "session_id": f"sess_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
         "request_id": "65f2862308fa59afc0e56d37053fdd69",
         "query": "Get the news from the Israeli PM office 21 October 2023 - 28 October 2023 include any YouTube video from Israeli PM",
         "answer_preview": "## News from the Israeli Prime Minister's Office (October 21-28, 2023)\n\nDuring the week of October 21 to October 28, 2023, the primary focus of the Israeli Prime Minister's Office was the ongoing war with Hamas, which had begun on October 7. Key activities included public addresses by Prime Minister Benjamin Netanyahu, meetings with the families of hostages, and decisions regarding the expansion of military operations.\n\nOn Wednesday, October 25, Prime Minister Netanyahu delivered a public statement affirming the two main goals of the war: the elimination of Hamas's military and governing capabilities, and the return of all captives. [www.gov.il](https://vertexaisearch.cloud.google.com/grounding-api-redirect/AUZIYQEq6Tzk2qEVtfIO6bdBz71cuMTtgAdgpDEAdk4vCsMRX4H82bMgJHi03kJ_K7JFMtbrtTP0IxUrtCm",

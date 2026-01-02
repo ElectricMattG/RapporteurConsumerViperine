@@ -23,23 +23,23 @@ API_KEY = "32d160f623efa11ebd88d34ca0b9f4093eb1f866a640d4b70b0fbafb6c22e398"
 OUTPUT_DIR = Path("research_results")
 
 # Kafka configuration
-KAFKA_BOOTSTRAP_SERVERS = "kafka.rapporteur.ai:9094"
+KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 KAFKA_ENABLED = True  # Set to False to disable Kafka publishing
 
 # Time window configuration
-START_DATE = datetime(2023, 10, 7)  # October 7, 2023
-END_DATE = datetime(2025, 11, 4)   # December 17, 2025
-WINDOW_DAYS = 14  # 2 weeks
+START_DATE = datetime(2023, 1, 1)  # October 7, 2023
+END_DATE = datetime(2026, 1, 1)   # Test with just 2 windows
+WINDOW_DAYS = 7  # 2 weeks
 
 # Query template
-QUERY_TEMPLATE = "Get the latest news from the Israeli Defense Force from {start_date} to {end_date}"
+QUERY_TEMPLATE = "Get the latest news from the Israeli Prime Ministers Office from {start_date} to {end_date}"
 
 # Request configuration
 PROCESSING_MODE = "research"
-TOP_K = 3
+TOP_K = 10
 ENABLE_QUERY_REFINEMENT = False
 REQUEST_TIMEOUT = 180  # 3 minutes
-DELAY_BETWEEN_WINDOWS = 5  # 90 seconds between each window/batch
+DELAY_BETWEEN_WINDOWS = 30  # 10 seconds between each window/batch for testing
 
 
 def generate_time_windows(start_date, end_date, window_days):
@@ -97,7 +97,7 @@ def save_result(result, start_date, end_date):
     """Save query result to a JSON file."""
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    filename = f"idf_news_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.json"
+    filename = f"pm_news_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.json"
     filepath = OUTPUT_DIR / filename
 
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -107,7 +107,6 @@ def save_result(result, start_date, end_date):
 
 
 def summarize_result(result):
-    """Generate a brief summary of the query result."""
     if "error" in result:
         return f"❌ Error: {result['error']}"
 
@@ -301,7 +300,7 @@ def main():
 
         # Add session_id for Kafka tracking
         if "error" not in result:
-            result["session_id"] = f"time_series_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
+            result["session_id"] = f"time_series_pm_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}"
 
         # Save result
         filepath = save_result(result, start_date, end_date)

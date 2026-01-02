@@ -9,6 +9,7 @@ pillow
 fastapi
 cryptography
 aiohttp
+aiofiles  # Async file I/O operations
 # Kafka dependencies
 confluent-kafka
 # Additional dependencies for URL resolution and scraping
