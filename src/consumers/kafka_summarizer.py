@@ -104,7 +104,7 @@ class KafkaSummarizerConsumer(Base):
 
             # Create metrics server with health checks
             self.metrics_server = MetricsServer(
-                port=8006,
+                port=8010,
                 consumer_name='summarizer',
                 health_check=lambda: self.running,
                 ready_check=lambda: self.consumer is not None and self.running
@@ -151,7 +151,7 @@ class KafkaSummarizerConsumer(Base):
                 buckets=[100, 500, 1000, 2000, 5000, 10000, 20000, 50000]
             )
 
-            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8006")
+            self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8010")
         else:
             self.metrics = None
             self.system_metrics = None
@@ -376,6 +376,8 @@ class KafkaSummarizerConsumer(Base):
 
             # Save summary to cache as JSONL
             summary_file = request_dir / "summary.jsonl"
+            # Ensure directory exists before writing
+            summary_file.parent.mkdir(parents=True, exist_ok=True)
             with open(summary_file, 'w', encoding='utf-8') as f:
                 f.write(json.dumps(summary_result, ensure_ascii=False) + '\n')
 

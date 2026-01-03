@@ -215,6 +215,11 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_total_requests: Dict[str, int] = {}  # Expected total requests per session
         self.session_query_id: Dict[str, str] = {}  # Track query_id per session for index naming
 
+        # Pipeline completion tracking - all three must complete before aggregation
+        self.session_chunks_complete: Dict[str, bool] = defaultdict(bool)
+        self.session_qa_complete: Dict[str, bool] = defaultdict(bool)
+        self.session_summaries_complete: Dict[str, bool] = defaultdict(bool)
+
         # Directory configuration
         self.cache_dir = Path(aggregator_config.cache_dir)
         self.session_backup_dir = Path(aggregator_config.session_backup_dir)
@@ -332,22 +337,9 @@ class KafkaIndexAggregatorConsumer(Base):
                     self._logger.error(f"❌ Topic {topic} not found")
                     raise RuntimeError(f"Topic {topic} not found")
 
+            # Assign all partitions (already includes both topics from topics_to_subscribe)
             self.consumer.assign(all_partitions)
             self._logger.info(f"✅ Subscribed to {len(all_partitions)} total partitions across topics: {topics_to_subscribe}")
-
-            # Get partitions for session-complete topic
-            cluster_metadata = self.consumer.list_topics(self.session_complete_topic, timeout=10)
-            topic_metadata = cluster_metadata.topics.get(self.session_complete_topic)
-            if topic_metadata:
-                session_partitions = [TopicPartition(self.session_complete_topic, p) for p in topic_metadata.partitions.keys()]
-                all_partitions.extend(session_partitions)
-                self._logger.info(f"✅ Found {len(session_partitions)} partitions for topic: {self.session_complete_topic}")
-            else:
-                self._logger.warning(f"⚠️  Topic {self.session_complete_topic} not found - session completion signals may not work")
-
-            # Assign all partitions
-            self.consumer.assign(all_partitions)
-            self._logger.info(f"✅ Manually assigned {len(all_partitions)} total partitions across both topics")
 
             # Start telemetry services if available
             if self.telemetry_enabled:
@@ -482,6 +474,11 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Handle summary index completion (from Summary Indexer)
             if index_type == 'summaries':
+                # Ignore if session already aggregated (duplicate signal)
+                if session_id not in self.session_chunks:
+                    self._logger.debug(f"⏭️  Ignoring summary signal for already-aggregated session: {session_id}")
+                    return
+
                 summary_index_file = message_data.get('summary_index_file')
                 total_summaries = message_data.get('total_summaries', 0)
 
@@ -494,7 +491,12 @@ class KafkaIndexAggregatorConsumer(Base):
                     self.session_summary_indices = defaultdict(str)
                 self.session_summary_indices[session_id] = summary_index_file
 
-                # Note: We don't trigger aggregation here - wait for chunks/QA to complete
+                # Mark summaries as complete
+                self.session_summaries_complete[session_id] = True
+                self._logger.info(f"✅ Summaries complete for session: {session_id}")
+
+                # Check if all pipelines are ready
+                self._check_and_aggregate_if_ready(session_id)
                 return
 
             # Track total expected requests if provided (for chunks/QA pipeline)
@@ -504,8 +506,20 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Check if this is a session complete signal (from QA Embedder)
             if message_data.get('session_complete'):
-                self._logger.info(f"🏁 Session complete signal received: {session_id}")
-                self._aggregate_and_upload_session(session_id)
+                # Ignore if session already aggregated (duplicate signal)
+                if session_id not in self.session_chunks:
+                    self._logger.debug(f"⏭️  Ignoring QA/Chunks signal for already-aggregated session: {session_id}")
+                    return
+
+                self._logger.info(f"🏁 QA/Chunks pipeline complete signal received: {session_id}")
+
+                # Mark both chunks and QA as complete (they finish together)
+                self.session_chunks_complete[session_id] = True
+                self.session_qa_complete[session_id] = True
+                self._logger.info(f"✅ Chunks/QA complete for session: {session_id}")
+
+                # Check if all pipelines are ready (including summaries)
+                self._check_and_aggregate_if_ready(session_id)
                 return
 
             # Regular request processing
@@ -593,11 +607,12 @@ class KafkaIndexAggregatorConsumer(Base):
                 if received >= expected:
                     self._logger.info(f"✅ All requests received ({received}/{expected}) for session: {session_id}")
 
-                    # Verify all pipeline files are present before aggregating
-                    if self._verify_all_files_ready(session_id):
-                        self._aggregate_and_upload_session(session_id)
-                    else:
-                        self._logger.warning(f"⚠️  Delaying aggregation - waiting for remaining files to complete processing")
+                    # Mark chunks and QA as complete (they're processed together)
+                    self.session_chunks_complete[session_id] = True
+                    self.session_qa_complete[session_id] = True
+
+                    # Check if all three pipelines are ready before aggregating
+                    self._check_and_aggregate_if_ready(session_id)
 
         except json.JSONDecodeError as e:
             self._logger.error(f"❌ Invalid JSON in message: {e}")
@@ -610,6 +625,32 @@ class KafkaIndexAggregatorConsumer(Base):
             import traceback
             traceback.print_exc()
 
+    def _check_and_aggregate_if_ready(self, session_id: str):
+        """Check if all three pipelines are complete, then aggregate and upload.
+
+        All three pipelines must complete before aggregation:
+        1. Chunks pipeline (embedded chunks)
+        2. QA pipeline (enriched QA pairs with embeddings)
+        3. Summaries pipeline (summary index with embeddings)
+
+        Args:
+            session_id: The session identifier to check
+        """
+        chunks_ready = self.session_chunks_complete[session_id]
+        qa_ready = self.session_qa_complete[session_id]
+        summaries_ready = self.session_summaries_complete[session_id]
+
+        self._logger.info(f"📊 Pipeline status for {session_id}:")
+        self._logger.info(f"   Chunks: {'✅' if chunks_ready else '⏳'}")
+        self._logger.info(f"   QA pairs: {'✅' if qa_ready else '⏳'}")
+        self._logger.info(f"   Summaries: {'✅' if summaries_ready else '⏳'}")
+
+        if chunks_ready and qa_ready and summaries_ready:
+            self._logger.info(f"🎉 All pipelines complete! Aggregating session: {session_id}")
+            self._aggregate_and_upload_session(session_id)
+        else:
+            self._logger.info(f"⏳ Waiting for remaining pipelines to complete...")
+
     def _check_session_timeouts(self):
         """Check for sessions that have timed out and process them."""
         current_time = time.time()
@@ -617,6 +658,24 @@ class KafkaIndexAggregatorConsumer(Base):
         for session_id, last_activity in list(self.session_last_activity.items()):
             if current_time - last_activity > self.session_timeout:
                 self._logger.info(f"⏰ Session timeout: {session_id}")
+
+                # Check if session has any data before attempting aggregation
+                total_requests = self.session_total_requests.get(session_id, 0)
+                received_count = self.session_received_count.get(session_id, 0)
+
+                if total_requests == 0 and received_count == 0:
+                    self._logger.warning(f"⚠️  Skipping timeout aggregation for empty session: {session_id} (0 requests)")
+                    # Clean up tracking for this empty session
+                    if session_id in self.session_last_activity:
+                        del self.session_last_activity[session_id]
+                    if session_id in self.session_chunks_complete:
+                        del self.session_chunks_complete[session_id]
+                    if session_id in self.session_qa_complete:
+                        del self.session_qa_complete[session_id]
+                    if session_id in self.session_summaries_complete:
+                        del self.session_summaries_complete[session_id]
+                    continue
+
                 self._aggregate_and_upload_session(session_id)
 
     def _verify_all_files_ready(self, session_id: str) -> bool:
@@ -787,6 +846,14 @@ class KafkaIndexAggregatorConsumer(Base):
             # Clear from total_requests tracking if present
             if session_id in self.session_total_requests:
                 del self.session_total_requests[session_id]
+
+            # Clear pipeline completion tracking
+            if session_id in self.session_chunks_complete:
+                del self.session_chunks_complete[session_id]
+            if session_id in self.session_qa_complete:
+                del self.session_qa_complete[session_id]
+            if session_id in self.session_summaries_complete:
+                del self.session_summaries_complete[session_id]
 
             # Publish session-complete message so other consumers can clean up
             try:

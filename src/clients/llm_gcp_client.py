@@ -154,17 +154,17 @@ class GeminiLLMClient(Base):
             'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
         }
 
-            # Add JSON mode if requested
-            if response_mime_type:
-                config_params['response_mime_type'] = response_mime_type
+        # Add JSON mode if requested
+        if response_mime_type:
+            config_params['response_mime_type'] = response_mime_type
 
-            # Add Google Search grounding tool if enabled
-            tools = []
-            if enable_search:
-                self._logger.debug(f"      🔍 Enabling Google Search grounding")
-                # Google Search tool for real-time web grounding
-                # This allows the model to search the web and cite sources
-                tools.append(types.Tool(google_search=types.GoogleSearch()))
+        # Add Google Search grounding tool if enabled
+        tools = []
+        if enable_search:
+            self._logger.debug(f"      🔍 Enabling Google Search grounding")
+            # Google Search tool for real-time web grounding
+            # This allows the model to search the web and cite sources
+            tools.append(types.Tool(google_search=types.GoogleSearch()))
 
         config = types.GenerateContentConfig(
             tools=tools if tools else None,

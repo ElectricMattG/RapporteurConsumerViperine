@@ -327,7 +327,11 @@ class KafkaDocumentChunkerConsumer(Base):
 
             # Remove the old title extraction logic since we now have it from summary_metadata or extraction
 
-            self._logger.info(f"   📄 Title: {doc_title[:80]}...")
+            # Handle null/missing titles gracefully
+            display_title = doc_title or "Untitled Document"
+            title_preview = display_title[:80] if len(display_title) > 80 else display_title
+
+            self._logger.info(f"   📄 Title: {title_preview}...")
             self._logger.info(f"   ✍️  Author: {doc_author}")
             self._logger.info(f"   📅 Published: {published_date}")
             self._logger.info(f"   🏢 Publisher: {publisher}")
@@ -340,7 +344,7 @@ class KafkaDocumentChunkerConsumer(Base):
             # Include data lineage to track whether we chunked summary or extraction
             cached_data = {
                 'url': url,
-                'title': doc_title,
+                'title': doc_title or "Untitled Document",  # Provide default for null titles
                 'text': text,
                 'metadata': {
                     'title': doc_title,

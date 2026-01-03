@@ -441,13 +441,15 @@ class KafkaSummaryIndexerConsumer(Base):
                 ).inc()
 
             # Check if session is complete
-            if state['received_count'] >= state['total_requests']:
+            if state['received_count'] >= state['total_requests'] and not state.get('completed', False):
                 self._logger.info(f"   🎉 Session complete: {state['received_count']}/{state['total_requests']}")
                 state['completed'] = True
                 self._save_session_state(session_id, state)
 
                 # Publish session-complete message
                 self._publish_session_complete(session_id, state['received_count'])
+            elif state.get('completed', False):
+                self._logger.info(f"   ℹ️  Session already marked complete, skipping signal")
             else:
                 self._logger.info(f"   ⏳ Session progress: {state['received_count']}/{state['total_requests']}")
 
@@ -507,6 +509,10 @@ class KafkaSummaryIndexerConsumer(Base):
                     self._logger.warning(f"⚠️ Failed to start telemetry: {e}")
 
             self.running = True
+
+            # Set consumer state to running
+            if self.telemetry_enabled:
+                self.metrics.set_state(1)
 
             while self.running:
                 msg = self.consumer.poll(timeout=1.0)
