@@ -312,7 +312,9 @@ class KafkaWebScraperConsumer(Base):
 
             # Create producer for publishing to output topic
             producer_config = {
-                'bootstrap.servers': self.kafka_config['bootstrap.servers']
+                'bootstrap.servers': self.kafka_config['bootstrap.servers'],
+                'message.max.bytes': 5242880,  # 5MB - must match Kafka broker message.max.bytes
+                'compression.type': 'snappy'  # Compress large messages
             }
             self.producer = Producer(producer_config)
             self._logger.info(f"✅ Producer ready for topic: {self.output_topic}")

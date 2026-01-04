@@ -2,7 +2,7 @@
 
 ## Overview
 
-This document describes the complete flow for processing web content with markdown citations, from initial web scraping through citation extraction and content filtering. The system is implemented in the `CitationExtractor` class within `src/components/citation_extractor.py`, which serves as the main orchestrator for processing inline markdown citations `[text](url)` and transforming them into numbered references `[1]`, `[2]`, etc. 
+This document describes the complete flow for processing web content with markdown citations, from initial web scraping through citation extraction and content filtering. The system is implemented in the `CitationExtractor` class within `src/components/citation_extractor.py`, which serves as the main orchestrator for processing inline markdown citations `[text](url)` and transforming them into numbered references `[1]`, `[2]`, etc.
 
 The pipeline maintains content quality through intelligent filtering mechanisms implemented in methods like `_filter_paragraph_chunks()` and `_filter_refined_content()`, which remove navigation elements, headers, and low-quality content while preserving substantive paragraphs. The system supports three distinct processing modes (`pdf`, `inline`, `combined`) to handle different content sources and citation types, ensuring backward compatibility with existing PDF citation workflows while adding powerful new capabilities for web-scraped markdown content.
 
@@ -27,7 +27,7 @@ flowchart TD
     M --> P[Citation-Ready Output]
     N --> Q[Standard Output]
     O --> P
-    
+
     style A fill:#e1f5fe
     style E fill:#f3e5f5
     style G fill:#fff3e0
@@ -42,7 +42,7 @@ graph LR
     subgraph "Input Data"
         A[Raw Markdown<br/>with Citations]
     end
-    
+
     subgraph "Processing Steps"
         B[Chunk Parsing]
         C[Content Filtering]
@@ -50,13 +50,13 @@ graph LR
         E[URL Normalization]
         F[Reference Numbering]
     end
-    
+
     subgraph "Output Data"
         G[Processed Content<br/>with [N] refs]
         H[Synthetic Citation<br/>Chunks]
         I[Processing<br/>Statistics]
     end
-    
+
     A --> B
     B --> C
     C --> D
@@ -65,7 +65,7 @@ graph LR
     F --> G
     F --> H
     F --> I
-    
+
     style A fill:#e3f2fd
     style G fill:#e8f5e8
     style H fill:#fff3e0
@@ -79,20 +79,20 @@ graph TD
     subgraph "Before Processing"
         A1["'Sudan faces crisis [according to experts](http://example.com/report) and needs aid [from UN](http://un.org/help).'"]
     end
-    
+
     subgraph "Processing Steps"
         B1[Extract Citations]
         B2[Normalize URLs]
         B3[Assign Numbers]
         B4[Replace References]
     end
-    
+
     subgraph "After Processing"
         C1["'Sudan faces crisis according to experts [1] and needs aid from UN [2].'"]
         C2["Citation 1: http://example.com/report"]
         C3["Citation 2: http://un.org/help"]
     end
-    
+
     A1 --> B1
     B1 --> B2
     B2 --> B3
@@ -114,8 +114,8 @@ The pipeline begins with web scraping to extract content with preserved markdown
 # Example web scraping result with markdown links
 # This would be the input to CitationExtractor.__init__()
 content_example = """
-The conflict in Sudan has entered its third year [according to experts](https://example.com/expert-analysis), 
-with devastating humanitarian consequences. The UN reports [over 30 million people](https://un.org/sudan-report) 
+The conflict in Sudan has entered its third year [according to experts](https://example.com/expert-analysis),
+with devastating humanitarian consequences. The UN reports [over 30 million people](https://un.org/sudan-report)
 need humanitarian assistance.
 """
 ```
@@ -190,10 +190,10 @@ sequenceDiagram
     participant CE as Citation Extractor
     participant FF as Filter Framework
     participant OP as Output Processor
-    
+
     WS->>DC: Raw markdown content
     DC->>CE: Chunked JSONL with inline citations
-    
+
     alt Mode: inline
         CE->>FF: Apply paragraph filtering
         FF->>CE: Filtered chunks (paragraphs only)
@@ -211,7 +211,7 @@ sequenceDiagram
         CE->>CE: Merge both citation types
         CE->>OP: Combined citations + content
     end
-    
+
     OP->>OP: Write citation_ready output structure
 ```
 
@@ -229,7 +229,7 @@ class CitationExtractor:
     def __init__(self, ...):
         # Global citation tracking maintained across all chunks
         self.global_citation_counter = 1                    # Monotonic counter
-        self.url_to_citation_number = {}                   # URL -> citation number mapping  
+        self.url_to_citation_number = {}                   # URL -> citation number mapping
         self.global_citation_metadata = {}                 # Comprehensive citation repository
 ```
 
@@ -247,7 +247,7 @@ class CitationExtractor:
 Chunk A: "Crisis escalates [1] and aid needed [2]"
          Citations: {1: "url-crisis", 2: "url-aid"}
 
-Chunk B: "Refugees flee [1] to neighboring countries [2]" 
+Chunk B: "Refugees flee [1] to neighboring countries [2]"
          Citations: {1: "url-refugees", 2: "url-countries"}  # CONFLICT: [1] means different URLs!
 ```
 
@@ -297,19 +297,19 @@ The content filtering system within `CitationExtractor` implements a multi-layer
 def _filter_paragraph_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter to keep only paragraph chunks (exclude headers).
-    
-    This method is the first stage of content filtering, examining the 'chunk_type' 
+
+    This method is the first stage of content filtering, examining the 'chunk_type'
     metadata field to identify substantive content. It's crucial for inline processing
     where we want to focus on narrative text rather than structural elements.
     """
     paragraph_chunks = []
-    
+
     for chunk in chunks:
         chunk_metadata = chunk.get('chunk_metadata', {})
         # Only paragraphs contain the narrative content we want to process for citations
         if chunk_metadata.get('chunk_type') == 'paragraph':
             paragraph_chunks.append(chunk)
-    
+
     # Track filtering statistics for performance monitoring
     self.stats['paragraphs_filtered'] = len(paragraph_chunks)
     return paragraph_chunks
@@ -317,30 +317,30 @@ def _filter_paragraph_chunks(self, chunks: List[Dict[str, Any]]) -> List[Dict[st
 def _filter_refined_content(self, content_chunks: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """
     Filter content chunks to remove navigation elements and low-quality content.
-    
+
     This method implements the second stage of filtering, applying quality metrics
-    and navigation detection. It uses the min_word_count and min_char_count 
+    and navigation detection. It uses the min_word_count and min_char_count
     parameters set during CitationExtractor initialization.
     """
     refined_chunks = []
     navigation_removed = 0
-    
+
     for chunk in content_chunks:
         content = chunk.get('content', '').strip()
         char_count = chunk['chunk_metadata']['char_count']
         word_count = chunk['chunk_metadata']['word_count']
-        
+
         # Apply size-based quality thresholds
         if char_count < self.min_char_count or word_count < self.min_word_count:
             continue
-            
+
         # Use navigation detection to filter out link-heavy content
         if self._is_hyperlink_element(content):
             navigation_removed += 1
             continue
-            
+
         refined_chunks.append(chunk)
-    
+
     # Track navigation filtering for statistics
     self.stats['navigation_elements_removed'] = navigation_removed
     return refined_chunks
@@ -356,28 +356,28 @@ The core citation processing functionality is implemented in the `_extract_inlin
 def _extract_inline_citations(self, content: str, source_chunk_id: str = None, doc_metadata: Dict = None) -> tuple[str, Dict[int, Dict[str, str]]]:
     """
     Extract citations from content and replace with numbered references.
-    
+
     This method implements the core transformation logic that converts markdown
     links [text](url) into numbered citations text [1]. It maintains a global
     citation numbering system across all chunks to ensure consistency.
-    
+
     The method now accepts source_chunk_id and doc_metadata parameters to support
     rich citation metadata generation and proper traceability.
-    
+
     Returns both processed content and rich metadata dictionary with full citation details.
     """
     # Regex pattern specifically designed for markdown link syntax
     pattern = r'\[([^\]]+)\]\(([^)]+)\)'
-    
+
     metadata = {}  # Rich metadata for this chunk's citations
-    
+
     def replace_citation(match):
         anchor_text = match.group(1)  # The text inside [text]
         url = match.group(2)          # The URL inside (url)
-        
+
         # Apply URL normalization if enabled (removes tracking parameters, etc.)
         normalized_url = self._normalize_url(url) if self.normalize_urls else url
-        
+
         # Get or assign global citation number using instance-level tracking
         if normalized_url not in self.url_to_citation_number:
             self.url_to_citation_number[normalized_url] = self.global_citation_counter
@@ -398,9 +398,9 @@ def _extract_inline_citations(self, content: str, source_chunk_id: str = None, d
             existing_anchors = self.global_citation_metadata[citation_num]['all_anchor_texts']
             if anchor_text not in existing_anchors:
                 existing_anchors.append(anchor_text)
-        
+
         citation_num = self.url_to_citation_number[normalized_url]
-        
+
         # Store rich metadata for this citation in this chunk
         metadata[citation_num] = {
             'url': normalized_url,
@@ -409,15 +409,15 @@ def _extract_inline_citations(self, content: str, source_chunk_id: str = None, d
             'source_chunk_id': source_chunk_id,
             'original_url': url
         }
-        
+
         # Critical transformation: preserve anchor text and add citation number
         # Input:  [according to experts](https://example.com)
         # Output: according to experts [1]
         return f"{anchor_text} [{citation_num}]"
-    
+
     # Apply the transformation to all markdown links in the content
     processed_content = re.sub(pattern, replace_citation, content)
-    
+
     return processed_content, metadata
 ```
 
@@ -432,20 +432,20 @@ The `_extract_inline_citations()` method is called within `_process_inline_mode(
 ```mermaid
 stateDiagram-v2
     [*] --> LoadChunks: Start Processing
-    
+
     LoadChunks --> ModeDecision: Chunks Loaded
-    
+
     state ModeDecision <<choice>>
     ModeDecision --> PDFMode: mode = "pdf"
-    ModeDecision --> InlineMode: mode = "inline"  
+    ModeDecision --> InlineMode: mode = "inline"
     ModeDecision --> CombinedMode: mode = "combined"
-    
+
     state PDFMode {
         [*] --> ExtractPDFCitations
         ExtractPDFCitations --> WritePDFOutput
         WritePDFOutput --> [*]
     }
-    
+
     state InlineMode {
         [*] --> ApplyFiltering
         ApplyFiltering --> ExtractInlineCitations
@@ -453,7 +453,7 @@ stateDiagram-v2
         GenerateSyntheticCitations --> WriteCitationReadyOutput
         WriteCitationReadyOutput --> [*]
     }
-    
+
     state CombinedMode {
         [*] --> ExtractPDFFirst
         ExtractPDFFirst --> ApplyFilteringCombined
@@ -462,7 +462,7 @@ stateDiagram-v2
         MergeCitations --> WriteCombinedOutput
         WriteCombinedOutput --> [*]
     }
-    
+
     PDFMode --> GenerateSummary
     InlineMode --> GenerateSummary
     CombinedMode --> GenerateSummary
@@ -571,7 +571,7 @@ PDF mode is the default processing mode, implemented in `_process_pdf_mode()`. T
 
 Combined mode leverages both processing pipelines sequentially within the `extract_citations()` method:
 
-1. **Phase 1 - PDF Processing**: 
+1. **Phase 1 - PDF Processing**:
    - Calls `_process_pdf_mode()` on all input chunks
    - Extracts any existing PDF-style citations
    - Identifies content chunks for further processing
@@ -613,7 +613,7 @@ ALLOWED_CHUNK_TYPES = ['paragraph']  # Exclude headers, tables, etc.
 # Navigation patterns (excluded by _is_hyperlink_element())
 NAVIGATION_PATTERNS = [
     r'^https?://',           # Raw URLs at start of content
-    r'^www\.',               # WWW links at start of content  
+    r'^www\.',               # WWW links at start of content
     r'^mailto:',             # Email links at start of content
     r'^tel:',                # Phone links at start of content
 ]
@@ -653,7 +653,7 @@ The `CitationExtractor` maintains comprehensive filtering metrics throughout the
 # Filtering statistics tracked in self.stats during processing
 filtering_stats = {
     'chunks_before_filtering': 37795,    # Set in extract_citations() before filtering
-    'chunks_after_filtering': 5369,     # Set in extract_citations() after filtering  
+    'chunks_after_filtering': 5369,     # Set in extract_citations() after filtering
     'paragraphs_filtered': 17413,       # Updated by _filter_paragraph_chunks()
     'navigation_elements_removed': 1066, # Updated by _filter_refined_content()
     'filtering_efficiency': 85.79       # Calculated by _generate_summary()
@@ -684,7 +684,7 @@ The `CitationExtractor` implements a sophisticated output management system thro
 ```
 output/
 ├── citation_ready/                           # Created by _setup_citation_ready_structure()
-│   ├── [filename]_content.jsonl            # Written by _write_output_files() 
+│   ├── [filename]_content.jsonl            # Written by _write_output_files()
 │   ├── [filename]_citations.jsonl          # Written by _write_output_files()
 │   └── [filename]_citation_summary.json    # Generated by _generate_summary()
 └── [original files for PDF mode]            # Maintained for backward compatibility
@@ -713,7 +713,7 @@ enhanced_chunk = {
         "chunk_type": "paragraph",
         "word_count": 9,
         "char_count": 67,
-        
+
         # Citation enrichment added by _enrich_chunk_metadata()
         "has_citations": True,           # Boolean flag for quick citation detection
         "citation_count": 2,             # Number of citations in this chunk
@@ -771,8 +771,8 @@ This enhanced structure provides:
 
 ### Real-World Example: Sudan Famine Dataset
 
-**Input**: 37,795 chunks from 190 documents  
-**Processing Time**: 0.02 minutes (1.2 seconds)  
+**Input**: 37,795 chunks from 190 documents
+**Processing Time**: 0.02 minutes (1.2 seconds)
 **Global Citation System**: 4,722 unique citations with consistent numbering
 
 **Results**:
@@ -789,7 +789,7 @@ This enhanced structure provides:
 
 **Top Citation Sources by Volume**:
 1. **Wikipedia Ethiopia**: 829 citations (79.87% density)
-2. **Wikipedia UAE**: 755 citations (80.75% density)  
+2. **Wikipedia UAE**: 755 citations (80.75% density)
 3. **Wikipedia Sudan**: 740 citations (79.48% density)
 4. **Wikipedia South Sudan**: 580 citations (78.7% density)
 5. **Sudanese Civil War**: 463 citations (71.78% density)
@@ -897,20 +897,20 @@ extractor = CitationExtractor(
 # Execute processing with full error handling
 try:
     citations_file, content_file, summary_file = extractor.extract_citations()
-    
+
     # Access detailed processing statistics
     with open(summary_file) as f:
         stats = json.load(f)
-        
+
     # Analyze processing results
     total_processed = stats['extraction_statistics']['total_chunks_processed']
     citations_found = stats.get('inline_processing_statistics', {}).get('inline_citations_found', 0)
     filtering_efficiency = stats.get('filtering_statistics', {}).get('filtering_efficiency', 0)
-    
+
     print(f"Processed {total_processed} chunks")
-    print(f"Found {citations_found} inline citations")  
+    print(f"Found {citations_found} inline citations")
     print(f"Filtering efficiency: {filtering_efficiency}%")
-    
+
     # Access citation mapping for downstream processing
     citation_mapping = {}
     with open(citations_file) as f:
@@ -918,7 +918,7 @@ try:
             citation = json.loads(line)
             citation_num = citation['chunk_metadata']['citation_number']
             citation_mapping[citation_num] = citation['chunk_metadata']['url']
-    
+
 except Exception as e:
     print(f"Processing failed: {e}")
     # Error handling can examine extractor.stats for partial results
@@ -928,7 +928,7 @@ except Exception as e:
 
 The citation-ready output format is specifically designed for integration with advanced NLP systems. The `CitationExtractor` produces structured output that supports:
 
-1. **RAG System Integration**: 
+1. **RAG System Integration**:
    - Numbered citations enable proper attribution in generated responses
    - Citation metadata allows verification of source claims
    - Filtered content ensures high-quality input for embedding generation
@@ -958,13 +958,13 @@ The citation-ready format directly supports Retrieval-Augmented Generation (RAG)
 def load_citation_ready_content(citation_ready_dir):
     """
     Load processed content for RAG system integration.
-    
+
     This function demonstrates how to consume CitationExtractor output
     for downstream RAG processing, maintaining citation traceability.
     """
     content_file = citation_ready_dir / "content.jsonl"
     citations_file = citation_ready_dir / "citations.jsonl"
-    
+
     # Load content chunks with embedded citation references
     content_chunks = []
     with open(content_file) as f:
@@ -977,7 +977,7 @@ def load_citation_ready_content(citation_ready_dir):
                 'has_citations': chunk['chunk_metadata'].get('has_citations', False),
                 'citation_count': chunk['chunk_metadata'].get('citation_count', 0)
             })
-    
+
     # Load citation mapping for reference resolution
     citation_map = {}
     with open(citations_file) as f:
@@ -988,21 +988,21 @@ def load_citation_ready_content(citation_ready_dir):
                 'url': citation['chunk_metadata']['url'],
                 'synthetic': citation['chunk_metadata'].get('synthetic', False)
             }
-    
+
     return content_chunks, citation_map
 
 # Usage in RAG pipeline
 def enhanced_rag_query(query, citation_ready_dir):
     """Example RAG query with citation support."""
     chunks, citations = load_citation_ready_content(citation_ready_dir)
-    
+
     # Filter high-quality chunks with citations for embedding
     quality_chunks = [
-        chunk for chunk in chunks 
+        chunk for chunk in chunks
         if chunk['metadata'].get('has_citations', False) and
            chunk['metadata'].get('word_count', 0) >= 10
     ]
-    
+
     # Generate embeddings, perform retrieval, generate response
     # Response can include proper citation attribution using citation_map
     return response_with_citations
@@ -1013,7 +1013,7 @@ def enhanced_rag_query(query, citation_ready_dir):
 The structured metadata produced by `CitationExtractor` supports sophisticated knowledge graph construction:
 
 1. **Entity Linking**: Citation URLs serve as entity identifiers
-2. **Relationship Modeling**: Citation co-occurrence indicates related concepts  
+2. **Relationship Modeling**: Citation co-occurrence indicates related concepts
 3. **Authority Scoring**: Citation counts provide content authority metrics
 4. **Temporal Analysis**: Processing timestamps enable temporal relationship modeling
 
@@ -1122,29 +1122,29 @@ try:
     summary_file = 'output/citation_ready/summary.json'
     with open(summary_file) as f:
         stats = json.load(f)
-    
+
     # Check processing metrics
     total_processed = stats['extraction_statistics']['total_chunks_processed']
     citations_found = stats.get('inline_processing_statistics', {}).get('inline_citations_found', 0)
-    
+
     print(f'✅ Processing successful: {total_processed > 0}')
     print(f'📊 Total chunks processed: {total_processed}')
     print(f'🔗 Citations found: {citations_found}')
-    
+
     # Validate filtering efficiency
     if 'filtering_statistics' in stats:
         before = stats['filtering_statistics']['chunks_before_filtering']
         after = stats['filtering_statistics']['chunks_after_filtering']
         efficiency = stats['filtering_statistics']['filtering_efficiency']
         print(f'🔍 Filtering: {before} → {after} ({efficiency}% efficiency)')
-    
+
     # Check output files exist
     citation_file = Path('output/citation_ready/citations.jsonl')
     content_file = Path('output/citation_ready/content.jsonl')
-    
+
     print(f'📁 Citation file exists: {citation_file.exists()}')
     print(f'📁 Content file exists: {content_file.exists()}')
-    
+
     if citation_file.exists():
         with open(citation_file) as f:
             citation_count = sum(1 for line in f)
@@ -1162,17 +1162,17 @@ import json
 def check_memory_usage(jsonl_file):
     peak_memory = 0
     chunk_count = 0
-    
+
     with open(jsonl_file) as f:
         for line in f:
             chunk = json.loads(line)
             chunk_count += 1
             current_memory = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
             peak_memory = max(peak_memory, current_memory)
-            
+
             if chunk_count % 1000 == 0:
                 print(f'Processed {chunk_count} chunks, memory: {current_memory/1024:.1f} MB')
-    
+
     print(f'Peak memory usage: {peak_memory/1024:.1f} MB for {chunk_count} chunks')
 
 check_memory_usage('input.jsonl')
@@ -1195,7 +1195,7 @@ classDiagram
         -min_word_count: int
         -min_char_count: int
         -stats: Dict
-        
+
         +extract_citations() Tuple[str, str, str]
         +_process_pdf_mode(chunks) Tuple[List, List]
         +_process_inline_mode(chunks) Tuple[List, Dict]
@@ -1207,48 +1207,48 @@ classDiagram
         +_enrich_chunk_metadata(chunk, metadata) Dict
         +_generate_summary() Dict
     }
-    
+
     class ContentFilter {
         <<interface>>
         +filter_chunks(chunks) List[Dict]
         +is_quality_content(chunk) bool
     }
-    
+
     class ParagraphFilter {
         +filter_chunks(chunks) List[Dict]
         +_is_hyperlink_element(content) bool
         +_filter_refined_content(chunks) List[Dict]
     }
-    
+
     class URLProcessor {
         +normalize_url(url) str
         +resolve_relative_url(url, base) str
         +extract_citations(content) Tuple[str, Dict]
     }
-    
+
     class StatisticsTracker {
         +total_chunks_processed: int
         +citations_extracted: int
         +inline_citations_found: int
         +filtering_efficiency: float
-        
+
         +update_stats(key, value) void
         +generate_summary() Dict
     }
-    
+
     class OutputManager {
         +write_citations(citations, file) void
         +write_content(chunks, file) void
         +write_summary(stats, file) void
         +setup_citation_ready_structure() void
     }
-    
+
     CitationExtractor --> ContentFilter: uses
     CitationExtractor --> URLProcessor: uses
     CitationExtractor --> StatisticsTracker: uses
     CitationExtractor --> OutputManager: uses
     ParagraphFilter --|> ContentFilter: implements
-    
+
     note for CitationExtractor "Main orchestrator class handling\nall citation processing modes"
     note for ContentFilter "Flexible filtering framework\nfor content quality control"
     note for URLProcessor "Handles URL normalization\nand citation extraction"

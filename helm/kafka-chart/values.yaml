@@ -28,6 +28,9 @@ kafka:
     logSegmentBytes: 1073741824  # 1GB
     numPartitions: 12
     defaultReplicationFactor: 1  # Single replica
+    # Increase message size limits to handle large documents (up to 5MB)
+    messageMaxBytes: 5242880  # 5MB (broker-side limit)
+    replicaFetchMaxBytes: 5242880  # 5MB (replication limit)
 
   # External access configuration (mirrors local PLAINTEXT_HOST listener)
   external:

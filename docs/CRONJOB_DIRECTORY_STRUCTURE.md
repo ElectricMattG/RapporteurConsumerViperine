@@ -157,7 +157,7 @@ from .exceptions import CronJobError, ConfigurationError, StateError
 
 class TimeSeriesIndexer:
     """Main CronJob orchestrator"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.metrics = CronJobMetrics(port=config.metrics_port)
@@ -167,7 +167,7 @@ class TimeSeriesIndexer:
         self.rag_executor = RAGExecutor(config)
         self.kafka_publisher = KafkaPublisher(config)
         self.index_storage = IndexStorage(config)
-    
+
     async def run(self) -> int:
         """
         Execute CronJob workflow
@@ -176,44 +176,44 @@ class TimeSeriesIndexer:
         try:
             # Phase 1: Initialize
             await self._initialize()
-            
+
             # Phase 2: Load queries and state
             queries = await self._load_queries()
-            
+
             # Phase 3: Execute queries asynchronously
             results = await self._execute_queries(queries)
-            
+
             # Phase 4: Update metrics and log summary
             self._report_results(results)
-            
+
             # Phase 5: Cleanup
             await self._cleanup()
-            
+
             return 0 if all(r.success for r in results) else 1
-            
+
         except ConfigurationError as e:
             logger.error(f"Configuration error: {e}")
             return 1
         except Exception as e:
             logger.exception(f"Unexpected error: {e}")
             return 1
-    
+
     async def _initialize(self):
         """Phase 1: Initialize dependencies"""
         pass
-    
+
     async def _load_queries(self) -> List[QueryConfig]:
         """Phase 2: Load and validate queries"""
         pass
-    
+
     async def _execute_queries(self, queries) -> List[QueryResult]:
         """Phase 3: Execute queries in parallel"""
         pass
-    
+
     def _report_results(self, results):
         """Phase 4: Report results and metrics"""
         pass
-    
+
     async def _cleanup(self):
         """Phase 5: Cleanup resources"""
         pass
@@ -223,7 +223,7 @@ def main():
     """Main entry point"""
     config = Config.from_env()
     indexer = TimeSeriesIndexer(config)
-    
+
     # Run async event loop
     exit_code = asyncio.run(indexer.run())
     sys.exit(exit_code)
@@ -250,35 +250,35 @@ from pathlib import Path
 @dataclass
 class Config:
     """CronJob configuration"""
-    
+
     # Azure Storage
     azure_connection_string: str
     azure_container: str
     queries_config_path: str
     state_path_prefix: str
     indices_path_prefix: str
-    
+
     # RAG API
     rag_api_url: str
     rag_api_key: str
     rag_timeout: int
-    
+
     # Kafka
     kafka_bootstrap_servers: str
     kafka_enabled: bool
-    
+
     # Time windows
     default_start_date: str
     default_window_size_days: int
-    
+
     # Execution
     max_retries: int
     retry_delay_seconds: int
-    
+
     # Monitoring
     metrics_port: int
     log_level: str
-    
+
     @classmethod
     def from_env(cls) -> 'Config':
         """Load configuration from environment variables"""
@@ -289,29 +289,29 @@ class Config:
             queries_config_path=os.getenv('QUERIES_CONFIG_PATH', 'config/queries.json'),
             state_path_prefix=os.getenv('STATE_PATH_PREFIX', 'state'),
             indices_path_prefix=os.getenv('INDICES_PATH_PREFIX', 'indices'),
-            
+
             # RAG
             rag_api_url=os.getenv('RAG_API_URL', 'https://4.207.24.92/query'),
             rag_api_key=os.getenv('RAG_API_KEY'),
             rag_timeout=int(os.getenv('RAG_TIMEOUT', '180')),
-            
+
             # Kafka
             kafka_bootstrap_servers=os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'kafka.rapporteur.ai:9094'),
             kafka_enabled=os.getenv('KAFKA_ENABLED', 'true').lower() == 'true',
-            
+
             # Windows
             default_start_date=os.getenv('DEFAULT_START_DATE', '2023-09-01'),
             default_window_size_days=int(os.getenv('DEFAULT_WINDOW_SIZE_DAYS', '14')),
-            
+
             # Execution
             max_retries=int(os.getenv('MAX_RETRIES', '3')),
             retry_delay_seconds=int(os.getenv('RETRY_DELAY_SECONDS', '5')),
-            
+
             # Monitoring
             metrics_port=int(os.getenv('METRICS_PORT', '8010')),
             log_level=os.getenv('LOG_LEVEL', 'INFO'),
         )
-    
+
     def validate(self):
         """Validate required configuration"""
         if not self.azure_connection_string:
@@ -361,7 +361,7 @@ class WindowState:
     last_run_citations: int
     next_window_start: str
     next_window_end: str
-    
+
     @classmethod
     def create_initial(cls, query: QueryConfig, default_start: str, window_days: int) -> 'WindowState':
         """Create initial state for a new query"""
@@ -373,10 +373,10 @@ class TimeWindow:
     """A time window to process"""
     start_date: datetime
     end_date: datetime
-    
+
     def format_start(self) -> str:
         return self.start_date.strftime("%Y-%m-%d")
-    
+
     def format_end(self) -> str:
         return self.end_date.strftime("%Y-%m-%d")
 
@@ -424,28 +424,28 @@ from .config import Config
 
 class QueryManager:
     """Manage query configurations from Azure"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.blob_client = BlobServiceClient.from_connection_string(
             config.azure_connection_string
         )
-    
+
     async def load_queries(self) -> List[QueryConfig]:
         """
         Load queries from Azure Blob Storage
         Returns only enabled queries, sorted by priority
         """
         pass
-    
+
     async def download_config(self) -> dict:
         """Download queries.json from Azure"""
         pass
-    
+
     def parse_queries(self, config_data: dict) -> List[QueryConfig]:
         """Parse and validate query configurations"""
         pass
-    
+
     def filter_enabled(self, queries: List[QueryConfig]) -> List[QueryConfig]:
         """Filter to enabled queries only"""
         pass
@@ -469,28 +469,28 @@ from .config import Config
 
 class StateManager:
     """Manage query window state in Azure Blob Storage"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.blob_client = BlobServiceClient.from_connection_string(
             config.azure_connection_string
         )
-    
+
     async def load_state(self, query: QueryConfig) -> WindowState:
         """
         Load state for a query
         Returns existing state or creates initial state with fallback date
         """
         pass
-    
+
     async def save_state(self, state: WindowState):
         """Save updated state to Azure"""
         pass
-    
+
     def _get_blob_path(self, query_id: str) -> str:
         """Get blob path for state file"""
         return f"{self.config.state_path_prefix}/{query_id}.json"
-    
+
     def _create_initial_state(self, query: QueryConfig) -> WindowState:
         """Create initial state with fallback date"""
         pass
@@ -514,21 +514,21 @@ from .config import Config
 
 class WindowCalculator:
     """Calculate time windows for queries"""
-    
+
     def __init__(self, config: Config):
         self.config = config
-    
+
     def calculate_next_window(self, state: WindowState) -> Optional[TimeWindow]:
         """
         Calculate next window to process
         Returns None if query is up-to-date (next_window_start >= today)
         """
         pass
-    
+
     def should_skip_query(self, window: TimeWindow) -> bool:
         """Check if window should be skipped (too far in future)"""
         pass
-    
+
     def format_query_string(self, query_template: str, window: TimeWindow) -> str:
         """Format query template with date range"""
         return query_template.format(
@@ -555,14 +555,14 @@ from .config import Config
 
 class RAGExecutor:
     """Execute RAG queries with retry logic"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.client = httpx.AsyncClient(
             timeout=config.rag_timeout,
             verify=False  # Skip SSL verification
         )
-    
+
     @retry(
         stop=stop_after_attempt(3),
         wait=wait_exponential(multiplier=2, min=2, max=30)
@@ -573,7 +573,7 @@ class RAGExecutor:
         Raises exception on failure after retries
         """
         pass
-    
+
     def _build_payload(self, query: str) -> dict:
         """Build RAG API request payload"""
         return {
@@ -582,7 +582,7 @@ class RAGExecutor:
             "enable_query_refinement": False,
             "top_k": 3
         }
-    
+
     def _parse_response(self, response_data: dict) -> RAGResponse:
         """Parse RAG API response into model"""
         pass
@@ -607,7 +607,7 @@ from .config import Config
 
 class KafkaPublisher:
     """Publish citations to Kafka topics"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         if config.kafka_enabled:
@@ -619,10 +619,10 @@ class KafkaPublisher:
             })
         else:
             self.producer = None
-    
+
     async def publish_citations(
-        self, 
-        rag_response: RAGResponse, 
+        self,
+        rag_response: RAGResponse,
         session_id: str
     ) -> int:
         """
@@ -630,11 +630,11 @@ class KafkaPublisher:
         Returns: Number of citations published
         """
         pass
-    
+
     def _create_messages(self, rag_response: RAGResponse) -> List[Dict]:
         """Create Kafka messages from RAG citations"""
         pass
-    
+
     async def _send_session_complete(self, session_id: str, total_citations: int):
         """Send session complete signal"""
         pass
@@ -659,13 +659,13 @@ from .config import Config
 
 class IndexStorage:
     """Store index files in Azure Blob Storage"""
-    
+
     def __init__(self, config: Config):
         self.config = config
         self.blob_client = BlobServiceClient.from_connection_string(
             config.azure_connection_string
         )
-    
+
     async def save_index(
         self,
         query: QueryConfig,
@@ -678,11 +678,11 @@ class IndexStorage:
         Returns: Blob name (filename)
         """
         pass
-    
+
     def _build_index_data(self, ....) -> dict:
         """Build index JSON structure"""
         pass
-    
+
     def _get_blob_path(self, query: QueryConfig, window: TimeWindow) -> str:
         """Generate blob path for index"""
         prefix = query.index_prefix
@@ -708,61 +708,61 @@ from .config import Config
 
 class CronJobMetrics:
     """Prometheus metrics server for CronJob"""
-    
+
     def __init__(self, port: int):
         self.port = port
-        
+
         # Define metrics
         self.execution_total = Counter(
             'cronjob_execution_total',
             'Total CronJob executions',
             ['status']
         )
-        
+
         self.queries_processed = Counter(
             'cronjob_queries_processed_total',
             'Total queries processed',
             ['query_id', 'status']
         )
-        
+
         self.windows_advanced = Counter(
             'cronjob_windows_advanced_total',
             'Total windows advanced',
             ['query_id']
         )
-        
+
         self.citations_published = Counter(
             'cronjob_citations_published_total',
             'Total citations published to Kafka',
             ['query_id']
         )
-        
+
         self.execution_duration = Histogram(
             'cronjob_execution_duration_seconds',
             'Query execution duration',
             ['query_id']
         )
-        
+
         self.errors_total = Counter(
             'cronjob_errors_total',
             'Total errors',
             ['query_id', 'error_type']
         )
-        
+
         self.last_success_timestamp = Gauge(
             'cronjob_last_success_timestamp',
             'Timestamp of last successful execution',
             ['query_id']
         )
-    
+
     def start_server(self):
         """Start Prometheus metrics HTTP server"""
         start_http_server(self.port)
-    
+
     def record_query_success(self, query_id: str, duration: float, citations: int):
         """Record successful query execution"""
         pass
-    
+
     def record_query_failure(self, query_id: str, error_type: str):
         """Record query failure"""
         pass
@@ -919,7 +919,7 @@ resources:
 
 metrics:
   port: 8010
-  
+
 logging:
   level: INFO
 ```

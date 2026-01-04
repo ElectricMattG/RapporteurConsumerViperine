@@ -220,6 +220,9 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_qa_complete: Dict[str, bool] = defaultdict(bool)
         self.session_summaries_complete: Dict[str, bool] = defaultdict(bool)
 
+        # Track sessions that have been fully aggregated to ignore duplicate signals
+        self.aggregated_sessions: Set[str] = set()
+
         # Directory configuration
         self.cache_dir = Path(aggregator_config.cache_dir)
         self.session_backup_dir = Path(aggregator_config.session_backup_dir)
@@ -475,7 +478,7 @@ class KafkaIndexAggregatorConsumer(Base):
             # Handle summary index completion (from Summary Indexer)
             if index_type == 'summaries':
                 # Ignore if session already aggregated (duplicate signal)
-                if session_id not in self.session_chunks:
+                if session_id in self.aggregated_sessions:
                     self._logger.debug(f"⏭️  Ignoring summary signal for already-aggregated session: {session_id}")
                     return
 
@@ -507,7 +510,7 @@ class KafkaIndexAggregatorConsumer(Base):
             # Check if this is a session complete signal (from QA Embedder)
             if message_data.get('session_complete'):
                 # Ignore if session already aggregated (duplicate signal)
-                if session_id not in self.session_chunks:
+                if session_id in self.aggregated_sessions:
                     self._logger.debug(f"⏭️  Ignoring QA/Chunks signal for already-aggregated session: {session_id}")
                     return
 
@@ -517,6 +520,16 @@ class KafkaIndexAggregatorConsumer(Base):
                 self.session_chunks_complete[session_id] = True
                 self.session_qa_complete[session_id] = True
                 self._logger.info(f"✅ Chunks/QA complete for session: {session_id}")
+
+                # Check if summary file exists (may have completed before signal arrived)
+                summary_file = Path(self.cache_dir).parent / "summaries" / session_id / f"{session_id}_summaries_embedded.jsonl"
+                if summary_file.exists():
+                    self._logger.info(f"📚 Found existing summary file, marking summaries complete: {summary_file}")
+                    self.session_summaries_complete[session_id] = True
+                    # Store summary index file path for aggregation
+                    if not hasattr(self, 'session_summary_indices'):
+                        self.session_summary_indices = defaultdict(str)
+                    self.session_summary_indices[session_id] = str(summary_file)
 
                 # Check if all pipelines are ready (including summaries)
                 self._check_and_aggregate_if_ready(session_id)
@@ -611,6 +624,16 @@ class KafkaIndexAggregatorConsumer(Base):
                     self.session_chunks_complete[session_id] = True
                     self.session_qa_complete[session_id] = True
 
+                    # Check if summary file exists (may have completed before signal arrived)
+                    summary_file = Path(self.cache_dir).parent / "summaries" / session_id / f"{session_id}_summaries_embedded.jsonl"
+                    if summary_file.exists():
+                        self._logger.info(f"📚 Found existing summary file, marking summaries complete: {summary_file}")
+                        self.session_summaries_complete[session_id] = True
+                        # Store summary index file path for aggregation
+                        if not hasattr(self, 'session_summary_indices'):
+                            self.session_summary_indices = defaultdict(str)
+                        self.session_summary_indices[session_id] = str(summary_file)
+
                     # Check if all three pipelines are ready before aggregating
                     self._check_and_aggregate_if_ready(session_id)
 
@@ -661,7 +684,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
                 # Check if session has any data before attempting aggregation
                 total_requests = self.session_total_requests.get(session_id, 0)
-                received_count = self.session_received_count.get(session_id, 0)
+                received_count = len(self.session_request_ids.get(session_id, set()))
 
                 if total_requests == 0 and received_count == 0:
                     self._logger.warning(f"⚠️  Skipping timeout aggregation for empty session: {session_id} (0 requests)")
@@ -854,6 +877,9 @@ class KafkaIndexAggregatorConsumer(Base):
                 del self.session_qa_complete[session_id]
             if session_id in self.session_summaries_complete:
                 del self.session_summaries_complete[session_id]
+
+            # Mark session as aggregated to ignore future duplicate signals
+            self.aggregated_sessions.add(session_id)
 
             # Publish session-complete message so other consumers can clean up
             try:

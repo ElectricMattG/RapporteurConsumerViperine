@@ -66,9 +66,20 @@ scrape_configs:
   # Summarizer Consumer
   - job_name: 'kafka_summarizer'
     static_configs:
-      - targets: ['host.docker.internal:8006']
+      - targets: ['host.docker.internal:8010']
         labels:
           consumer: 'summarizer'
+          service: 'kafka_consumer'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    scrape_timeout: 5s
+
+  # Summary Indexer Consumer
+  - job_name: 'kafka_summary_indexer'
+    static_configs:
+      - targets: ['host.docker.internal:8006']
+        labels:
+          consumer: 'summary_indexer'
           service: 'kafka_consumer'
     metrics_path: '/metrics'
     scrape_interval: 10s

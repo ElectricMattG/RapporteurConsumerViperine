@@ -430,20 +430,20 @@ metadata:
 spec:
   # Run daily at 1 AM UTC
   schedule: "0 1 * * *"
-  
+
   # Keep last 3 successful and 3 failed jobs for debugging
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  
+
   # Prevent concurrent runs (wait for previous to finish)
   concurrencyPolicy: Forbid
-  
+
   # Retry failed jobs once
   jobTemplate:
     spec:
       backoffLimit: 1
       activeDeadlineSeconds: 3600  # 1 hour timeout
-      
+
       template:
         metadata:
           labels:
@@ -452,12 +452,12 @@ spec:
         spec:
           restartPolicy: OnFailure
           serviceAccountName: time-series-indexer
-          
+
           containers:
           - name: indexer
             image: ragserviceneacr6881.azurecr.io/time-series-indexer:latest
             imagePullPolicy: Always
-            
+
             env:
             # Azure Storage
             - name: AZURE_STORAGE_CONNECTION_STRING
@@ -465,47 +465,47 @@ spec:
                 secretKeyRef:
                   name: azure-storage-credentials
                   key: connection-string
-            
+
             - name: AZURE_STORAGE_CONTAINER
               value: "research-indices"
-            
+
             # RAG API
             - name: RAG_API_URL
               value: "https://4.207.24.92/query"
-            
+
             - name: RAG_API_KEY
               valueFrom:
                 secretKeyRef:
                   name: rag-api-credentials
                   key: api-key
-            
+
             # Kafka
             - name: KAFKA_BOOTSTRAP_SERVERS
               value: "kafka.rapporteur.ai:9094"
-            
+
             # Configuration
             - name: QUERIES_CONFIG_PATH
               value: "config/queries.json"
-            
+
             - name: STATE_PATH_PREFIX
               value: "state"
-            
+
             - name: INDICES_PATH_PREFIX
               value: "indices"
-            
+
             - name: DEFAULT_START_DATE
               value: "2023-09-01"
-            
+
             - name: DEFAULT_WINDOW_SIZE_DAYS
               value: "14"
-            
+
             # Monitoring
             - name: METRICS_PORT
               value: "8010"
-            
+
             - name: LOG_LEVEL
               value: "INFO"
-            
+
             resources:
               requests:
                 cpu: 200m
@@ -513,7 +513,7 @@ spec:
               limits:
                 cpu: 1000m
                 memory: 2Gi
-            
+
             ports:
             - name: metrics
               containerPort: 8010
@@ -1151,7 +1151,7 @@ ScrapeLinkedWebSources/
 
 ---
 
-**Document Version**: 1.0  
-**Last Updated**: 2024-12-24  
-**Author**: Research Indexing Team  
+**Document Version**: 1.0
+**Last Updated**: 2024-12-24
+**Author**: Research Indexing Team
 **Status**: Design Complete - Ready for Implementation

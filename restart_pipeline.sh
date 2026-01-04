@@ -9,11 +9,11 @@ echo "================================================"
 # Step 1: Stop all consumers
 echo ""
 echo "🛑 Step 1: Stopping all consumers..."
-RUNNING_COUNT=$(ps aux | grep "python3 src/consumers" | grep -v grep | wc -l)
+RUNNING_COUNT=$(ps aux | grep "src/consumers/run_kafka" | grep -v grep | wc -l)
 
 if [ "$RUNNING_COUNT" -gt 0 ]; then
     echo "   Found $RUNNING_COUNT running consumer(s)"
-    pkill -9 -f "python3 src/consumers" 2>/dev/null
+    pkill -9 -f "src/consumers/run_kafka" 2>/dev/null
     sleep 2
     echo "   ✅ All consumers stopped"
 else
@@ -69,7 +69,7 @@ python3 src/consumers/run_kafka_consumer.py > logs/web_scraper.log 2>&1 &
 echo "   ✅ Web Scraper (PID: $!)"
 
 ENABLE_LLM_VALIDATION=false python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
-echo "   ✅ Document Chunker (PID: $!) - LLM validation: ON"
+echo "   ✅ Document Chunker (PID: $!) - LLM validation: OFF"
 
 python3 src/consumers/run_kafka_citation_extractor.py > logs/citation_extractor.log 2>&1 &
 echo "   ✅ Citation Extractor (PID: $!)"
@@ -99,7 +99,7 @@ sleep 2
 echo ""
 echo "🔍 Step 5: Verifying consumer status..."
 
-RUNNING_COUNT=$(ps aux | grep "python3 src/consumers" | grep -v grep | wc -l)
+RUNNING_COUNT=$(ps aux | grep "src/consumers/run_kafka" | grep -v grep | wc -l)
 echo "   Running consumers: $RUNNING_COUNT/9"
 
 if [ "$RUNNING_COUNT" -eq 9 ]; then
@@ -108,7 +108,7 @@ else
     echo "   ⚠️  Expected 9 consumers, found $RUNNING_COUNT"
     echo ""
     echo "   Active consumers:"
-    ps aux | grep "python3 src/consumers" | grep -v grep | awk '{print "     • " $NF}' | sed 's|src/consumers/||' | sed 's|run_||' | sed 's|.py||'
+    ps aux | grep "src/consumers/run_kafka" | grep -v grep | awk '{print "     • " $NF}' | sed 's|src/consumers/||' | sed 's|run_||' | sed 's|.py||'
 fi
 
 echo ""

@@ -27,19 +27,19 @@ KAFKA_BOOTSTRAP_SERVERS = "localhost:9092"
 KAFKA_ENABLED = True  # Set to False to disable Kafka publishing
 
 # Time window configuration
-START_DATE = datetime(2023, 1, 1)  # October 7, 2023
-END_DATE = datetime(2026, 1, 1)   # Test with just 2 windows
+START_DATE = datetime(2023, 12, 30)  # October 7, 2023
+END_DATE = datetime(2026, 1, 3)   # Test with just 2 windows
 WINDOW_DAYS = 7  # 2 weeks
 
 # Query template
-QUERY_TEMPLATE = "Get the latest news from the Israeli Prime Ministers Office from {start_date} to {end_date}"
-
+QUERY_TEMPLATE = "Get the latest news from the Israeli Foriegn Ministry from {start_date} to {end_date}"
+ORG = "israeli_fm"
 # Request configuration
 PROCESSING_MODE = "research"
 TOP_K = 10
 ENABLE_QUERY_REFINEMENT = False
-REQUEST_TIMEOUT = 180  # 3 minutes
-DELAY_BETWEEN_WINDOWS = 30  # 10 seconds between each window/batch for testing
+REQUEST_TIMEOUT = 300  # 3 minutes
+DELAY_BETWEEN_WINDOWS = 90  # 10 seconds between each window/batch for testing
 
 
 def generate_time_windows(start_date, end_date, window_days):
@@ -97,7 +97,7 @@ def save_result(result, start_date, end_date):
     """Save query result to a JSON file."""
     OUTPUT_DIR.mkdir(exist_ok=True)
 
-    filename = f"pm_news_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.json"
+    filename = f"{ORG}_{start_date.strftime('%Y%m%d')}_{end_date.strftime('%Y%m%d')}.json"
     filepath = OUTPUT_DIR / filename
 
     with open(filepath, 'w', encoding='utf-8') as f:
@@ -112,7 +112,8 @@ def summarize_result(result):
 
     answer_preview = result.get("answer", "")[:200].replace("\n", " ")
     processing_time = result.get("processing_time_ms", 0) / 1000
-    citations_count = len(result.get("grounding_metadata", {}).get("citations", []))
+    grounding_metadata = result.get("grounding_metadata") or {}
+    citations_count = len(grounding_metadata.get("citations", []))
 
     return f"✓ {processing_time:.1f}s | {citations_count} citations | {answer_preview}..."
 
