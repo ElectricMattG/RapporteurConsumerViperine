@@ -19,11 +19,11 @@ click==8.3.1
     #   -c requirements.txt
     #   black
     #   pip-tools
-coverage==7.13.0
+coverage==7.13.1
     # via pytest-cov
 distlib==0.4.0
     # via virtualenv
-filelock==3.20.0
+filelock==3.20.1
     # via
     #   -c requirements.txt
     #   virtualenv
@@ -45,7 +45,7 @@ mock==5.2.0
     # via -r dev-requirements.in
 mypy-extensions==1.1.0
     # via black
-nodeenv==1.9.1
+nodeenv==1.10.0
     # via pre-commit
 packaging==25.0
     # via
@@ -68,7 +68,7 @@ pluggy==1.6.0
     #   pytest-cov
 pprintpp==0.4.0
     # via pytest-clarity
-pre-commit==4.5.0
+pre-commit==4.5.1
     # via -r dev-requirements.in
 pygments==2.19.2
     # via
