@@ -33,14 +33,9 @@ echo "🗑️  Step 3: Creating and flushing Kafka topics..."
 
 TOPICS=(
     "web-scrape-requests"
+    "content-extracted"
     "summarise-document"
     "summary-completed"
-    "content-extracted"
-    "citation-extraction"
-    "chunk-embedding"
-    "qa-generation"
-    "qa-embedding"
-    "qa-indexed"
     "session-complete"
 )
 
@@ -59,40 +54,31 @@ done
 
 echo "   ✅ All topics ready"
 
-# Step 4: Start all consumers
+# Step 4: Start selected consumers (slim pipeline)
 echo ""
-echo "🚀 Step 4: Starting all consumers..."
+echo "🚀 Step 4: Starting selected consumers (slim pipeline)..."
 
 cd "$(dirname "$0")"
 
 python3 src/consumers/run_kafka_consumer.py > logs/web_scraper.log 2>&1 &
 echo "   ✅ Web Scraper (PID: $!)"
 
-ENABLE_LLM_VALIDATION=false python3 src/consumers/run_kafka_chunker.py > logs/chunker.log 2>&1 &
-echo "   ✅ Document Chunker (PID: $!) - LLM validation: OFF"
-
-python3 src/consumers/run_kafka_citation_extractor.py > logs/citation_extractor.log 2>&1 &
-echo "   ✅ Citation Extractor (PID: $!)"
-
-python3 src/consumers/run_kafka_chunk_embedder.py > logs/chunk_embedder.log 2>&1 &
-echo "   ✅ Chunk Embedder (PID: $!)"
-
-python3 src/consumers/run_kafka_qa_generator.py > logs/qa_generator.log 2>&1 &
-echo "   ✅ Q&A Generator (PID: $!)"
-
-python3 src/consumers/run_kafka_qa_embedder.py > logs/qa_embedder.log 2>&1 &
-echo "   ✅ Q&A Embedder (PID: $!)"
-
+# Summarizer should consume from `content-extracted` in the slim pipeline
+SUMMARIZER_INPUT_TOPIC=${SUMMARIZER_INPUT_TOPIC:-content-extracted}
+export SUMMARIZER_INPUT_TOPIC
 python3 src/consumers/run_kafka_summarizer.py > logs/summarizer.log 2>&1 &
-echo "   ✅ Summarizer (PID: $!)"
+echo "   ✅ Summarizer (PID: $!) - input_topic=${SUMMARIZER_INPUT_TOPIC}"
 
 python3 src/consumers/run_kafka_summary_indexer.py > logs/summary_indexer.log 2>&1 &
 echo "   ✅ Summary Indexer (PID: $!)"
 
-sleep 3
-
-python3 src/consumers/run_kafka_index_aggregator.py > logs/index_aggregator.log 2>&1 &
-echo "   ✅ Index Aggregator (PID: $!)"
+# Optionally start the index aggregator if environment variable ENABLE_AGGREGATOR is true (default: false)
+if [ "${ENABLE_AGGREGATOR:-false}" = "true" ]; then
+    python3 src/consumers/run_kafka_index_aggregator.py > logs/index_aggregator.log 2>&1 &
+    echo "   ✅ Index Aggregator (PID: $!)"
+else
+    echo "   ℹ️  Index Aggregator not started (ENABLE_AGGREGATOR=${ENABLE_AGGREGATOR:-false})"
+fi
 
 # Step 5: Verify all consumers started
 sleep 2
@@ -100,12 +86,13 @@ echo ""
 echo "🔍 Step 5: Verifying consumer status..."
 
 RUNNING_COUNT=$(ps aux | grep "src/consumers/run_kafka" | grep -v grep | wc -l)
-echo "   Running consumers: $RUNNING_COUNT/9"
+echo "   Running consumers: $RUNNING_COUNT (expected: web_scraper, summarizer, summary_indexer, optional index_aggregator)"
 
-if [ "$RUNNING_COUNT" -eq 9 ]; then
-    echo "   ✅ All consumers started successfully"
+EXPECTED_MIN=3
+if [ "$RUNNING_COUNT" -ge "$EXPECTED_MIN" ]; then
+    echo "   ✅ Selected consumers started successfully"
 else
-    echo "   ⚠️  Expected 9 consumers, found $RUNNING_COUNT"
+    echo "   ⚠️  Expected at least $EXPECTED_MIN consumers, found $RUNNING_COUNT"
     echo ""
     echo "   Active consumers:"
     ps aux | grep "src/consumers/run_kafka" | grep -v grep | awk '{print "     • " $NF}' | sed 's|src/consumers/||' | sed 's|run_||' | sed 's|.py||'
@@ -117,11 +104,6 @@ echo "🎉 Pipeline restart complete!"
 echo ""
 echo "📋 Logs available in logs/ directory"
 echo "   • Web Scraper:       logs/web_scraper.log"
-echo "   • Chunker:           logs/chunker.log"
-echo "   • Citation Extract:  logs/citation_extractor.log"
-echo "   • Chunk Embedder:    logs/chunk_embedder.log"
-echo "   • Q&A Generator:     logs/qa_generator.log"
-echo "   • Q&A Embedder:      logs/qa_embedder.log"
 echo "   • Summarizer:        logs/summarizer.log"
 echo "   • Summary Indexer:   logs/summary_indexer.log"
-echo "   • Index Aggregator:  logs/index_aggregator.log"
+echo "   • Index Aggregator:  logs/index_aggregator.log (only if ENABLE_AGGREGATOR=true)"

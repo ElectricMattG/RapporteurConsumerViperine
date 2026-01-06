@@ -11,7 +11,7 @@ scrape_configs:
   # Kafka Web Scraper Consumer
   - job_name: 'kafka_web_scraper'
     static_configs:
-      - targets: ['host.docker.internal:8001']
+      - targets: ['172.19.0.1:8001']
         labels:
           consumer: 'web_scraper'
           service: 'kafka_consumer'
@@ -22,7 +22,7 @@ scrape_configs:
   # Document Chunker Consumer
   - job_name: 'kafka_document_chunker'
     static_configs:
-      - targets: ['host.docker.internal:8002']
+      - targets: ['172.19.0.1:8002']
         labels:
           consumer: 'document_chunker'
           service: 'kafka_consumer'
@@ -33,7 +33,7 @@ scrape_configs:
   # Chunk Embedder Consumer
   - job_name: 'kafka_chunk_embedder'
     static_configs:
-      - targets: ['host.docker.internal:8003']
+      - targets: ['172.19.0.1:8003']
         labels:
           consumer: 'chunk_embedder'
           service: 'kafka_consumer'
@@ -44,7 +44,7 @@ scrape_configs:
   # Q&A Generator Consumer
   - job_name: 'kafka_qa_generator'
     static_configs:
-      - targets: ['host.docker.internal:8004']
+      - targets: ['172.19.0.1:8004']
         labels:
           consumer: 'qa_generator'
           service: 'kafka_consumer'
@@ -55,7 +55,7 @@ scrape_configs:
   # Q&A Embedder Consumer
   - job_name: 'kafka_qa_embedder'
     static_configs:
-      - targets: ['host.docker.internal:8005']
+      - targets: ['172.19.0.1:8005']
         labels:
           consumer: 'qa_embedder'
           service: 'kafka_consumer'
@@ -66,7 +66,7 @@ scrape_configs:
   # Summarizer Consumer
   - job_name: 'kafka_summarizer'
     static_configs:
-      - targets: ['host.docker.internal:8010']
+      - targets: ['172.19.0.1:8010']
         labels:
           consumer: 'summarizer'
           service: 'kafka_consumer'
@@ -77,7 +77,7 @@ scrape_configs:
   # Summary Indexer Consumer
   - job_name: 'kafka_summary_indexer'
     static_configs:
-      - targets: ['host.docker.internal:8006']
+      - targets: ['172.19.0.1:8006']
         labels:
           consumer: 'summary_indexer'
           service: 'kafka_consumer'
@@ -88,7 +88,7 @@ scrape_configs:
   # Citation Extractor Consumer
   - job_name: 'kafka_citation_extractor'
     static_configs:
-      - targets: ['host.docker.internal:8007']
+      - targets: ['172.19.0.1:8007']
         labels:
           consumer: 'citation_extractor'
           service: 'kafka_consumer'
@@ -99,7 +99,7 @@ scrape_configs:
   # Index Aggregator Consumer
   - job_name: 'kafka_index_aggregator'
     static_configs:
-      - targets: ['host.docker.internal:8008']
+      - targets: ['172.19.0.1:8008']
         labels:
           consumer: 'index_aggregator'
           service: 'kafka_consumer'
@@ -110,7 +110,7 @@ scrape_configs:
   # Dead Letter Consumer
   - job_name: 'kafka_dead_letter_consumer'
     static_configs:
-      - targets: ['host.docker.internal:8009']
+      - targets: ['172.19.0.1:8009']
         labels:
           consumer: 'dead_letter'
           service: 'kafka_consumer'

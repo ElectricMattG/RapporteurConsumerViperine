@@ -196,7 +196,12 @@ class KafkaSummarizerConsumer(Base):
                     self.kafka_config['sasl.password'] = os.getenv('KAFKA_SASL_PASSWORD', '')
 
             # Topic configuration
-            self.input_topic = self._app_config.get('kafka.output_topic') or 'summarise-document'
+            # Support environment variable override for slim pipeline
+            # In slim pipeline: SUMMARIZER_INPUT_TOPIC=content-extracted (web scraper output)
+            # In full pipeline: use 'summarise-document' (default)
+            self.input_topic = os.getenv('SUMMARIZER_INPUT_TOPIC') or \
+                              self._app_config.get('kafka.output_topic') or \
+                              'summarise-document'
             self.output_topic = 'content-extracted'  # Publish summary back for chunking when extraction failed
             self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'summary-completed'
 
