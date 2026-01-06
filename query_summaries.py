@@ -22,14 +22,14 @@ def extract_qa_from_content(content: str) -> Dict[str, str]:
     """Extract question and answer from content field using regex.
 
     Args:
-        content: Content field containing QUESTION, ANSWER, and CONTEXT
+        content: Content field containing QUESTION, ANSWER, and SOURCE CONTEXT
 
     Returns:
         Dict with 'question' and 'answer' fields
     """
-    # Pattern to match QUESTION and ANSWER, ignoring CONTEXT
-    question_pattern = r'QUESTION:\s*(.+?)(?=\n\n(?:ANSWER|CONTEXT)|$)'
-    answer_pattern = r'ANSWER:\s*(.+?)(?=\n\n(?:CONTEXT)|$)'
+    # Pattern to match QUESTION and ANSWER, stopping before SOURCE CONTEXT
+    question_pattern = r'QUESTION:\s*(.+?)(?=\n*ANSWER:)'
+    answer_pattern = r'ANSWER:\s*(.+?)(?=\n*SOURCE CONTEXT:|\Z)'
 
     question_match = re.search(question_pattern, content, re.DOTALL)
     answer_match = re.search(answer_pattern, content, re.DOTALL)
@@ -102,7 +102,9 @@ def query_summaries(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     post_filter_top_k: Optional[int] = None,
-    mode: str = 'summaries'
+    mode: str = 'summaries',
+    qa_index_path: Optional[str] = None,
+    qa_top_k: Optional[int] = None
 ) -> List[Dict]:
     """Query summaries or Q&A pairs using vector similarity.
 
@@ -113,10 +115,55 @@ def query_summaries(
         start_date: Filter start date (YYYY-MM-DD)
         end_date: Filter end date (YYYY-MM-DD)
         post_filter_top_k: If specified, filter top-k results by date and limit to this number
+        mode: 'summaries', 'qa', or 'hybrid'
+        qa_index_path: Path to Q&A index (required for hybrid mode)
+        qa_top_k: Number of Q&A pairs to retrieve (defaults to top_k in qa mode, top_k//2 in hybrid)
     """
-    print(f"📚 Loading summaries from: {index_path}")
-    summaries = load_summaries_index(index_path)
-    print(f"   Loaded {len(summaries)} summaries")
+    if mode == 'hybrid':
+        # Query both indices and combine results
+        print(f"🔀 HYBRID MODE: Querying both summaries and Q&A pairs")
+        print(f"📚 Loading summaries from: {index_path}")
+        summaries = load_summaries_index(index_path)
+        print(f"   Loaded {len(summaries)} summaries")
+
+        if not qa_index_path:
+            raise ValueError("qa_index_path is required for hybrid mode")
+        print(f"❓ Loading Q&A pairs from: {qa_index_path}")
+        qa_pairs = load_summaries_index(qa_index_path)
+        print(f"   Loaded {len(qa_pairs)} Q&A pairs")
+
+        # Query summaries
+        summary_k = top_k if qa_top_k is None else top_k
+        qa_k = qa_top_k if qa_top_k is not None else (top_k // 2 if mode == 'hybrid' else top_k)
+
+        summary_results = _query_single_index(query, summaries, summary_k, start_date, end_date, post_filter_top_k, 'summaries')
+        # Query Q&A pairs
+        qa_results = _query_single_index(query, qa_pairs, qa_k, start_date, end_date, post_filter_top_k, 'qa')
+
+        # Combine and mark type
+        for r in summary_results:
+            r['result_type'] = 'summary'
+        for r in qa_results:
+            r['result_type'] = 'qa'
+
+        return summary_results + qa_results
+    else:
+        print(f"📚 Loading summaries from: {index_path}")
+        summaries = load_summaries_index(index_path)
+        print(f"   Loaded {len(summaries)} summaries")
+        return _query_single_index(query, summaries, top_k, start_date, end_date, post_filter_top_k, mode)
+
+
+def _query_single_index(
+    query: str,
+    summaries: List[Dict],
+    top_k: int,
+    start_date: Optional[str],
+    end_date: Optional[str],
+    post_filter_top_k: Optional[int],
+    mode: str
+) -> List[Dict]:
+    """Helper function to query a single index."""
 
     # Filter by date if specified and NOT using post-filter
     if (start_date or end_date) and not post_filter_top_k:
@@ -134,15 +181,22 @@ def query_summaries(
 
     # Calculate similarities
     print("   Calculating similarities...")
-    # Choose embedding field based on mode
-    embedding_field = 'qa_embedding' if mode == 'qa' else 'summary_embedding'
 
     results = []
     for summary in summaries:
-        if embedding_field not in summary:
+        # Get embedding based on mode
+        if mode == 'qa':
+            # Q&A pairs use nested embedding_enrichment.embedding_vector
+            embedding_enrichment = summary.get('embedding_enrichment', {})
+            doc_embedding = embedding_enrichment.get('embedding_vector')
+        else:
+            # Summaries use flat summary_embedding
+            doc_embedding = summary.get('summary_embedding')
+
+        if doc_embedding is None:
             continue
 
-        similarity = dot_product_similarity(query_embedding, summary[embedding_field])
+        similarity = dot_product_similarity(query_embedding, doc_embedding)
         results.append({
             'summary': summary,
             'similarity': similarity
@@ -154,32 +208,38 @@ def query_summaries(
 
     # Apply post-filtering if requested
     if post_filter_top_k:
-        print(f"   Found {len(results)} results, filtering top {top_k} by date...")
-        # Filter the top results by date using doc_metadata.publication_date or document_metadata
-        filtered_results = []
-        for result in top_results:
-            summary = result['summary']
-            # Handle both summary and Q&A metadata structures
-            if mode == 'qa':
-                doc_metadata = summary.get('document_metadata', {})
-            else:
-                doc_metadata = summary.get('doc_metadata', {})
-            pub_date_str = doc_metadata.get('publication_date')
+        # Only filter by date if dates are provided
+        if start_date or end_date:
+            print(f"   Found {len(results)} results, filtering top {top_k} by date...")
+            # Filter the top results by date using doc_metadata.publication_date or document_metadata
+            filtered_results = []
+            for result in top_results:
+                summary = result['summary']
+                # Handle both summary and Q&A metadata structures
+                if mode == 'qa':
+                    doc_metadata = summary.get('document_metadata', {})
+                else:
+                    doc_metadata = summary.get('doc_metadata', {})
+                pub_date_str = doc_metadata.get('publication_date')
 
-            if pub_date_str:
-                try:
-                    doc_date = datetime.strptime(pub_date_str, '%Y-%m-%d').date()
-                    start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
-                    end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
+                if pub_date_str:
+                    try:
+                        doc_date = datetime.strptime(pub_date_str, '%Y-%m-%d').date()
+                        start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
+                        end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
 
-                    if (not start or doc_date >= start) and (not end or doc_date <= end):
-                        filtered_results.append(result)
-                except (ValueError, AttributeError):
-                    pass
+                        if (not start or doc_date >= start) and (not end or doc_date <= end):
+                            filtered_results.append(result)
+                    except (ValueError, AttributeError):
+                        pass
 
-        # Limit to post_filter_top_k
-        top_results = filtered_results[:post_filter_top_k]
-        print(f"   After date filtering: {len(top_results)} results")
+            # Limit to post_filter_top_k
+            top_results = filtered_results[:post_filter_top_k]
+            print(f"   After date filtering: {len(top_results)} results")
+        else:
+            # No date filtering, just limit to post_filter_top_k
+            print(f"   Found {len(results)} results, limiting to top {post_filter_top_k}")
+            top_results = top_results[:post_filter_top_k]
     else:
         print(f"   Found {len(results)} results, returning top {top_k}")
 
@@ -196,58 +256,114 @@ async def generate_overview(query: str, top_summaries: List[Dict], mode: str = '
     """
     # Format summaries for context
     summaries_text = []
+    qa_text = []
+
     for i, result in enumerate(top_summaries, 1):
         summary = result['summary']
         score = result['similarity']
+        result_type = result.get('result_type', mode)  # Use result_type if hybrid, else use mode
 
-        doc_id = summary.get('document_id', 'unknown')
-        source_url = summary.get('source_url', 'N/A')
-        # Handle both metadata structures
-        if mode == 'qa':
-            doc_metadata = summary.get('document_metadata', {})
-            chunk_metadata = summary.get('chunk_metadata', {})
-            doc_id = chunk_metadata.get('chunk_id', 'unknown')
-            source_url = chunk_metadata.get('source_url', 'N/A')
-        else:
-            doc_metadata = summary.get('doc_metadata', {})
-        pub_date = doc_metadata.get('publication_date', 'N/A')
-
-        if mode == 'qa':
-            # Extract Q&A from content field
+        if result_type == 'qa':
+            # Extract Q&A from content field - only QUESTION and ANSWER, no SOURCE CONTEXT
             content = summary.get('content', '')
             qa_data = extract_qa_from_content(content)
-            summaries_text.append(
-                f"Q&A Pair {i} (similarity: {score:.4f}):\n"
-                f"Document ID: {doc_id}\n"
-                f"Publication Date: {pub_date}\n"
+            doc_metadata = summary.get('document_metadata', {})
+            source_url = doc_metadata.get('source_url', 'N/A')
+            title = doc_metadata.get('title', 'N/A')
+            authors = doc_metadata.get('authors', [])
+            author_str = ', '.join(authors) if authors else 'N/A'
+            qa_text.append(
+                f"Q&A Pair {len(qa_text) + 1} (relevance: {score:.4f}):\n"
                 f"Source: {source_url}\n"
+                f"Title: {title}\n"
+                f"Author(s): {author_str}\n"
                 f"QUESTION: {qa_data['question']}\n"
                 f"ANSWER: {qa_data['answer']}\n"
             )
         else:
             # Regular summary mode
-            title = summary.get('title', 'N/A')
+            doc_id = summary.get('document_id', 'unknown')
+            source_url = summary.get('source_url', 'N/A')
+            doc_metadata = summary.get('doc_metadata', {})
+            pub_date = doc_metadata.get('publication_date', 'N/A')
             summary_text = summary.get('summary_text', '')
             summaries_text.append(
-                f"Summary {i} (similarity: {score:.4f}):\n"
+                f"Summary {len(summaries_text) + 1} (similarity: {score:.4f}):\n"
                 f"Document ID: {doc_id}\n"
                 f"Publication Date: {pub_date}\n"
-                f"Title: {title}\n"
                 f"Source: {source_url}\n"
                 f"Content: {summary_text}\n"
             )
 
-    context = "\n---\n".join(summaries_text)
-
-    # Print summaries being sent
+    # Print content being sent
     print("\n" + "="*80)
-    print("📋 SUMMARIES BEING SENT TO GEMINI:")
-    print("="*80)
-    for summary_text in summaries_text:
-        print(summary_text)
-        print("-"*80)
+    if mode == 'hybrid':
+        print("🔀 HYBRID CONTENT BEING SENT TO GEMINI:")
+        print("="*80)
+        if summaries_text:
+            print("\n📚 SUMMARIES:")
+            for s in summaries_text:
+                print(s)
+                print("-"*80)
+        if qa_text:
+            print("\n❓ Q&A PAIRS:")
+            for q in qa_text:
+                print(q)
+                print("-"*80)
+    elif mode == 'qa':
+        print("📋 Q&A PAIRS BEING SENT TO GEMINI:")
+        print("="*80)
+        for q in qa_text:
+            print(q)
+            print("-"*80)
+    else:
+        print("📋 SUMMARIES BEING SENT TO GEMINI:")
+        print("="*80)
+        for s in summaries_text:
+            print(s)
+            print("-"*80)
 
-    prompt = f"""Given these summaries, provide a comprehensive overview that synthesizes the key themes, findings, and insights. When you cite eacg summary use the: publihser/author and a stub of the url (Al-Jazeer, Nov 2023, www.al-jazeera)
+    # Build prompt based on mode
+    if mode == 'hybrid':
+        summaries_context = "\n\n".join(summaries_text) if summaries_text else "None"
+        qa_context = "\n\n".join(qa_text) if qa_text else "None"
+        prompt = f"""Given these research summaries and question-answer pairs, provide a comprehensive overview that synthesizes the key themes, findings, and insights. When citing summaries, use the publisher/author and URL stub.
+
+Original Query: {query}
+
+Research Summaries:
+{summaries_context}
+
+Question-Answer Pairs:
+{qa_context}
+
+Please provide:
+1. A high-level overview of the main themes across all sources
+2. Key findings or insights that emerge from both summaries and Q&A pairs
+3. Any patterns or connections between the different sources
+4. Notable differences or contrasting viewpoints if any
+
+Overview:"""
+    elif mode == 'qa':
+        context = "\n\n".join(qa_text)
+        prompt = f"""Given these question-answer pairs, provide a comprehensive overview that synthesizes the key themes, findings, and insights.
+
+Original Query: {query}
+
+Question-Answer Pairs:
+
+{context}
+
+Please provide:
+1. A high-level overview of the main themes across these Q&A pairs
+2. Key findings or insights that emerge
+3. Any patterns or connections between the answers
+4. Notable differences or contrasting viewpoints if any
+
+Overview:"""
+    else:
+        context = "\n\n".join(summaries_text)
+        prompt = f"""Given these summaries, provide a comprehensive overview that synthesizes the key themes, findings, and insights. When you cite each summary use the: publisher/author and a stub of the url (Al-Jazeer, Nov 2023, www.al-jazeera)
 
 Original Query: {query}
 
@@ -300,8 +416,14 @@ def main():
     parser.add_argument("--end-date", type=str, help="Filter end date (YYYY-MM-DD)")
     parser.add_argument("--post-filter-top-k", type=int, help="If specified, filter top-k results by date and limit to this number")
     parser.add_argument("--show-summaries", action="store_true", help="Show individual summaries before overview")
-    parser.add_argument("--mode", type=str, default="summaries", choices=["summaries", "qa"], help="Query mode: summaries or qa pairs")
+    parser.add_argument("--mode", type=str, default="summaries", choices=["summaries", "qa", "hybrid"], help="Query mode: summaries, qa pairs, or hybrid (both)")
+    parser.add_argument("--qa-index", type=str, help="Path to Q&A pairs index (required for hybrid mode)")
+    parser.add_argument("--qa-top-k", type=int, help="Number of Q&A pairs to retrieve (defaults to top-k in qa mode, top-k//2 in hybrid)")
     args = parser.parse_args()
+
+    # Validate hybrid mode requirements
+    if args.mode == 'hybrid' and not args.qa_index:
+        parser.error("--qa-index is required when using hybrid mode")
 
     # Query summaries
     top_results = query_summaries(
@@ -311,7 +433,9 @@ def main():
         start_date=args.start_date,
         end_date=args.end_date,
         post_filter_top_k=args.post_filter_top_k,
-        mode=args.mode
+        mode=args.mode,
+        qa_index_path=args.qa_index,
+        qa_top_k=args.qa_top_k
     )
 
     if not top_results:
@@ -321,17 +445,28 @@ def main():
     # Show individual summaries if requested
     if args.show_summaries:
         print("\n" + "=" * 80)
-        print("TOP SUMMARIES")
+        print("TOP RESULTS")
         print("=" * 80)
         for i, result in enumerate(top_results, 1):
             summary = result['summary']
             score = result['similarity']
-            doc_metadata = summary.get('doc_metadata', {})
+
+            # Handle metadata based on mode
+            if args.mode == 'qa':
+                doc_metadata = summary.get('document_metadata', {})
+                chunk_metadata = summary.get('chunk_metadata', {})
+                doc_id = chunk_metadata.get('chunk_id', 'unknown')
+                source_url = chunk_metadata.get('source_url', 'N/A')
+            else:
+                doc_metadata = summary.get('doc_metadata', {})
+                doc_id = summary.get('document_id', 'unknown')
+                source_url = summary.get('source_url', 'N/A')
+
             pub_date = doc_metadata.get('publication_date', 'N/A')
             print(f"\n{i}. Similarity: {score:.4f}")
-            print(f"   Document ID: {summary.get('document_id', 'unknown')}")
+            print(f"   Document ID: {doc_id}")
             print(f"   Publication Date: {pub_date}")
-            print(f"   Source: {summary.get('source_url', 'N/A')}")
+            print(f"   Source: {source_url}")
     else:
         print(f"\n📊 Selected {len(top_results)} summaries for overview generation")
 
