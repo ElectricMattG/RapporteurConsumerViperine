@@ -29,28 +29,58 @@ from urllib.parse import urlparse
 
 
 def load_summaries(index_path: str) -> List[Dict]:
-    """Load summaries from JSONL index file."""
+    """Load summaries from JSONL index file or RAG query result JSON file."""
     summaries = []
+
     with open(index_path, 'r', encoding='utf-8') as f:
-        for line_num, line in enumerate(f, 1):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                summary = json.loads(line)
-                summaries.append(summary)
-            except json.JSONDecodeError as e:
-                print(f"Warning: Skipping invalid JSON at line {line_num}: {e}", file=sys.stderr)
+        content = f.read().strip()
+
+    # Try to parse as single JSON object first (RAG query result format)
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict):
+            # Check if it's a RAG query result with search_results
+            if 'search_results' in data:
+                print(f"   Detected RAG query result format", file=sys.stderr)
+                return data['search_results']
+            # Single summary object
+            return [data]
+    except json.JSONDecodeError:
+        pass
+
+    # Parse as JSONL (one JSON object per line)
+    print(f"   Detected JSONL format", file=sys.stderr)
+    for line_num, line in enumerate(content.split('\n'), 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            summary = json.loads(line)
+            summaries.append(summary)
+        except json.JSONDecodeError as e:
+            print(f"Warning: Skipping invalid JSON at line {line_num}: {e}", file=sys.stderr)
+
     return summaries
 
 
 def extract_unique_urls(summaries: List[Dict]) -> List[str]:
-    """Extract unique source URLs from summaries."""
+    """Extract unique source URLs from summaries or search results."""
     urls = set()
-    for summary in summaries:
-        source_url = summary.get('source_url')
+    for item in summaries:
+        # Handle different formats
+        source_url = None
+
+        if isinstance(item, dict):
+            # Direct source_url field (summary index format)
+            source_url = item.get('source_url')
+
+            # Nested in metadata (RAG search result format)
+            if not source_url and 'metadata' in item:
+                source_url = item['metadata'].get('source_url')
+
         if source_url:
             urls.add(source_url)
+
     return sorted(list(urls))
 
 

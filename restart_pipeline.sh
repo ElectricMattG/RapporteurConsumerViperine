@@ -37,6 +37,7 @@ TOPICS=(
     "summarise-document"
     "summary-completed"
     "session-complete"
+    "frontend-message"
 )
 
 # First delete topics to clear all messages

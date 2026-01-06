@@ -207,6 +207,18 @@ class KafkaSummaryIndexerConsumer(Base):
             self.cache_dir = Path(self._app_config.get('summary_indexer.cache_directory') or 'cache/summaries')
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
+            # Combined index file path (in cache directory)
+            try:
+                combined_index_filename = self._app_config.get('summary_indexer.combined_index_file')
+            except (KeyError, AttributeError):
+                combined_index_filename = None
+
+            if not combined_index_filename:
+                combined_index_filename = 'research_summaries_with_embeddings_combined.jsonl'
+
+            # Store combined index in cache directory
+            self.combined_index_file = self.cache_dir / combined_index_filename
+
             # Embedding configuration
             self.model_name = self._app_config.get('summary_indexer.model_name') or 'all-MiniLM-L6-v2'
 
@@ -216,6 +228,7 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info(f"   Input topic: {self.input_topic}")
             self._logger.info(f"   Output topic: {self.output_topic}")
             self._logger.info(f"   Cache directory: {self.cache_dir}")
+            self._logger.info(f"   Combined index: {self.combined_index_file}")
             self._logger.info(f"   Model: {self.model_name}")
 
         except Exception as e:
@@ -345,6 +358,120 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.error(f"   ❌ Error publishing session-complete: {e}")
             raise
 
+    def _aggregate_to_combined_index(self, session_id: str):
+        """
+        Aggregate session index into the combined master index.
+        Handles deduplication by document_id.
+        """
+        try:
+            session_dir = self._get_session_dir(session_id)
+            session_index_file = session_dir / f"{session_id}_summaries_embedded.jsonl"
+
+            if not session_index_file.exists():
+                self._logger.warning(f"   ⚠️ Session index file not found: {session_index_file}")
+                return
+
+            self._logger.info(f"   📚 Aggregating session index to combined index...")
+            self._logger.info(f"   Source: {session_index_file}")
+            self._logger.info(f"   Target: {self.combined_index_file}")
+
+            # Ensure parent directory exists for combined index file
+            self.combined_index_file.parent.mkdir(parents=True, exist_ok=True)
+
+            # Load existing document IDs from combined index to avoid duplicates
+            existing_doc_ids = set()
+            if self.combined_index_file.exists():
+                with open(self.combined_index_file, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        if line.strip():
+                            try:
+                                entry = json.loads(line)
+                                doc_id = entry.get('document_id')
+                                if doc_id:
+                                    existing_doc_ids.add(doc_id)
+                            except json.JSONDecodeError:
+                                continue
+
+            self._logger.info(f"   📊 Found {len(existing_doc_ids)} existing documents in combined index")
+
+            # Read session index and append new entries
+            new_count = 0
+            duplicate_count = 0
+            new_additions = []  # Track new summaries for frontend message
+
+            with open(session_index_file, 'r', encoding='utf-8') as source:
+                with open(self.combined_index_file, 'a', encoding='utf-8') as target:
+                    for line in source:
+                        if line.strip():
+                            try:
+                                entry = json.loads(line)
+                                doc_id = entry.get('document_id')
+
+                                if doc_id and doc_id not in existing_doc_ids:
+                                    # New document, append to combined index
+                                    json.dump(entry, target, ensure_ascii=False)
+                                    target.write('\n')
+                                    existing_doc_ids.add(doc_id)
+                                    new_count += 1
+
+                                    # Track new addition for frontend message
+                                    new_additions.append({
+                                        'url': entry.get('source_url', ''),
+                                        'title': entry.get('doc_metadata', {}).get('title', 'Untitled')
+                                    })
+                                else:
+                                    duplicate_count += 1
+
+                            except json.JSONDecodeError as e:
+                                self._logger.warning(f"   ⚠️ Invalid JSON in session index: {e}")
+                                continue
+
+            self._logger.info(f"   ✅ Aggregation complete:")
+            self._logger.info(f"      New entries: {new_count}")
+            self._logger.info(f"      Duplicates skipped: {duplicate_count}")
+            self._logger.info(f"      Total in combined index: {len(existing_doc_ids)}")
+
+            # Publish frontend message with aggregation results
+            if new_count > 0:
+                self._publish_frontend_message(session_id, new_additions, len(existing_doc_ids))
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
+
+    def _publish_frontend_message(self, session_id: str, new_additions: List[Dict[str, str]], total_summaries: int):
+        """
+        Publish a message to the frontend-message topic with aggregation results.
+
+        Args:
+            session_id: The session ID that was aggregated
+            new_additions: List of dicts with 'url' and 'title' for each new summary
+            total_summaries: Total number of summaries in the combined index
+        """
+        if not self.producer:
+            self._create_producer()
+
+        message = {
+            'type': 'summary_aggregation',
+            'session_id': session_id,
+            'new_summaries_count': len(new_additions),
+            'total_summaries_count': total_summaries,
+            'new_summaries': new_additions,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        try:
+            self.producer.produce(
+                'frontend-message',
+                key=session_id.encode('utf-8'),
+                value=json.dumps(message).encode('utf-8')
+            )
+            self.producer.flush()
+
+            self._logger.info(f"   📢 Published frontend message: {len(new_additions)} new summaries, {total_summaries} total")
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing frontend message: {e}")
+
     async def _process_message(self, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single summary-completed message"""
         try:
@@ -448,6 +575,10 @@ class KafkaSummaryIndexerConsumer(Base):
 
                 # Publish session-complete message
                 self._publish_session_complete(session_id, state['received_count'])
+
+                # Aggregate session index to combined master index
+                self._aggregate_to_combined_index(session_id)
+
             elif state.get('completed', False):
                 self._logger.info(f"   ℹ️  Session already marked complete, skipping signal")
             else:

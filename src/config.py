@@ -214,6 +214,7 @@ defaults = {
         "input_topic": "summary-completed",  # Topic to consume summary completion messages from
         "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
         "cache_directory": "cache/summaries",  # Directory for summary index files
+        "combined_index_file": "research_summaries_with_embeddings_combined.jsonl",  # Master combined index file
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
     },
     "index_aggregator": {
