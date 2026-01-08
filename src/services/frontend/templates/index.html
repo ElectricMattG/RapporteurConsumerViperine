@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RAG Query Interface</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <!-- Left Panel: Query History -->
+        <div class="left-panel">
+            <div class="panel-header">
+                <h2>Query History</h2>
+            </div>
+            <div class="query-list" id="queryList">
+                <!-- Query items will be populated here -->
+            </div>
+        </div>
+
+        <!-- Main Chat Area -->
+        <div class="main-panel">
+            <div class="chat-header">
+                <h1>RAG Query Interface</h1>
+                <div class="date-filters">
+                    <label for="startDate">Start Date:</label>
+                    <input type="date" id="startDate" class="date-input">
+
+                    <label for="endDate">End Date:</label>
+                    <input type="date" id="endDate" class="date-input">
+
+                    <button id="clearDates" class="clear-btn">Clear</button>
+                </div>
+            </div>
+
+            <div class="chat-container" id="chatContainer">
+                <div class="welcome-message">
+                    <h2>Welcome to the RAG Query Interface</h2>
+                    <p>Ask questions about your indexed summaries. The system will retrieve relevant documents and provide grounded responses.</p>
+                </div>
+            </div>
+
+            <div class="input-container">
+                <textarea
+                    id="queryInput"
+                    class="query-input"
+                    placeholder="Enter your query here..."
+                    rows="3"
+                ></textarea>
+                <button id="sendButton" class="send-button">
+                    <svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                        <line x1="22" y1="2" x2="11" y2="13"></line>
+                        <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                    </svg>
+                </button>
+            </div>
+        </div>
+
+        <!-- Right Panel: Retrieved Documents -->
+        <div class="right-panel">
+            <div class="panel-header">
+                <h2>Retrieved Summaries</h2>
+            </div>
+            <div class="document-list" id="documentList">
+                <div class="empty-state">
+                    No documents retrieved yet. Send a query to see results.
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

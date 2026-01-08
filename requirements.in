@@ -33,3 +33,4 @@ azure-storage-blob
 prometheus-client  # Prometheus metrics exporter
 psutil  # System resource monitoring
 python-json-logger  # Structured JSON logging
+flask
