@@ -1,4 +1,0 @@
-requests==2.31.0
-azure-storage-blob==12.19.0
-confluent-kafka==2.3.0
-prometheus-client==0.20.0

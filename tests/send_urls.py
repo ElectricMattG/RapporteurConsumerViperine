@@ -7,6 +7,7 @@ Sends a batch of URLs to the web-scrape-requests Kafka topic for processing.
 
 import json
 from datetime import datetime
+
 from confluent_kafka import Producer
 
 

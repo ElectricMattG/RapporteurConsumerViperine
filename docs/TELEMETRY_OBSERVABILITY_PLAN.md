@@ -22,7 +22,7 @@ Metrics to expose:
   - CPU utilization (%)
     • process_cpu_percent
     • system_cpu_percent
-  
+
   - Memory utilization (%)
     • process_memory_percent
     • process_memory_rss_bytes
@@ -59,24 +59,24 @@ Per consumer type:
     • urls_scraped_total
     • scraping_duration_seconds
     • scraping_failures_total
-  
+
   - kafka_document_chunker:
     • documents_chunked_total
     • chunks_created_total
     • chunking_duration_seconds
-  
+
   - kafka_chunk_embedder:
     • chunks_embedded_total
     • embedding_api_calls_total
     • embedding_duration_seconds
-  
+
   - kafka_qa_generator:
     • qa_pairs_generated_total
     • qa_generation_duration_seconds
-  
+
   - kafka_qa_embedder:
     • qa_embedded_total
-  
+
   - kafka_index_aggregator:
     • chunks_aggregated_total
     • chunks_duplicates_filtered
