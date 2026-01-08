@@ -29,7 +29,7 @@ defaults = {
     },
     "gemini": {
         # GCP Gemini configuration (alternative to local LLM)
-        "project_id": "another-project-472212",  # Set via PROJECT_ID env var or config
+        "project_id": "project-70236742-1aaa-4686-816",  # Set via PROJECT_ID env var or config
         "location": "us-central1",  # GCP region for Vertex AI
         "model_name": "gemini-2.5-flash",  # Fast model with good performance
         "timeout": 300,  # Request timeout for Gemini API

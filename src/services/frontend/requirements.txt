@@ -1,0 +1,6 @@
+# Web framework
+flask==3.0.0
+werkzeug==3.0.1
+
+# HTTP client for RAG service
+requests==2.32.5

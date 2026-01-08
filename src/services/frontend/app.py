@@ -7,6 +7,7 @@ Serves static HTML/JS/CSS and proxies requests to the RAG service.
 
 import json
 import logging
+import os
 from datetime import datetime
 
 import requests
@@ -22,7 +23,7 @@ logger = logging.getLogger(__name__)
 app = Flask(__name__)
 
 # RAG service configuration
-RAG_SERVICE_URL = "http://localhost:8000"
+RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8000")
 
 # In-memory conversation storage (persists during runtime)
 conversations = []

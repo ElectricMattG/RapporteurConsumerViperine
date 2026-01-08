@@ -1,0 +1,70 @@
+version: '3.8'
+
+services:
+  # RAG Service - Vector search and LLM grounding
+  rag-service:
+    build:
+      context: .
+      dockerfile: src/services/rag/Dockerfile
+    container_name: rag-service
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-https://embeddings.rapporteur.ai}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-project-70236742-1aaa-4686-816}
+      - PROJECT_ID=${GCP_PROJECT_ID:-project-70236742-1aaa-4686-816}
+      - GCP_LOCATION=${GCP_LOCATION:-us-central1}
+      - LOCATION=${GCP_LOCATION:-us-central1}
+      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/application_default_credentials.json
+    volumes:
+      # Mount src for development
+      - ./src:/app/src
+      # Mount index file
+      - ./research_summaries_with_embeddings_combined.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
+      # Mount logs
+      - ./src/services/logs:/app/src/services/logs
+      # Mount GCP credentials
+      - ~/.config/gcloud/application_default_credentials.json:/app/credentials/application_default_credentials.json:ro
+    networks:
+      - services-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend Service - Web UI for RAG queries
+  frontend-service:
+    build:
+      context: .
+      dockerfile: src/services/frontend/Dockerfile
+    container_name: frontend-service
+    ports:
+      - "5000:5000"
+    environment:
+      - PYTHONUNBUFFERED=1
+      - RAG_SERVICE_URL=http://rag-service:8000
+    volumes:
+      # Mount frontend files for development
+      - ./src/services/frontend:/app/src/services/frontend
+      # Mount logs
+      - ./src/services/logs:/app/src/services/logs
+    networks:
+      - services-network
+    depends_on:
+      rag-service:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+networks:
+  services-network:
+    driver: bridge
