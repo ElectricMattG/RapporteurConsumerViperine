@@ -207,7 +207,7 @@ class KafkaSummaryIndexerConsumer(Base):
             self.cache_dir = Path(self._app_config.get('summary_indexer.cache_directory') or 'cache/summaries')
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Combined index file path (in cache directory)
+            # Combined index file path - use project root for the main index
             try:
                 combined_index_filename = self._app_config.get('summary_indexer.combined_index_file')
             except (KeyError, AttributeError):
@@ -216,8 +216,12 @@ class KafkaSummaryIndexerConsumer(Base):
             if not combined_index_filename:
                 combined_index_filename = 'research_summaries_with_embeddings_combined.jsonl'
 
-            # Store combined index in cache directory
-            self.combined_index_file = self.cache_dir / combined_index_filename
+            # Use root index as the primary combined index (mounted by RAG service)
+            project_root = Path(__file__).resolve().parent.parent.parent
+            self.combined_index_file = project_root / combined_index_filename
+
+            # For backward compatibility, also reference it as root_index_file
+            self.root_index_file = self.combined_index_file
 
             # Embedding configuration
             self.model_name = self._app_config.get('summary_indexer.model_name') or 'all-MiniLM-L6-v2'
@@ -356,6 +360,57 @@ class KafkaSummaryIndexerConsumer(Base):
 
         except Exception as e:
             self._logger.error(f"   ❌ Error publishing session-complete: {e}")
+
+    def _publish_reload_index_message(self, new_count: int, total_count: int):
+        """Publish reload-index message for RAG service"""
+        if not self.producer:
+            self._create_producer()
+
+        message = {
+            'action': 'reload_index',
+            'new_summaries': new_count,
+            'total_summaries': total_count,
+            'index_file': str(self.root_index_file),
+            'timestamp': datetime.now().isoformat()
+        }
+
+        try:
+            self.producer.produce(
+                'reload-index',
+                key='rag-service'.encode('utf-8'),
+                value=json.dumps(message).encode('utf-8')
+            )
+            self.producer.flush()
+            self._logger.info(f"   📤 Published reload-index message: +{new_count} summaries")
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing reload-index: {e}")
+
+    def _publish_frontend_message(self, new_count: int, new_additions: List[Dict]):
+        """Publish frontend-message for UI notification"""
+        if not self.producer:
+            self._create_producer()
+
+        message = {
+            'type': 'index_updated',
+            'message': f'Index updated with {new_count} new {"summary" if new_count == 1 else "summaries"}',
+            'new_count': new_count,
+            'preview': new_additions,
+            'timestamp': datetime.now().isoformat()
+        }
+
+        try:
+            self.producer.produce(
+                'frontend-message',
+                key='index-update'.encode('utf-8'),
+                value=json.dumps(message).encode('utf-8')
+            )
+            self.producer.flush()
+            self._logger.info(f"   📤 Published frontend-message: Index updated with {new_count} summaries")
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing frontend-message: {e}")
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing session-complete: {e}")
             raise
 
     def _aggregate_to_combined_index(self, session_id: str):
@@ -428,6 +483,23 @@ class KafkaSummaryIndexerConsumer(Base):
 
             self._logger.info(f"   ✅ Aggregation complete:")
             self._logger.info(f"      New entries: {new_count}")
+            self._logger.info(f"      Duplicates skipped: {duplicate_count}")
+            self._logger.info(f"      Total documents: {len(existing_doc_ids)}")
+
+            # Publish notifications if new summaries were added
+            if new_count > 0:
+                try:
+                    # Publish reload-index message for RAG service
+                    self._publish_reload_index_message(new_count, len(existing_doc_ids))
+
+                    # Publish frontend-message for UI notification
+                    self._publish_frontend_message(session_id, new_additions[:5], len(existing_doc_ids))  # Limit to 5 for display
+
+                except Exception as e:
+                    self._logger.error(f"   ❌ Error publishing notifications: {e}")
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
             self._logger.info(f"      Duplicates skipped: {duplicate_count}")
             self._logger.info(f"      Total in combined index: {len(existing_doc_ids)}")
 

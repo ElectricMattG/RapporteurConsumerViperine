@@ -37,6 +37,7 @@ TOPICS=(
     "summarise-document"
     "summary-completed"
     "session-complete"
+    "reload-index"
     "frontend-message"
 )
 

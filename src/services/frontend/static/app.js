@@ -15,6 +15,69 @@ const documentList = document.getElementById('documentList');
 const startDateInput = document.getElementById('startDate');
 const endDateInput = document.getElementById('endDate');
 const clearDatesButton = document.getElementById('clearDates');
+const notificationOverlay = document.getElementById('notificationOverlay');
+const notificationMessage = document.getElementById('notificationMessage');
+const dismissNotification = document.getElementById('dismissNotification');
+
+// ============================================================================
+// Server-Sent Events for Index Update Notifications
+// ============================================================================
+
+let eventSource = null;
+
+function initializeNotifications() {
+    try {
+        eventSource = new EventSource('/api/notifications');
+
+        eventSource.onmessage = (event) => {
+            try {
+                const data = JSON.parse(event.data);
+                console.log('📬 Notification received:', data);
+
+                if (data.type === 'index_update') {
+                    showNotification(data);
+                } else if (data.type === 'connected') {
+                    console.log('✅ Connected to notification stream');
+                }
+            } catch (e) {
+                console.error('Error parsing notification:', e);
+            }
+        };
+
+        eventSource.onerror = (error) => {
+            console.error('❌ SSE connection error:', error);
+            // Attempt to reconnect after 5 seconds
+            setTimeout(() => {
+                console.log('🔄 Attempting to reconnect...');
+                initializeNotifications();
+            }, 5000);
+        };
+
+        console.log('🔔 Notification stream initialized');
+    } catch (error) {
+        console.error('Failed to initialize notifications:', error);
+    }
+}
+
+function showNotification(data) {
+    const newCount = data.new_summaries || 0;
+    const totalCount = data.total_summaries || 0;
+
+    // Update notification message
+    notificationMessage.textContent = `${newCount} new summaries added (Total: ${totalCount})`;
+
+    // Show the overlay
+    notificationOverlay.classList.remove('hidden');
+
+    // Auto-dismiss after 10 seconds
+    setTimeout(() => {
+        notificationOverlay.classList.add('hidden');
+    }, 10000);
+}
+
+dismissNotification.addEventListener('click', () => {
+    notificationOverlay.classList.add('hidden');
+});
 
 // ============================================================================
 // Event Listeners
@@ -37,6 +100,7 @@ clearDatesButton.addEventListener('click', () => {
 // Load conversations on page load
 window.addEventListener('load', () => {
     loadConversations();
+    initializeNotifications();  // Start listening for index updates
 });
 
 // ============================================================================

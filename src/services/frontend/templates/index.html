@@ -8,6 +8,18 @@
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
 </head>
 <body>
+    <!-- Index Update Notification Overlay -->
+    <div id="notificationOverlay" class="notification-overlay hidden">
+        <div class="notification-content">
+            <div class="notification-icon">🔄</div>
+            <div class="notification-text">
+                <strong>Index Updated!</strong>
+                <p id="notificationMessage">New summaries available</p>
+            </div>
+            <button id="dismissNotification" class="dismiss-btn">✕</button>
+        </div>
+    </div>
+
     <div class="container">
         <!-- Left Panel: Query History -->
         <div class="left-panel">

@@ -8,10 +8,14 @@ Serves static HTML/JS/CSS and proxies requests to the RAG service.
 import json
 import logging
 import os
+import threading
+import time
 from datetime import datetime
+from queue import Queue
 
 import requests
-from flask import Flask, jsonify, render_template, request
+from confluent_kafka import Consumer, KafkaError
+from flask import Flask, Response, jsonify, render_template, request
 
 # Configure logging
 logging.basicConfig(
@@ -24,10 +28,14 @@ app = Flask(__name__)
 
 # RAG service configuration
 RAG_SERVICE_URL = os.environ.get("RAG_SERVICE_URL", "http://localhost:8000")
+KAFKA_BOOTSTRAP_SERVERS = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:9092")
 
 # In-memory conversation storage (persists during runtime)
 conversations = []
 current_conversation_id = 0
+
+# List of SSE client queues for broadcasting notifications
+sse_clients = []
 
 
 @app.route('/')
@@ -198,7 +206,104 @@ def health():
     })
 
 
+@app.route('/api/notifications')
+def notifications():
+    """Server-Sent Events endpoint for index update notifications."""
+    def event_stream():
+        # Create a queue for this client
+        client_queue = Queue()
+        sse_clients.append(client_queue)
+
+        try:
+            # Send initial connection confirmation
+            yield f"data: {json.dumps({'type': 'connected', 'timestamp': datetime.now().isoformat()})}\n\n"
+
+            # Stream notifications from this client's queue
+            while True:
+                try:
+                    # Block until a notification is available (with timeout for heartbeat)
+                    message = client_queue.get(timeout=30)
+                    yield f"data: {json.dumps(message)}\n\n"
+                except:
+                    # Send heartbeat to keep connection alive
+                    yield f": heartbeat\n\n"
+        finally:
+            # Remove this client's queue when connection closes
+            if client_queue in sse_clients:
+                sse_clients.remove(client_queue)
+
+    return Response(event_stream(), mimetype='text/event-stream')
+
+
+def consume_kafka_notifications():
+    """Background thread to consume frontend-message Kafka topic and push to SSE queue."""
+    consumer_config = {
+        'bootstrap.servers': KAFKA_BOOTSTRAP_SERVERS,
+        'group.id': 'frontend-notification-consumer',
+        'auto.offset.reset': 'latest',
+        'enable.auto.commit': True
+    }
+
+    consumer = Consumer(consumer_config)
+    consumer.subscribe(['frontend-message'])
+
+    logger.info(f"🔔 Kafka notification consumer started: {KAFKA_BOOTSTRAP_SERVERS}")
+
+    try:
+        while True:
+            msg = consumer.poll(timeout=1.0)
+
+            if msg is None:
+                continue
+
+            if msg.error():
+                if msg.error().code() == KafkaError._PARTITION_EOF:
+                    continue
+                else:
+                    logger.error(f"Kafka error: {msg.error()}")
+                    continue
+
+            try:
+                # Parse the message
+                message_data = json.loads(msg.value().decode('utf-8'))
+                logger.info(f"📬 Received notification: {message_data}")
+
+                # Broadcast to all connected SSE clients
+                notification_event = {
+                    'type': 'index_update',
+                    'new_summaries': message_data.get('new_summaries_count', 0),
+                    'total_summaries': message_data.get('total_summaries_count', 0),
+                    'preview': message_data.get('new_summaries', []),
+                    'timestamp': message_data.get('timestamp', datetime.now().isoformat())
+                }
+
+                # Send to all connected clients
+                for client_queue in sse_clients:
+                    try:
+                        client_queue.put_nowait(notification_event)
+                    except:
+                        pass  # Queue might be full or client disconnected
+
+            except Exception as e:
+                logger.error(f"Error processing notification: {e}", exc_info=True)
+
+    except Exception as e:
+        logger.error(f"Kafka consumer error: {e}", exc_info=True)
+    finally:
+        consumer.close()
+
+
 if __name__ == '__main__':
     logger.info("🚀 Starting RAG Frontend Service...")
     logger.info(f"📡 RAG Service: {RAG_SERVICE_URL}")
+    logger.info(f"📨 Kafka Servers: {KAFKA_BOOTSTRAP_SERVERS}")
+
+    # Start Kafka notification consumer in background thread
+    try:
+        kafka_thread = threading.Thread(target=consume_kafka_notifications, daemon=True)
+        kafka_thread.start()
+        logger.info("✅ Kafka notification consumer thread started")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not start Kafka consumer: {e}")
+
     app.run(host='0.0.0.0', port=5000, debug=True)

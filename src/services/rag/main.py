@@ -12,6 +12,7 @@ Features:
 import asyncio
 import json
 import logging
+import os
 import sys
 import time
 import uuid
@@ -328,7 +329,6 @@ async def startup_event():
         logger.error(f"❌ Index file not found: {index_path}")
         raise RuntimeError(f"Index file not found: {index_path}")
 
-
     # Load index
     logger.info(f"📚 Loading index from: {index_path}")
     state.summaries = load_summaries_index(str(index_path))
@@ -344,6 +344,29 @@ async def startup_event():
 
     state.index_loaded = True
     state.startup_time = datetime.now()
+
+    # Start Kafka consumer for index reload (optional - only if Kafka available)
+    try:
+        kafka_bootstrap = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
+        from src.services.rag.index_reload_consumer import IndexReloadConsumer
+
+        async def reload_index_callback():
+            """Callback to reload index when message received"""
+            try:
+                logger.info("🔄 Reloading index...")
+                new_summaries = load_summaries_index(state.index_path)
+                old_count = len(state.summaries)
+                new_count = len(new_summaries)
+                state.summaries = new_summaries
+                logger.info(f"✅ Index reloaded: {old_count} -> {new_count} summaries (+{new_count - old_count})")
+            except Exception as e:
+                logger.error(f"❌ Error reloading index: {e}")
+
+        reload_consumer = IndexReloadConsumer(reload_index_callback, kafka_bootstrap)
+        reload_consumer.start()
+        logger.info("✅ Index reload consumer started")
+    except Exception as e:
+        logger.warning(f"⚠️  Kafka reload consumer not available: {e}")
 
     logger.info("✅ Service ready!")
 

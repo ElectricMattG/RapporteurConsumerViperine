@@ -17,10 +17,11 @@ services:
       - GCP_LOCATION=${GCP_LOCATION:-us-central1}
       - LOCATION=${GCP_LOCATION:-us-central1}
       - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/application_default_credentials.json
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
     volumes:
       # Mount src for development
       - ./src:/app/src
-      # Mount index file
+      # Mount index file from project root
       - ./research_summaries_with_embeddings_combined.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
       # Mount logs
       - ./src/services/logs:/app/src/services/logs
@@ -28,6 +29,7 @@ services:
       - ~/.config/gcloud/application_default_credentials.json:/app/credentials/application_default_credentials.json:ro
     networks:
       - services-network
+      - poc_agentic_search_kafka-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -47,6 +49,7 @@ services:
     environment:
       - PYTHONUNBUFFERED=1
       - RAG_SERVICE_URL=http://rag-service:8000
+      - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
     volumes:
       # Mount frontend files for development
       - ./src/services/frontend:/app/src/services/frontend
@@ -54,6 +57,7 @@ services:
       - ./src/services/logs:/app/src/services/logs
     networks:
       - services-network
+      - poc_agentic_search_kafka-network
     depends_on:
       rag-service:
         condition: service_healthy
@@ -68,3 +72,5 @@ services:
 networks:
   services-network:
     driver: bridge
+  poc_agentic_search_kafka-network:
+    external: true
