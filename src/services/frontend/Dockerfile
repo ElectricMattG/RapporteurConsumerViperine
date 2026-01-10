@@ -25,5 +25,5 @@ EXPOSE 5000
 HEALTHCHECK --interval=30s --timeout=10s --start-period=20s --retries=3 \
   CMD curl -f http://localhost:5000/api/health || exit 1
 
-# Run the service
+# Run the service (SSE works with Flask using data event heartbeats)
 CMD ["python", "-u", "src/services/frontend/app.py"]

@@ -5,29 +5,47 @@
 let conversations = [];
 let currentConversationId = null;
 let currentConversationMessages = []; // Track all messages in current conversation
+let currentAbortController = null; // For canceling requests
 
 // DOM Elements
 const chatContainer = document.getElementById('chatContainer');
 const queryInput = document.getElementById('queryInput');
 const sendButton = document.getElementById('sendButton');
+const cancelButton = document.getElementById('cancelButton');
 const queryList = document.getElementById('queryList');
 const documentList = document.getElementById('documentList');
 const startDateInput = document.getElementById('startDate');
 const endDateInput = document.getElementById('endDate');
 const clearDatesButton = document.getElementById('clearDates');
+const queryModeSelect = document.getElementById('queryMode');
 const notificationOverlay = document.getElementById('notificationOverlay');
 const notificationMessage = document.getElementById('notificationMessage');
 const dismissNotification = document.getElementById('dismissNotification');
+const exportButton = document.getElementById('exportButton');
+const importButton = document.getElementById('importButton');
+const importFileInput = document.getElementById('importFileInput');
 
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
 // ============================================================================
 
 let eventSource = null;
+let reconnectAttempts = 0;
+const MAX_RECONNECT_DELAY = 30000; // Max 30 seconds
 
 function initializeNotifications() {
+    // Close existing connection if any
+    if (eventSource) {
+        eventSource.close();
+    }
+
     try {
         eventSource = new EventSource('/api/notifications');
+
+        eventSource.onopen = () => {
+            console.log('✅ SSE connection opened');
+            reconnectAttempts = 0; // Reset on successful connection
+        };
 
         eventSource.onmessage = (event) => {
             try {
@@ -46,11 +64,16 @@ function initializeNotifications() {
 
         eventSource.onerror = (error) => {
             console.error('❌ SSE connection error:', error);
-            // Attempt to reconnect after 5 seconds
+            eventSource.close();
+
+            // Exponential backoff for reconnection
+            reconnectAttempts++;
+            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
+
+            console.log(`🔄 Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})...`);
             setTimeout(() => {
-                console.log('🔄 Attempting to reconnect...');
                 initializeNotifications();
-            }, 5000);
+            }, delay);
         };
 
         console.log('🔔 Notification stream initialized');
@@ -60,8 +83,8 @@ function initializeNotifications() {
 }
 
 function showNotification(data) {
-    const newCount = data.new_summaries || 0;
-    const totalCount = data.total_summaries || 0;
+    const newCount = data.new_summaries_count || data.new_summaries || 0;
+    const totalCount = data.total_summaries_count || data.total_summaries || 0;
 
     // Update notification message
     notificationMessage.textContent = `${newCount} new summaries added (Total: ${totalCount})`;
@@ -97,8 +120,42 @@ clearDatesButton.addEventListener('click', () => {
     endDateInput.value = '';
 });
 
+// Mode change - keep context, just switch mode
+queryModeSelect.addEventListener('change', () => {
+    const newMode = queryModeSelect.value;
+    console.log(`🔄 Mode changed to: ${newMode} (context preserved)`);
+});
+
+// Cancel button handler
+cancelButton.addEventListener('click', () => {
+    if (currentAbortController) {
+        currentAbortController.abort();
+        currentAbortController = null;
+    }
+});
+
+// Export button handler
+exportButton.addEventListener('click', () => {
+    exportSession();
+});
+
+// Import button handler
+importButton.addEventListener('click', () => {
+    importFileInput.click();
+});
+
+// File input handler
+importFileInput.addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (file) {
+        importSession(file);
+        e.target.value = ''; // Reset input
+    }
+});
+
 // Load conversations on page load
 window.addEventListener('load', () => {
+    clearConversation(); // Fresh context on page reload
     loadConversations();
     initializeNotifications();  // Start listening for index updates
 });
@@ -127,9 +184,19 @@ async function handleSendQuery() {
     queryInput.value = '';
     queryInput.style.height = 'auto';
 
+    // Scroll to bottom when starting a new query
+    scrollToBottom();
+
     // Disable input while processing
     queryInput.disabled = true;
     sendButton.disabled = true;
+
+    // Show cancel button, hide send button
+    sendButton.style.display = 'none';
+    cancelButton.style.display = 'flex';
+
+    // Create new abort controller for this request
+    currentAbortController = new AbortController();
 
     // Show loading indicator
     const loadingId = addLoadingMessage();
@@ -138,6 +205,7 @@ async function handleSendQuery() {
         // Prepare request payload
         const payload = {
             query: query,
+            mode: queryModeSelect.value,
             context_depth: 3,
             top_k: 15,
             temperature: 0.7,
@@ -158,7 +226,8 @@ async function handleSendQuery() {
             headers: {
                 'Content-Type': 'application/json'
             },
-            body: JSON.stringify(payload)
+            body: JSON.stringify(payload),
+            signal: currentAbortController.signal
         });
 
         if (!response.ok) {
@@ -202,11 +271,19 @@ async function handleSendQuery() {
     } catch (error) {
         console.error('Error sending query:', error);
         removeLoadingMessage(loadingId);
-        addMessage('assistant', `Error: ${error.message}. Please ensure the RAG service is running.`);
+
+        if (error.name === 'AbortError') {
+            addMessage('assistant', '🚫 Request canceled by user.');
+        } else {
+            addMessage('assistant', `Error: ${error.message}. Please ensure the RAG service is running.`);
+        }
     } finally {
-        // Re-enable input
+        // Reset UI state
         queryInput.disabled = false;
         sendButton.disabled = false;
+        sendButton.style.display = 'flex';
+        cancelButton.style.display = 'none';
+        currentAbortController = null;
         queryInput.focus();
     }
 }
@@ -317,6 +394,145 @@ function removeLoadingMessage(loadingId) {
 
 function scrollToBottom() {
     chatContainer.scrollTop = chatContainer.scrollHeight;
+}
+
+function clearConversation() {
+    // Clear chat container except welcome message
+    const messages = chatContainer.querySelectorAll('.message');
+    messages.forEach(msg => msg.remove());
+
+    // Reset conversation state
+    currentConversationMessages = [];
+    currentConversationId = null;
+
+    // Clear document list
+    documentList.innerHTML = '<div class="empty-state">No documents retrieved yet. Send a query to see results.</div>';
+
+    console.log('🔄 Conversation cleared - fresh context');
+}
+
+function exportSession() {
+    // Get all messages from the chat
+    const messages = chatContainer.querySelectorAll('.message');
+
+    if (messages.length === 0 || (messages.length === 1 && messages[0].classList.contains('welcome-message'))) {
+        alert('No session to export');
+        return;
+    }
+
+    // Build session data
+    const sessionData = {
+        version: '1.0',
+        exported_at: new Date().toISOString(),
+        mode: queryModeSelect.value,
+        conversations: [],
+        messages: []
+    };
+
+    // Extract conversation data
+    messages.forEach((msg) => {
+        if (msg.classList.contains('welcome-message')) return;
+
+        const role = msg.dataset.role;
+        const content = msg.querySelector('.message-content');
+        const metadata = msg.querySelector('.message-metadata');
+
+        const messageData = {
+            role: role,
+            content: content.innerHTML,
+            text_content: content.textContent.trim()
+        };
+
+        if (metadata) {
+            messageData.metadata = metadata.textContent.trim();
+        }
+
+        sessionData.messages.push(messageData);
+    });
+
+    // Include conversation history if available
+    sessionData.conversations = currentConversationMessages;
+
+    // Create and download JSON file
+    const blob = new Blob([JSON.stringify(sessionData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `rag-session-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    console.log('📥 Session exported as JSON');
+}
+
+function importSession(file) {
+    const reader = new FileReader();
+
+    reader.onload = (e) => {
+        try {
+            const sessionData = JSON.parse(e.target.result);
+
+            // Validate session data
+            if (!sessionData.version || !sessionData.messages) {
+                alert('Invalid session file format');
+                return;
+            }
+
+            // Clear existing conversation
+            clearConversation();
+
+            // Restore mode
+            if (sessionData.mode) {
+                queryModeSelect.value = sessionData.mode;
+            }
+
+            // Restore messages
+            sessionData.messages.forEach((msgData) => {
+                const messageDiv = document.createElement('div');
+                messageDiv.className = `message ${msgData.role}`;
+                messageDiv.dataset.role = msgData.role;
+
+                const bubbleDiv = document.createElement('div');
+                bubbleDiv.className = 'message-bubble';
+
+                const contentDiv = document.createElement('div');
+                contentDiv.className = 'message-content';
+                contentDiv.innerHTML = msgData.content;
+
+                bubbleDiv.appendChild(contentDiv);
+
+                // Add metadata if present
+                if (msgData.metadata) {
+                    const metadataDiv = document.createElement('div');
+                    metadataDiv.className = 'message-metadata';
+                    metadataDiv.textContent = msgData.metadata;
+                    bubbleDiv.appendChild(metadataDiv);
+                }
+
+                messageDiv.appendChild(bubbleDiv);
+                chatContainer.appendChild(messageDiv);
+            });
+
+            // Restore conversation history if available
+            if (sessionData.conversations && sessionData.conversations.length > 0) {
+                currentConversationMessages = sessionData.conversations;
+            }
+
+            // Scroll to bottom
+            scrollToBottom();
+
+            console.log(`📤 Session imported: ${sessionData.messages.length} messages restored`);
+            alert(`Session imported successfully! ${sessionData.messages.length} messages restored.`);
+
+        } catch (error) {
+            console.error('Error importing session:', error);
+            alert('Failed to import session. Please check the file format.');
+        }
+    };
+
+    reader.readAsText(file);
 }
 
 // ============================================================================
@@ -474,7 +690,7 @@ function updateDocumentList(documents) {
     documentList.innerHTML = '';
 
     if (!documents || documents.length === 0) {
-        documentList.innerHTML = '<div class="empty-state">No documents retrieved.</div>';
+        documentList.innerHTML = '<div class="empty-state">No index documents retrieved.<br><small>Search mode uses web grounding instead of the index.</small></div>';
         return;
     }
 

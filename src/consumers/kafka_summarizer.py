@@ -334,6 +334,9 @@ class KafkaSummarizerConsumer(Base):
             # For failed extractions with Gemini, rely on web grounding
             context_text = text[:2000] if text and not extraction_failed else None
 
+            # Small delay to avoid rate limiting (stagger async calls)
+            await asyncio.sleep(0.2)
+
             # Generate structured summary
             summary_result = await self.llm_client.generate_summary(
                 citation=citation,
@@ -769,6 +772,10 @@ class KafkaSummarizerConsumer(Base):
                                     self.metrics.record_duration(self.input_topic, duration, 'failure')
 
                     self._logger.info(f"📊 Batch complete: {success_count}/{len(tasks)} successful")
+
+                    # Add small delay between batches for rate limiting
+                    if tasks:
+                        await asyncio.sleep(0.5)
 
             except Exception as e:
                 self._logger.error(f"❌ Error in consume loop: {e}")

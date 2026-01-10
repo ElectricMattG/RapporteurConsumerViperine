@@ -385,34 +385,6 @@ class KafkaSummaryIndexerConsumer(Base):
         except Exception as e:
             self._logger.error(f"   ❌ Error publishing reload-index: {e}")
 
-    def _publish_frontend_message(self, new_count: int, new_additions: List[Dict]):
-        """Publish frontend-message for UI notification"""
-        if not self.producer:
-            self._create_producer()
-
-        message = {
-            'type': 'index_updated',
-            'message': f'Index updated with {new_count} new {"summary" if new_count == 1 else "summaries"}',
-            'new_count': new_count,
-            'preview': new_additions,
-            'timestamp': datetime.now().isoformat()
-        }
-
-        try:
-            self.producer.produce(
-                'frontend-message',
-                key='index-update'.encode('utf-8'),
-                value=json.dumps(message).encode('utf-8')
-            )
-            self.producer.flush()
-            self._logger.info(f"   📤 Published frontend-message: Index updated with {new_count} summaries")
-        except Exception as e:
-            self._logger.error(f"   ❌ Error publishing frontend-message: {e}")
-
-        except Exception as e:
-            self._logger.error(f"   ❌ Error publishing session-complete: {e}")
-            raise
-
     def _aggregate_to_combined_index(self, session_id: str):
         """
         Aggregate session index into the combined master index.
@@ -492,8 +464,8 @@ class KafkaSummaryIndexerConsumer(Base):
                     # Publish reload-index message for RAG service
                     self._publish_reload_index_message(new_count, len(existing_doc_ids))
 
-                    # Publish frontend-message for UI notification
-                    self._publish_frontend_message(session_id, new_additions[:5], len(existing_doc_ids))  # Limit to 5 for display
+                    # Publish frontend-message for UI notification (accurate count, limited preview)
+                    self._publish_frontend_message(session_id, new_count, new_additions[:5], len(existing_doc_ids))
 
                 except Exception as e:
                     self._logger.error(f"   ❌ Error publishing notifications: {e}")
@@ -510,13 +482,14 @@ class KafkaSummaryIndexerConsumer(Base):
         except Exception as e:
             self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
 
-    def _publish_frontend_message(self, session_id: str, new_additions: List[Dict[str, str]], total_summaries: int):
+    def _publish_frontend_message(self, session_id: str, new_count: int, new_additions_preview: List[Dict[str, str]], total_summaries: int):
         """
         Publish a message to the frontend-message topic with aggregation results.
 
         Args:
             session_id: The session ID that was aggregated
-            new_additions: List of dicts with 'url' and 'title' for each new summary
+            new_count: Actual count of new summaries added
+            new_additions_preview: Limited list of dicts with 'url' and 'title' for preview (up to 5)
             total_summaries: Total number of summaries in the combined index
         """
         if not self.producer:
@@ -525,9 +498,9 @@ class KafkaSummaryIndexerConsumer(Base):
         message = {
             'type': 'summary_aggregation',
             'session_id': session_id,
-            'new_summaries_count': len(new_additions),
+            'new_summaries_count': new_count,
             'total_summaries_count': total_summaries,
-            'new_summaries': new_additions,
+            'new_summaries': new_additions_preview,
             'timestamp': datetime.now().isoformat()
         }
 
@@ -539,7 +512,7 @@ class KafkaSummaryIndexerConsumer(Base):
             )
             self.producer.flush()
 
-            self._logger.info(f"   📢 Published frontend message: {len(new_additions)} new summaries, {total_summaries} total")
+            self._logger.info(f"   📢 Published frontend message: {new_count} new summaries, {total_summaries} total")
 
         except Exception as e:
             self._logger.error(f"   ❌ Error publishing frontend message: {e}")

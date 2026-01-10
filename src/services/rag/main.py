@@ -18,9 +18,10 @@ import time
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, List, Literal, Optional
 
 import numpy as np
+from confluent_kafka import Producer
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -48,6 +49,8 @@ app = FastAPI(
 class ServiceState:
     """Service state container."""
     def __init__(self):
+        self.kafka_producer: Optional[Producer] = None
+        self.kafka_bootstrap_servers: Optional[str] = None
         self.index_loaded = False
         self.summaries: List[Dict] = []
         self.index_path: Optional[str] = None
@@ -72,8 +75,9 @@ class SearchRequest(BaseModel):
 
 class QueryLLMRequest(SearchRequest):
     """Request model for query_llm endpoint (extends SearchRequest)."""
+    mode: Literal['ask', 'search'] = Field(default='ask', description="Query mode: 'ask' uses index only, 'search' uses web search grounding")
     temperature: float = Field(default=0.7, description="LLM temperature", ge=0.0, le=2.0)
-    max_tokens: int = Field(default=4000, description="Maximum tokens for LLM response", ge=100, le=8000)
+    max_tokens: int = Field(default=8000, description="Maximum tokens for LLM response", ge=100, le=8192)
 
 class DocumentResult(BaseModel):
     """Single document result with metadata."""
@@ -98,10 +102,15 @@ class SearchResponse(BaseModel):
 
 class QueryLLMResponse(SearchResponse):
     """Response model for query_llm endpoint (extends SearchResponse)."""
+    mode: str
     llm_response: str
     llm_model: str
     llm_params: Dict[str, float]
     prompt: str
+
+class SearchModeResponse(QueryLLMResponse):
+    """Response model for search mode with grounding metadata."""
+    grounding_metadata: Optional[Dict] = None
 
 
 # ============================================================================
@@ -309,6 +318,90 @@ Overview:"""
 
     return llm_response, prompt
 
+async def generate_web_search_response(query: str, temperature: float = 0.7, max_tokens: int = 4000) -> tuple:
+    """
+    Generate LLM response using web search grounding.
+
+    Returns:
+        tuple: (response_dict, query_string) where response_dict contains 'text' and 'grounding_metadata'
+    """
+    logger.info(f"Generating web search response for query: {query}")
+
+    # Generate response with web search grounding
+    response = await state.llm_client.generate_content(
+        query,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        enable_search=True,
+        return_grounding_metadata=True
+    )
+
+    return response, query
+
+def publish_webscraper_messages(request_id: str, session_id: str, query: str, response_data: Dict):
+    """
+    Extract URLs from grounding metadata and publish web-scraper messages.
+
+    Extracts citation URLs from Vertex AI grounding metadata and creates
+    web-scraper messages for downstream processing.
+    """
+    if not state.kafka_producer:
+        logger.warning("Kafka producer not initialized, skipping web-scraper message publication")
+        return
+
+    try:
+        grounding_metadata = response_data.get('grounding_metadata', {})
+        citations = grounding_metadata.get('citations', [])
+
+        if not citations:
+            logger.info("No citations found in grounding metadata, skipping web-scraper messages")
+            return
+
+        # Extract unique URLs from citations
+        urls = set()
+        for citation in citations:
+            if 'uri' in citation:
+                urls.add(citation['uri'])
+
+        if not urls:
+            logger.info("No URIs found in citations")
+            return
+
+        urls_list = sorted(list(urls))
+        total_urls = len(urls_list)
+
+        logger.info(f"Publishing {total_urls} web-scraper messages from search grounding")
+
+        # Create and publish web-scraper messages
+        for idx, url in enumerate(urls_list, 1):
+            # Parse URL for title
+            from urllib.parse import urlparse
+            parsed = urlparse(url)
+            domain = parsed.netloc or "unknown"
+
+            message = {
+                "uri": url,
+                "title": f"Document from {domain}",
+                "context": [f"URL {idx} of {total_urls} from search grounding: {query}"],
+                "session_id": session_id,
+                "request_id": f"{request_id}_url_{idx:03d}",
+                "total_requests": total_urls,
+                "source": "search_mode_grounding"
+            }
+
+            state.kafka_producer.produce(
+                'web-scrape-requests',
+                key=message['request_id'].encode('utf-8'),
+                value=json.dumps(message).encode('utf-8'),
+                callback=lambda err, msg, i=idx: logger.error(f"Kafka produce error for URL {i}: {err}") if err else logger.info(f"✅ Published web-scraper message {i}/{total_urls}")
+            )
+
+        state.kafka_producer.flush()
+        logger.info(f"📤 Published {total_urls} web-scraper messages to web-scrape-requests topic")
+
+    except Exception as e:
+        logger.error(f"Error publishing web-scraper messages: {e}", exc_info=True)
+
 
 # ============================================================================
 # Startup & Shutdown
@@ -345,9 +438,21 @@ async def startup_event():
     state.index_loaded = True
     state.startup_time = datetime.now()
 
+    # Initialize Kafka producer for research results
+    kafka_bootstrap = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
+    state.kafka_bootstrap_servers = kafka_bootstrap
+    try:
+        producer_config = {
+            'bootstrap.servers': kafka_bootstrap,
+            'client.id': 'rag-service-producer'
+        }
+        state.kafka_producer = Producer(producer_config)
+        logger.info(f"✅ Kafka producer initialized: {kafka_bootstrap}")
+    except Exception as e:
+        logger.warning(f"⚠️  Kafka producer not available: {e}")
+
     # Start Kafka consumer for index reload (optional - only if Kafka available)
     try:
-        kafka_bootstrap = os.environ.get('KAFKA_BOOTSTRAP_SERVERS', 'kafka:9092')
         from src.services.rag.index_reload_consumer import IndexReloadConsumer
 
         async def reload_index_callback():
@@ -480,70 +585,123 @@ async def query_llm(request: QueryLLMRequest):
 
     logger.info(f"[{request_id}] Query LLM request: query='{request.query}', top_k={request.top_k}")
 
-    if not state.index_loaded:
+    if not state.index_loaded and request.mode == 'ask':
         raise HTTPException(status_code=503, detail="Index not loaded")
 
     try:
-        # Step 1: Search index
-        logger.info(f"[{request_id}] Step 1: Searching index...")
-        results = await search_index(
-            query=request.query,
-            top_k=request.top_k,
-            start_date=request.start_date,
-            end_date=request.end_date,
-            post_filter_top_k=request.post_filter_top_k
-        )
+        # Step 1: Search index (only for ask mode)
+        if request.mode == 'search':
+            # Skip index search for search mode - use web grounding only
+            logger.info(f"[{request_id}] Step 1: Skipping index search (using web grounding)")
+            results = []
+            retrieved_docs = []
+        else:
+            # Search index for ask mode
+            logger.info(f"[{request_id}] Step 1: Searching index...")
+            results = await search_index(
+                query=request.query,
+                top_k=request.top_k,
+                start_date=request.start_date,
+                end_date=request.end_date,
+                post_filter_top_k=request.post_filter_top_k
+            )
 
-        if not results:
-            raise HTTPException(status_code=404, detail="No matching documents found")
+            if not results:
+                raise HTTPException(status_code=404, detail="No matching documents found")
 
-        # Format results for response
-        retrieved_docs = []
-        for result in results:
-            summary = result['summary']
-            retrieved_docs.append(DocumentResult(
-                document_id=summary.get('document_id', 'unknown'),
-                source_url=summary.get('source_url', 'N/A'),
-                publication_date=summary.get('doc_metadata', {}).get('publication_date'),
-                similarity_score=result['similarity'],
-                summary_text=summary.get('summary_text', ''),
-                doc_metadata=summary.get('doc_metadata', {})
-            ))
+            # Format results for response
+            retrieved_docs = []
+            for result in results:
+                summary = result['summary']
+                retrieved_docs.append(DocumentResult(
+                    document_id=summary.get('document_id', 'unknown'),
+                    source_url=summary.get('source_url', 'N/A'),
+                    publication_date=summary.get('doc_metadata', {}).get('publication_date'),
+                    similarity_score=result['similarity'],
+                    summary_text=summary.get('summary_text', ''),
+                    doc_metadata=summary.get('doc_metadata', {})
+                ))
 
-        # Step 2: Generate LLM response
-        logger.info(f"[{request_id}] Step 2: Generating LLM response...")
-        llm_response, full_prompt = await generate_llm_response(
-            query=request.query,
-            top_summaries=results,
-            temperature=request.temperature,
-            max_tokens=request.max_tokens
-        )
+        # Step 2: Generate LLM response based on mode
+        logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")
+
+        grounding_metadata = None
+
+        if request.mode == 'search':
+            # Use web search grounding
+            logger.info(f"[{request_id}] Using web search mode")
+            response_data, full_prompt = await generate_web_search_response(
+                query=request.query,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
+            llm_response = response_data.get('text', '')
+            grounding_metadata = response_data.get('grounding_metadata', {})
+
+            # Publish web-scraper messages for citation URLs
+            publish_webscraper_messages(request_id, session_id, request.query, response_data)
+        else:
+            # Use index-only mode
+            logger.info(f"[{request_id}] Using ask mode (index-only)")
+            llm_response, full_prompt = await generate_llm_response(
+                query=request.query,
+                top_summaries=results,
+                temperature=request.temperature,
+                max_tokens=request.max_tokens
+            )
 
         execution_time_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[{request_id}] Query LLM completed: {len(retrieved_docs)} docs, {execution_time_ms:.2f}ms")
 
-        return QueryLLMResponse(
-            request_id=request_id,
-            session_id=session_id,
-            query=request.query,
-            index_queried=state.index_path,
-            top_k=request.top_k,
-            date_filters={
-                "start_date": request.start_date,
-                "end_date": request.end_date
-            },
-            retrieved_docs=retrieved_docs,
-            total_retrieved=len(retrieved_docs),
-            execution_time_ms=execution_time_ms,
-            llm_response=llm_response,
-            llm_model="gemini-2.5-flash",
-            llm_params={
-                "temperature": request.temperature,
-                "max_tokens": request.max_tokens
-            },
-            prompt=full_prompt
-        )
+        # Return appropriate response based on mode
+        if request.mode == 'search':
+            return SearchModeResponse(
+                request_id=request_id,
+                session_id=session_id,
+                query=request.query,
+                index_queried=state.index_path,
+                top_k=request.top_k,
+                date_filters={
+                    "start_date": request.start_date,
+                    "end_date": request.end_date
+                },
+                retrieved_docs=[],  # No index docs in search mode
+                total_retrieved=0,  # No index docs in search mode
+                execution_time_ms=execution_time_ms,
+                mode=request.mode,
+                llm_response=llm_response,
+                llm_model="gemini-2.5-flash",
+                llm_params={
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens
+                },
+                prompt=full_prompt,
+                grounding_metadata=grounding_metadata
+            )
+        else:
+            return QueryLLMResponse(
+                request_id=request_id,
+                session_id=session_id,
+                query=request.query,
+                index_queried=state.index_path,
+                top_k=request.top_k,
+                date_filters={
+                    "start_date": request.start_date,
+                    "end_date": request.end_date
+                },
+                retrieved_docs=retrieved_docs,
+                total_retrieved=len(retrieved_docs),
+                execution_time_ms=execution_time_ms,
+                mode=request.mode,
+                llm_response=llm_response,
+                llm_model="gemini-2.5-flash",
+                llm_params={
+                    "temperature": request.temperature,
+                    "max_tokens": request.max_tokens
+                },
+                prompt=full_prompt
+            )
 
     except HTTPException:
         raise

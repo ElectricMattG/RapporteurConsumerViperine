@@ -11,7 +11,7 @@ import os
 import threading
 import time
 from datetime import datetime
-from queue import Queue
+from queue import Empty, Queue
 
 import requests
 from confluent_kafka import Consumer, KafkaError
@@ -65,12 +65,13 @@ def query_rag():
     try:
         data = request.json
         user_query = data.get('query', '')
-        context_depth = data.get('context_depth', 3)
+        mode = data.get('mode', 'ask')
+        context_depth = data.get('context_depth', 1)
         top_k = data.get('top_k', 3)
         start_date = data.get('start_date')
         end_date = data.get('end_date')
         temperature = data.get('temperature', 0.7)
-        max_tokens = data.get('max_tokens', 16000)
+        max_tokens = data.get('max_tokens', 8000)
 
         logger.info(f"Received query: {user_query}")
 
@@ -85,6 +86,7 @@ def query_rag():
         # Call RAG service
         rag_payload = {
             "query": full_query,
+            "mode": mode,
             "top_k": top_k,
             "temperature": temperature,
             "max_tokens": max_tokens
@@ -121,11 +123,12 @@ def query_rag():
             "id": current_conversation_id,
             "timestamp": datetime.now().isoformat(),
             "user_query": user_query,
-            "assistant_response": rag_response.get('llm_response', ''),
+            "assistant_response": rag_response.get('llm_response', '') or rag_response.get('answer', ''),
             "retrieved_docs": rag_response.get('retrieved_docs', []),
             "metadata": {
                 "request_id": rag_response.get('request_id'),
                 "session_id": rag_response.get('session_id'),
+                "mode": mode,
                 "execution_time_ms": rag_response.get('execution_time_ms'),
                 "total_retrieved": rag_response.get('total_retrieved'),
                 "llm_model": rag_response.get('llm_model'),
@@ -213,6 +216,7 @@ def notifications():
         # Create a queue for this client
         client_queue = Queue()
         sse_clients.append(client_queue)
+        logger.info(f"📡 SSE client connected. Total clients: {len(sse_clients)}")
 
         try:
             # Send initial connection confirmation
@@ -222,17 +226,34 @@ def notifications():
             while True:
                 try:
                     # Block until a notification is available (with timeout for heartbeat)
-                    message = client_queue.get(timeout=30)
+                    message = client_queue.get(timeout=15)
                     yield f"data: {json.dumps(message)}\n\n"
-                except:
-                    # Send heartbeat to keep connection alive
-                    yield f": heartbeat\n\n"
+                except Empty:
+                    # Send heartbeat as data event to keep connection alive
+                    yield f"data: {json.dumps({'type': 'heartbeat', 'timestamp': datetime.now().isoformat()})}\n\n"
+        except GeneratorExit:
+            logger.info("🔌 GeneratorExit: Client closed connection")
+        except Exception as e:
+            logger.error(f"❌ SSE stream error: {e}", exc_info=True)
         finally:
             # Remove this client's queue when connection closes
             if client_queue in sse_clients:
                 sse_clients.remove(client_queue)
+            logger.info(f"📡 SSE client disconnected. Total clients: {len(sse_clients)}")
 
-    return Response(event_stream(), mimetype='text/event-stream')
+    response = Response(
+        event_stream(),
+        mimetype='text/event-stream',
+        headers={
+            'Cache-Control': 'no-cache, no-transform',
+            'X-Accel-Buffering': 'no',
+            'Connection': 'keep-alive',
+            'Content-Type': 'text/event-stream; charset=utf-8',
+            'Access-Control-Allow-Origin': '*'
+        }
+    )
+    response.direct_passthrough = False
+    return response
 
 
 def consume_kafka_notifications():
@@ -278,11 +299,13 @@ def consume_kafka_notifications():
                 }
 
                 # Send to all connected clients
+                logger.info(f"📡 Broadcasting to {len(sse_clients)} SSE client(s)")
                 for client_queue in sse_clients:
                     try:
                         client_queue.put_nowait(notification_event)
-                    except:
-                        pass  # Queue might be full or client disconnected
+                        logger.info(f"✅ Queued notification for client")
+                    except Exception as e:
+                        logger.warning(f"Failed to queue for client: {e}")
 
             except Exception as e:
                 logger.error(f"Error processing notification: {e}", exc_info=True)
@@ -306,4 +329,5 @@ if __name__ == '__main__':
     except Exception as e:
         logger.warning(f"⚠️ Could not start Kafka consumer: {e}")
 
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    # SSE works with Flask's built-in server using data event heartbeats
+    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)
