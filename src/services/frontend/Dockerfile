@@ -3,9 +3,17 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-# Install system dependencies
+# Install system dependencies including Arabic fonts
 RUN apt-get update && apt-get install -y \
     curl \
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libgdk-pixbuf-2.0-0 \
+    libffi-dev \
+    shared-mime-info \
+    fonts-noto-core \
+    fonts-noto-ui-core \
+    fonts-dejavu \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy requirements and install Python dependencies
@@ -14,6 +22,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy frontend files
 COPY src/services/frontend/ ./src/services/frontend/
+
+# Copy prompts directory for preamble
+COPY src/prompts/ ./src/prompts/
 
 # Set Python path
 ENV PYTHONPATH=/app

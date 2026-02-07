@@ -34,3 +34,7 @@ prometheus-client  # Prometheus metrics exporter
 psutil  # System resource monitoring
 python-json-logger  # Structured JSON logging
 flask
+
+
+markdown
+weasyprint==68.0

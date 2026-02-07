@@ -11,11 +11,14 @@ import os
 import threading
 import time
 from datetime import datetime
+from io import BytesIO
 from queue import Empty, Queue
 
 import requests
 from confluent_kafka import Consumer, KafkaError
-from flask import Flask, Response, jsonify, render_template, request
+from flask import Flask, Response, jsonify, render_template, request, send_file
+from pdf_generator import (build_pdf_html, convert_to_pdf,
+                           generate_document_title, generate_introduction)
 
 # Configure logging
 logging.basicConfig(
@@ -72,6 +75,8 @@ def query_rag():
         end_date = data.get('end_date')
         temperature = data.get('temperature', 0.7)
         max_tokens = data.get('max_tokens', 8000)
+        use_qa = data.get('use_qa', False)
+        qa_top_k = data.get('qa_top_k', 5)
 
         logger.info(f"Received query: {user_query}")
 
@@ -89,7 +94,9 @@ def query_rag():
             "mode": mode,
             "top_k": top_k,
             "temperature": temperature,
-            "max_tokens": max_tokens
+            "max_tokens": max_tokens,
+            "use_qa": bool(use_qa),
+            "qa_top_k": qa_top_k
         }
 
         if start_date:
@@ -102,7 +109,7 @@ def query_rag():
         response = requests.post(
             f"{RAG_SERVICE_URL}/query_llm",
             json=rag_payload,
-            timeout=60
+            timeout=120
         )
         response.raise_for_status()
 
@@ -125,10 +132,14 @@ def query_rag():
             "user_query": user_query,
             "assistant_response": rag_response.get('llm_response', '') or rag_response.get('answer', ''),
             "retrieved_docs": rag_response.get('retrieved_docs', []),
+            "retrieved_qa": rag_response.get('retrieved_qa', []),
             "metadata": {
+                "message_id": current_conversation_id,
                 "request_id": rag_response.get('request_id'),
                 "session_id": rag_response.get('session_id'),
                 "mode": mode,
+                "use_qa": bool(use_qa),
+                "qa_top_k": qa_top_k,
                 "execution_time_ms": rag_response.get('execution_time_ms'),
                 "total_retrieved": rag_response.get('total_retrieved'),
                 "llm_model": rag_response.get('llm_model'),
@@ -171,6 +182,93 @@ def get_conversation(conversation_id):
         if conv['id'] == conversation_id:
             return jsonify(conv)
     return jsonify({"error": "Conversation not found"}), 404
+
+
+@app.route('/api/export_pdf', methods=['POST'])
+def export_pdf():
+    """
+    Export a conversation message as PDF.
+
+    Accepts:
+        - message_id: str (to retrieve from conversations)
+        OR
+        - query: str
+        - assistant_response: str
+        - retrieved_docs: list
+        - retrieved_qa: list
+    """
+    try:
+        data = request.get_json()
+
+        # Retrieve message data
+        if 'message_id' in data:
+            message_id = data['message_id']
+            message = None
+
+            # Find message in conversations by id (from metadata.message_id)
+            for conv in conversations:
+                if conv.get('id') == message_id:
+                    message = conv
+                    break
+
+            if not message:
+                logger.error(f"Message not found: {message_id}. Available: {[c.get('id') for c in conversations]}")
+                return jsonify({"error": "Message not found"}), 404
+
+            query = message.get('user_query', '')
+            assistant_response = message.get('assistant_response', '')
+            retrieved_docs = message.get('retrieved_docs', [])
+            retrieved_qa = message.get('retrieved_qa', [])
+
+        else:
+            # Use provided data
+            query = data.get('query', '')
+            assistant_response = data.get('assistant_response', '')
+            retrieved_docs = data.get('retrieved_docs', [])
+            retrieved_qa = data.get('retrieved_qa', [])
+
+        if not query or not assistant_response:
+            return jsonify({"error": "Missing required fields: query and assistant_response"}), 400
+
+        logger.info(f"Generating PDF for query: {query[:50]}...")
+
+        # Generate introduction
+        introduction = generate_introduction(query, assistant_response, RAG_SERVICE_URL)
+
+        # Build HTML
+        template_path = os.path.join(os.path.dirname(__file__), 'templates', 'pdf_template.html')
+        css_path = os.path.join(os.path.dirname(__file__), 'static', 'pdf_styles.css')
+
+        html_content = build_pdf_html(
+            query=query,
+            assistant_response=assistant_response,
+            retrieved_docs=retrieved_docs,
+            retrieved_qa=retrieved_qa,
+            introduction=introduction,
+            template_path=template_path,
+            css_path=css_path
+        )
+
+        # Convert to PDF
+        pdf_bytes = convert_to_pdf(html_content)
+
+        # Generate descriptive filename using LLM
+        logger.info(f"Generating PDF for query: {query[:50]}...")
+        document_title = generate_document_title(query, assistant_response, RAG_SERVICE_URL)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{document_title}_{timestamp}.pdf"
+
+        # Return PDF
+        return send_file(
+            BytesIO(pdf_bytes),
+            mimetype='application/pdf',
+            as_attachment=True,
+            download_name=filename
+        )
+
+    except Exception as e:
+        logger.error(f"Error generating PDF: {e}", exc_info=True)
+        return jsonify({"error": f"PDF generation failed: {str(e)}"}), 500
 
 
 def build_context(depth: int) -> str:

@@ -7,3 +7,7 @@ requests==2.32.5
 
 # Kafka for index update notifications
 confluent-kafka==2.12.2
+
+# PDF generation
+weasyprint==68.0
+markdown==3.10.1

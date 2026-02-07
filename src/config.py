@@ -29,7 +29,7 @@ defaults = {
     },
     "gemini": {
         # GCP Gemini configuration (alternative to local LLM)
-        "project_id": "project-70236742-1aaa-4686-816",  # Set via PROJECT_ID env var or config
+        "project_id": "rapporteurclients",  # Set via PROJECT_ID env var or config
         "location": "us-central1",  # GCP region for Vertex AI
         "model_name": "gemini-2.5-flash",  # Fast model with good performance
         "timeout": 300,  # Request timeout for Gemini API
@@ -38,7 +38,7 @@ defaults = {
     },
     "embedding_service": {
         # Embedding service configuration
-        "url": "https://embeddings.rapporteur.ai",  # Base URL for embedding service
+        "url": "https://embeddings.192-168-1-3.nip.io",  # Base URL for embedding service
         "api_key": "H5J1Hd3P7HpJQ2YyGnEDtvz2wOuV5wSbIr4cVV/b/oU=",  # Set via EMBEDDING_SERVICE_API_KEY env var or config
         "timeout": 360.0,  # Request timeout in seconds (6 minutes)
         "max_retries": 3,  # Maximum number of retry attempts
@@ -153,7 +153,8 @@ defaults = {
         "consumer_group_id": "summarizer-consumer",  # Consumer group ID for summarizer
         "summary_completed_topic": "summary-completed",  # Topic to publish summary completion messages
         "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini' (Gemini has native web grounding)
-        "summary_word_count": 100,  # Target word count for summaries
+        "summary_word_count": 500,  # Target word count for summaries
+        "max_concurrent_requests": 1,  # Max concurrent LLM API requests (rate limiting for 429 errors)
     },
     "chunker": {
         # Document chunker consumer configuration
@@ -214,7 +215,6 @@ defaults = {
         "input_topic": "summary-completed",  # Topic to consume summary completion messages from
         "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
         "cache_directory": "cache/summaries",  # Directory for summary index files
-        "combined_index_file": "research_summaries_with_embeddings_combined.jsonl",  # Master combined index file
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
     },
     "index_aggregator": {
@@ -222,7 +222,7 @@ defaults = {
         "consumer_group_id": "index-aggregator-consumer",  # Consumer group ID for aggregator
         "input_topic": "qa-indexed",  # Topic to consume indexed Q&A pairs from
         "session_complete_topic": "session-complete",  # Topic for session completion signals
-        "session_timeout": 900,  # Session timeout in seconds (2 minutes - aggregate even if incomplete)
+        "session_timeout": 300,  # Session timeout in seconds (2 minutes - aggregate even if incomplete)
         "cache_dir": "./cache/web_scrapes",  # Cache directory for processing files
         "session_backup_dir": "./cache/session_backups",  # Directory for session backups
         "archive_dir": "./cache/archive",  # Directory for archived session files
@@ -306,12 +306,12 @@ defaults = {
     },
     "llm": {
         # Generic LLM configuration (used by Gemini client)
-        "max_length": 500,  # Maximum output length
+        "max_length": 16000,  # Maximum output length
         "temperature": 0.7,  # Temperature for generation
         "top_p": 0.9,  # Nucleus sampling parameter
         "max_retries": 3,  # Maximum retry attempts
         "retry_delay": 1.0,  # Delay between retries in seconds
-        "max_context_chars": 8000,  # Maximum context characters
+        "max_context_chars": 80000,  # Maximum context characters
     },
     "web_scraper": {
         # Web scraping and URL resolution configuration
@@ -334,6 +334,17 @@ defaults = {
 
         # Content validation (aligned with qa_generation.min_words_for_extraction)
         "min_words_for_valid_extraction": 10,  # Minimum words required for valid extraction
+
+        # URL deduplication configuration (batch writes for performance)
+        "url_flush_interval": 10,  # Number of URLs to buffer before flushing to disk
+        "url_flush_time_threshold": 60,  # Maximum seconds to wait before force flush
+
+        # Azure Blob Storage configuration for URL cache persistence
+        "azure_storage_enabled": True,  # Enable Azure Blob Storage backup for URL cache
+        "azure_storage_connection_string": None,  # Set via AZURE_STORAGE_CONNECTION_STRING env var
+        "azure_container_name": "scraper-cache",  # Azure container name for URL cache backups
+        "azure_blob_name": "scraped_urls.jsonl",  # Azure blob name for URL cache
+        "azure_sync_check_interval": 120,  # Seconds between periodic Azure sync checks (5 minutes)
     },
     "tree_search": {
         "max_depth": 2,

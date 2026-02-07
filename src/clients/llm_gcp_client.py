@@ -193,6 +193,12 @@ class GeminiLLMClient(Base):
                 # Extract text and optional grounding metadata
                 text = response.text
 
+                # Log finish reason to diagnose truncation
+                if hasattr(response, 'candidates') and response.candidates:
+                    candidate = response.candidates[0]
+                    finish_reason = candidate.finish_reason if hasattr(candidate, 'finish_reason') else 'UNKNOWN'
+                    self._logger.info(f"   🏁 Gemini finish_reason: {finish_reason}")
+
                 # If search was enabled and metadata requested, return full response
                 if return_grounding_metadata and enable_search:
                     grounding_metadata = {}

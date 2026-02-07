@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 
 from src.clients.embedding_client import EmbeddingServiceClient
 from src.clients.llm_gcp_client import GeminiLLMClient
+from src.prompts.q_a import build_qa_refinement_prompt
 
 # Configure logging
 logging.basicConfig(
@@ -54,6 +55,9 @@ class ServiceState:
         self.index_loaded = False
         self.summaries: List[Dict] = []
         self.index_path: Optional[str] = None
+        self.qa_items: List[Dict] = []
+        self.qa_index_path: Optional[str] = None
+        self.qa_index_loaded = False
         self.embedding_client: Optional[EmbeddingServiceClient] = None
         self.llm_client: Optional[GeminiLLMClient] = None
         self.startup_time: Optional[datetime] = None
@@ -77,7 +81,9 @@ class QueryLLMRequest(SearchRequest):
     """Request model for query_llm endpoint (extends SearchRequest)."""
     mode: Literal['ask', 'search'] = Field(default='ask', description="Query mode: 'ask' uses index only, 'search' uses web search grounding")
     temperature: float = Field(default=0.7, description="LLM temperature", ge=0.0, le=2.0)
-    max_tokens: int = Field(default=8000, description="Maximum tokens for LLM response", ge=100, le=8192)
+    max_tokens: int = Field(default=24000, description="Maximum tokens for LLM response", ge=100, le=32000)
+    use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
+    qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=150)
 
 class DocumentResult(BaseModel):
     """Single document result with metadata."""
@@ -107,10 +113,34 @@ class QueryLLMResponse(SearchResponse):
     llm_model: str
     llm_params: Dict[str, float]
     prompt: str
+    retrieved_qa: Optional[List[Dict]] = None
 
 class SearchModeResponse(QueryLLMResponse):
     """Response model for search mode with grounding metadata."""
     grounding_metadata: Optional[Dict] = None
+
+
+class GroundingPreviewRequest(BaseModel):
+    """Request model for grounding preview (no LLM)."""
+    query: str = Field(..., description="Natural language search query")
+    top_k: int = Field(default=10, description="Top summaries to retrieve", ge=1, le=100)
+    start_date: Optional[str] = Field(None, description="Filter start date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="Filter end date (YYYY-MM-DD)")
+    post_filter_top_k: Optional[int] = Field(None, description="Post-filter top-k by date")
+    use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
+    qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=50)
+
+
+class GroundingPreviewResponse(BaseModel):
+    """Response model for grounding preview (no LLM)."""
+    request_id: str
+    session_id: str
+    query: str
+    index_queried: str
+    retrieved_docs: List[DocumentResult]
+    retrieved_qa: Optional[List[Dict]] = None
+    total_retrieved: int
+    execution_time_ms: float
 
 
 # ============================================================================
@@ -125,6 +155,74 @@ def load_summaries_index(index_path: str) -> List[Dict]:
             if line.strip():
                 summaries.append(json.loads(line))
     return summaries
+
+
+def _extract_qa_fields(qa_obj: Dict) -> Optional[Dict]:
+    """Normalize QA record into question/answer/context with metadata and embedding."""
+    import re
+
+    question = qa_obj.get('qa_metadata', {}).get('question') or qa_obj.get('question')
+    answer = qa_obj.get('qa_metadata', {}).get('answer') or qa_obj.get('answer')
+    context = qa_obj.get('context') or qa_obj.get('qa_metadata', {}).get('context')
+
+    content_block = qa_obj.get('content') or qa_obj.get('embedding_enrichment', {}).get('enriched_text')
+    if not context and content_block:
+        pattern = re.compile(r"QUESTION:\s*(.*?)\n+ANSWER:\s*(.*?)\n+SOURCE CONTEXT:\s*(.*)", re.IGNORECASE | re.DOTALL)
+        match = pattern.search(content_block)
+        if match:
+            extracted_q, extracted_a, extracted_ctx = match.groups()
+            question = question or extracted_q.strip()
+            answer = answer or extracted_a.strip()
+            context = extracted_ctx.strip()
+
+    doc_metadata = qa_obj.get('document_metadata') or qa_obj.get('doc_metadata') or {}
+    source_url = doc_metadata.get('source_url') or qa_obj.get('source_url')
+    if source_url and not doc_metadata.get('source_url'):
+        doc_metadata['source_url'] = source_url
+
+    embedding = qa_obj.get('embedding_enrichment', {}).get('embedding_vector')
+
+    if not (question and answer and context and doc_metadata):
+        return None
+
+    return {
+        'question': question.strip(),
+        'answer': answer.strip(),
+        'context': context.strip(),
+        'source_url': source_url or 'N/A',
+        'doc_metadata': doc_metadata,
+        'embedding': embedding
+    }
+
+
+def load_qa_index(index_path: str) -> List[Dict]:
+    """Load QA pairs from JSONL index file and normalize fields."""
+    qa_items = []
+    skipped_malformed = 0
+    skipped_incomplete = 0
+    with open(index_path, 'r') as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                raw = json.loads(line)
+            except json.JSONDecodeError as e:
+                skipped_malformed += 1
+                logger.warning(f"Skipping malformed QA line: {e}")
+                continue
+
+            normalized = _extract_qa_fields(raw)
+            if normalized:
+                qa_items.append(normalized)
+            else:
+                skipped_incomplete += 1
+
+    if skipped_malformed:
+        logger.warning(f"QA index load: skipped {skipped_malformed} malformed lines")
+    if skipped_incomplete:
+        logger.warning(f"QA index load: skipped {skipped_incomplete} incomplete lines (missing question/answer/context/metadata)")
+
+    return qa_items
 
 def dot_product_similarity(query_embedding: List[float], doc_embedding: List[float]) -> float:
     """Calculate dot product similarity between query and document embeddings."""
@@ -228,6 +326,55 @@ async def search_index(
     return top_results
 
 
+async def search_qa_index(
+    query: str,
+    top_k: int = 5
+) -> Dict[str, List[Dict]]:
+    """Search QA index via vector similarity; returns deduped structured QA items with contexts."""
+    if not state.qa_index_loaded:
+        return {"qa_items": [], "total": 0}
+
+    qa_items = state.qa_items.copy()
+
+    logger.info(f"Generating embedding for query (QA index): '{query}'")
+    query_embedding = await state.embedding_client.embed(query)
+
+    if isinstance(query_embedding, np.ndarray) and query_embedding.ndim > 1:
+        query_embedding = query_embedding[0]
+
+    scored = []
+    for qa in qa_items:
+        embedding = qa.get('embedding')
+        if embedding is None:
+            continue
+
+        similarity = dot_product_similarity(query_embedding, embedding)
+        scored.append({
+            'question': qa.get('question'),
+            'answer': qa.get('answer'),
+            'context': qa.get('context'),
+            'source_url': qa.get('source_url'),
+            'doc_metadata': qa.get('doc_metadata'),
+            'similarity': similarity
+        })
+
+    scored.sort(key=lambda x: x['similarity'], reverse=True)
+
+    deduped = {}
+    for item in scored:
+        key = item.get('doc_metadata', {}).get('document_id') or item.get('source_url') or (item.get('question'), item.get('answer'))
+        if key not in deduped:
+            deduped[key] = item
+
+    qa_results = list(deduped.values())[:top_k]
+    logger.info(f"Returning {len(qa_results)} QA results (deduped from {len(scored)})")
+
+    return {
+        "qa_items": qa_results,
+        "total": len(qa_results)
+    }
+
+
 async def generate_llm_response(query: str, top_summaries: List[Dict], temperature: float, max_tokens: int) -> tuple[str, str]:
     """
     Generate LLM response using retrieved summaries as grounding.
@@ -317,6 +464,53 @@ Overview:"""
     )
 
     return llm_response, prompt
+
+
+def build_qa_grounding_text(qa_items: List[Dict]) -> str:
+    """Format QA items with contexts for refinement prompt."""
+    if not qa_items:
+        return ""
+
+    lines = []
+    for i, item in enumerate(qa_items, 1):
+        q = item.get('question', '')
+        a = item.get('answer', '')
+        c = item.get('context', '')
+
+        # Extract metadata for citation formatting
+        doc_metadata = item.get('doc_metadata', {})
+        author = doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown')
+
+        # Format date
+        date_str = 'N/A'
+        creation_date = doc_metadata.get('creation_date') or doc_metadata.get('publication_date')
+        if creation_date:
+            try:
+                date_obj = datetime.strptime(creation_date[:10], '%Y-%m-%d')
+                date_str = date_obj.strftime('%b %Y')
+            except:
+                date_str = creation_date[:10] if len(creation_date) >= 10 else creation_date
+
+        # Create citation reference
+        citation = f"{author} [qa-{i}], {date_str}"
+
+        lines.append(f"QA Pair {i}:\nCitation: ({citation})\nQ: {q}\nA: {a}\nContext: {c}")
+
+    return "\n\n".join(lines)
+
+
+async def refine_with_qa(draft_response: str, qa_items: List[Dict], query: str, temperature: float, max_tokens: int) -> tuple[str, str]:
+    """Refine draft response using QA grounding."""
+    grounding_text = build_qa_grounding_text(qa_items)
+    prompt = build_qa_refinement_prompt(query=query, draft_response=draft_response, grounding_text=grounding_text)
+
+    refined_response = await state.llm_client.generate_content(
+        prompt,
+        max_tokens=max_tokens,
+        temperature=temperature
+    )
+
+    return refined_response, prompt
 
 async def generate_web_search_response(query: str, temperature: float = 0.7, max_tokens: int = 4000) -> tuple:
     """
@@ -427,6 +621,20 @@ async def startup_event():
     state.summaries = load_summaries_index(str(index_path))
     state.index_path = str(index_path)
     logger.info(f"✅ Loaded {len(state.summaries)} summaries")
+
+    # Load QA index (optional; keeps legacy summary-only when missing)
+    qa_index_env = os.environ.get('QA_INDEX_PATH')
+    qa_index_path = Path(qa_index_env) if qa_index_env else project_root / "research_qa_pairs_with_embeddings_combined.jsonl"
+
+    if qa_index_path.exists():
+        state.qa_items = load_qa_index(str(qa_index_path))
+        state.qa_index_path = str(qa_index_path)
+        state.qa_index_loaded = True
+        logger.info(f"✅ Loaded {len(state.qa_items)} QA pairs")
+    else:
+        state.qa_index_loaded = False
+        state.qa_index_path = str(qa_index_path)
+        logger.warning(f"⚠️  QA index not found at {qa_index_path}; continuing with summaries only")
 
     # Initialize clients
     logger.info("🔧 Initializing embedding client...")
@@ -595,6 +803,7 @@ async def query_llm(request: QueryLLMRequest):
             logger.info(f"[{request_id}] Step 1: Skipping index search (using web grounding)")
             results = []
             retrieved_docs = []
+            qa_grounding = {"qa_items": [], "total": 0}
         else:
             # Search index for ask mode
             logger.info(f"[{request_id}] Step 1: Searching index...")
@@ -621,6 +830,12 @@ async def query_llm(request: QueryLLMRequest):
                     summary_text=summary.get('summary_text', ''),
                     doc_metadata=summary.get('doc_metadata', {})
                 ))
+
+            # Optionally search QA index
+            qa_grounding = {"qa_items": [], "total": 0}
+            if request.use_qa:
+                logger.info(f"[{request_id}] Searching QA index (top_k={request.qa_top_k})...")
+                qa_grounding = await search_qa_index(query=request.query, top_k=request.qa_top_k)
 
         # Step 2: Generate LLM response based on mode
         logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")
@@ -650,6 +865,18 @@ async def query_llm(request: QueryLLMRequest):
                 max_tokens=request.max_tokens
             )
 
+            # Optional QA refinement (second-stage prompt)
+            if request.use_qa and qa_grounding.get("qa_items"):
+                logger.info(f"[{request_id}] Refining with QA grounding ({len(qa_grounding.get('qa_items', []))} items)")
+                # Use 8192 max tokens for refinement to avoid truncation when adding QA context
+                llm_response, full_prompt = await refine_with_qa(
+                    draft_response=llm_response,
+                    qa_items=qa_grounding.get("qa_items", []),
+                    query=request.query,
+                    temperature=request.temperature,
+                    max_tokens=8192  # Use max allowed tokens for refinement
+                )
+
         execution_time_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[{request_id}] Query LLM completed: {len(retrieved_docs)} docs, {execution_time_ms:.2f}ms")
@@ -676,7 +903,6 @@ async def query_llm(request: QueryLLMRequest):
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens
                 },
-                prompt=full_prompt,
                 grounding_metadata=grounding_metadata
             )
         else:
@@ -700,13 +926,70 @@ async def query_llm(request: QueryLLMRequest):
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens
                 },
-                prompt=full_prompt
+                prompt=full_prompt,
+                retrieved_qa=qa_grounding.get("qa_items")
             )
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"[{request_id}] Query LLM error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/grounding_preview", response_model=GroundingPreviewResponse)
+async def grounding_preview(request: GroundingPreviewRequest):
+    """Return summaries and optional QA grounding without invoking LLM."""
+    start_time = time.time()
+    request_id = str(uuid.uuid4())
+    session_id = f"preview_{int(time.time())}"
+
+    logger.info(f"[{request_id}] Grounding preview request: query='{request.query}', top_k={request.top_k}, use_qa={request.use_qa}")
+
+    if not state.index_loaded:
+        raise HTTPException(status_code=503, detail="Index not loaded")
+
+    try:
+        # Summaries
+        results = await search_index(
+            query=request.query,
+            top_k=request.top_k,
+            start_date=request.start_date,
+            end_date=request.end_date,
+            post_filter_top_k=request.post_filter_top_k
+        )
+
+        retrieved_docs = []
+        for result in results:
+            summary = result['summary']
+            retrieved_docs.append(DocumentResult(
+                document_id=summary.get('document_id', 'unknown'),
+                source_url=summary.get('source_url', 'N/A'),
+                publication_date=summary.get('doc_metadata', {}).get('publication_date'),
+                similarity_score=result['similarity'],
+                summary_text=summary.get('summary_text', ''),
+                doc_metadata=summary.get('doc_metadata', {})
+            ))
+
+        qa_grounding = {"qa_items": [], "total": 0}
+        if request.use_qa:
+            qa_grounding = await search_qa_index(query=request.query, top_k=request.qa_top_k)
+
+        execution_time_ms = (time.time() - start_time) * 1000
+
+        return GroundingPreviewResponse(
+            request_id=request_id,
+            session_id=session_id,
+            query=request.query,
+            index_queried=state.index_path,
+            retrieved_docs=retrieved_docs,
+            retrieved_qa=qa_grounding.get("qa_items"),
+            total_retrieved=len(retrieved_docs),
+            execution_time_ms=execution_time_ms
+        )
+
+    except Exception as e:
+        logger.error(f"[{request_id}] Grounding preview error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 

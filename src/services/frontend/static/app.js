@@ -7,6 +7,27 @@ let currentConversationId = null;
 let currentConversationMessages = []; // Track all messages in current conversation
 let currentAbortController = null; // For canceling requests
 
+// Global Settings State
+let settings = {
+    metadata: {
+        index_name: "research_summaries_with_embeddings_combined",
+        index_version: "2026-02-06",
+        description: "This document mines information related to the Israeli Defense Force and recent developments in the Israeli-Palestinian conflict. Specifically, the perspective from Middle Eastern Media",
+        source: "Multiple Arabic and English sources",
+        coverage: "2023-2026",
+        entry_point: "Doha-Qatar",
+        locale: "Modern Standard Arabic",
+        query: "Israeli Defense Force Latest News"
+    },
+    query: {
+        summaries_top_k: 25
+    },
+    qa: {
+        include_qa: true,
+        qa_top_k: 5
+    }
+};
+
 // DOM Elements
 const chatContainer = document.getElementById('chatContainer');
 const queryInput = document.getElementById('queryInput');
@@ -24,6 +45,26 @@ const dismissNotification = document.getElementById('dismissNotification');
 const exportButton = document.getElementById('exportButton');
 const importButton = document.getElementById('importButton');
 const importFileInput = document.getElementById('importFileInput');
+
+// Settings Panel DOM Elements
+const settingsButton = document.getElementById('settingsButton');
+const settingsOverlay = document.getElementById('settingsOverlay');
+const settingsPanel = document.getElementById('settingsPanel');
+const closeSettingsBtn = document.getElementById('closeSettings');
+const publishRecentBtn = document.getElementById('publishRecent');
+
+// Settings Input Elements
+const metaIndexName = document.getElementById('metaIndexName');
+const metaIndexVersion = document.getElementById('metaIndexVersion');
+const metaDescription = document.getElementById('metaDescription');
+const metaSource = document.getElementById('metaSource');
+const metaCoverage = document.getElementById('metaCoverage');
+const metaEntryPoint = document.getElementById('metaEntryPoint');
+const metaLocale = document.getElementById('metaLocale');
+const metaQuery = document.getElementById('metaQuery');
+const summariesTopKInput = document.getElementById('summariesTopK');
+const includeQaCheckbox = document.getElementById('includeQa');
+const qaTopKInput = document.getElementById('qaTopK');
 
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
@@ -67,13 +108,10 @@ function initializeNotifications() {
             eventSource.close();
 
             // Exponential backoff for reconnection
-            reconnectAttempts++;
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttempts), MAX_RECONNECT_DELAY);
-
-            console.log(`🔄 Reconnecting in ${delay/1000}s (attempt ${reconnectAttempts})...`);
-            setTimeout(() => {
-                initializeNotifications();
-            }, delay);
+            const delay = Math.min(1000 * 2 ** reconnectAttempts, MAX_RECONNECT_DELAY);
+            reconnectAttempts += 1;
+            console.log(`⏳ Reconnecting to notifications in ${delay}ms`);
+            setTimeout(initializeNotifications, delay);
         };
 
         console.log('🔔 Notification stream initialized');
@@ -101,6 +139,166 @@ function showNotification(data) {
 dismissNotification.addEventListener('click', () => {
     notificationOverlay.classList.add('hidden');
 });
+
+// ============================================================================
+// Settings Panel Functions
+// ============================================================================
+
+function toggleSettingsPanel() {
+    const isHidden = settingsPanel.classList.contains('hidden');
+    if (isHidden) {
+        settingsPanel.classList.remove('hidden');
+        settingsOverlay.classList.remove('hidden');
+    } else {
+        settingsPanel.classList.add('hidden');
+        settingsOverlay.classList.add('hidden');
+    }
+}
+
+function closeSettingsPanel() {
+    settingsPanel.classList.add('hidden');
+    settingsOverlay.classList.add('hidden');
+}
+
+function loadSettings() {
+    try {
+        const saved = localStorage.getItem('rag_settings');
+        if (saved) {
+            const parsed = JSON.parse(saved);
+            // Merge saved settings with defaults
+            settings = {
+                metadata: { ...settings.metadata, ...(parsed.metadata || {}) },
+                query: { ...settings.query, ...(parsed.query || {}) },
+                qa: { ...settings.qa, ...(parsed.qa || {}) }
+            };
+            console.log('✅ Settings loaded from localStorage');
+        }
+    } catch (e) {
+        console.error('Failed to load settings:', e);
+    }
+
+    // Populate UI with loaded settings
+    metaIndexName.value = settings.metadata.index_name || '';
+    metaIndexVersion.value = settings.metadata.index_version || '';
+    metaDescription.value = settings.metadata.description || '';
+    metaSource.value = settings.metadata.source || '';
+    metaCoverage.value = settings.metadata.coverage || '';
+    metaEntryPoint.value = settings.metadata.entry_point || '';
+    metaLocale.value = settings.metadata.locale || '';
+    metaQuery.value = settings.metadata.query || '';
+    summariesTopKInput.value = settings.query.summaries_top_k || 25;
+    includeQaCheckbox.checked = settings.qa.include_qa !== false;
+    qaTopKInput.value = settings.qa.qa_top_k || 5;
+    qaTopKInput.disabled = !includeQaCheckbox.checked;
+}
+
+function saveSettings() {
+    try {
+        // Update settings object from UI
+        settings.metadata.index_name = metaIndexName.value;
+        settings.metadata.index_version = metaIndexVersion.value;
+        settings.metadata.description = metaDescription.value;
+        settings.metadata.source = metaSource.value;
+        settings.metadata.coverage = metaCoverage.value;
+        settings.metadata.entry_point = metaEntryPoint.value;
+        settings.metadata.locale = metaLocale.value;
+        settings.metadata.query = metaQuery.value;
+        settings.query.summaries_top_k = parseInt(summariesTopKInput.value, 10) || 25;
+        settings.qa.include_qa = includeQaCheckbox.checked;
+        settings.qa.qa_top_k = parseInt(qaTopKInput.value, 10) || 5;
+
+        // Save to localStorage
+        localStorage.setItem('rag_settings', JSON.stringify(settings));
+        console.log('💾 Settings saved to localStorage');
+    } catch (e) {
+        console.error('Failed to save settings:', e);
+    }
+}
+
+// Debounce function for input events
+let saveDebounceTimer = null;
+function debouncedSave() {
+    clearTimeout(saveDebounceTimer);
+    saveDebounceTimer = setTimeout(saveSettings, 500);
+}
+
+async function exportMostRecentMessage() {
+    try {
+        // Find most recent assistant message
+        if (currentConversationMessages.length === 0) {
+            alert('No conversation to export');
+            return;
+        }
+
+        const lastConversation = currentConversationMessages[currentConversationMessages.length - 1];
+
+        const payload = {
+            query: lastConversation.user_query,
+            assistant_response: lastConversation.assistant_response,
+            message_id: lastConversation.assistant_message_id,
+            metadata: settings.metadata
+        };
+
+        console.log('📄 Exporting PDF with metadata:', payload.metadata);
+
+        const response = await fetch('/api/export_pdf', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify(payload)
+        });
+
+        if (!response.ok) {
+            throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
+        // Download the PDF
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `rag-export-${Date.now()}.pdf`;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+
+        console.log('✅ PDF exported successfully');
+    } catch (error) {
+        console.error('Error exporting PDF:', error);
+        alert(`Failed to export PDF: ${error.message}`);
+    }
+}
+
+// Settings Panel Event Listeners
+settingsButton.addEventListener('click', toggleSettingsPanel);
+closeSettingsBtn.addEventListener('click', closeSettingsPanel);
+settingsOverlay.addEventListener('click', closeSettingsPanel);
+publishRecentBtn.addEventListener('click', exportMostRecentMessage);
+
+// ESC key to close settings
+document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && !settingsPanel.classList.contains('hidden')) {
+        closeSettingsPanel();
+    }
+});
+
+// Settings input event listeners
+metaIndexName.addEventListener('input', debouncedSave);
+metaIndexVersion.addEventListener('input', debouncedSave);
+metaDescription.addEventListener('input', debouncedSave);
+metaSource.addEventListener('input', debouncedSave);
+metaCoverage.addEventListener('input', debouncedSave);
+metaEntryPoint.addEventListener('input', debouncedSave);
+metaLocale.addEventListener('input', debouncedSave);
+metaQuery.addEventListener('input', debouncedSave);
+summariesTopKInput.addEventListener('input', debouncedSave);
+includeQaCheckbox.addEventListener('change', () => {
+    qaTopKInput.disabled = !includeQaCheckbox.checked;
+    saveSettings();
+});
+qaTopKInput.addEventListener('input', debouncedSave);
 
 // ============================================================================
 // Event Listeners
@@ -155,6 +353,7 @@ importFileInput.addEventListener('change', (e) => {
 
 // Load conversations on page load
 window.addEventListener('load', () => {
+    loadSettings(); // Load settings from localStorage first
     clearConversation(); // Fresh context on page reload
     loadConversations();
     initializeNotifications();  // Start listening for index updates
@@ -202,14 +401,21 @@ async function handleSendQuery() {
     const loadingId = addLoadingMessage();
 
     try {
+        // Read QA settings from global settings object
+        const useQa = settings.qa.include_qa;
+        const qaTopK = Math.min(Math.max(settings.qa.qa_top_k, 1), 50);
+        const summariesTopK = Math.min(Math.max(settings.query.summaries_top_k, 1), 100);
+
         // Prepare request payload
         const payload = {
-            query: query,
+            query,
             mode: queryModeSelect.value,
             context_depth: 3,
-            top_k: 15,
+            top_k: summariesTopK,
             temperature: 0.7,
-            max_tokens: 8000
+            max_tokens: 8000,
+            use_qa: useQa,
+            qa_top_k: qaTopK
         };
 
         // Add date filters if set
@@ -251,8 +457,17 @@ async function handleSendQuery() {
             assistant_response: data.assistant_response,
             assistant_message_id: assistantMessageId,
             retrieved_docs: data.retrieved_docs,
+            retrieved_qa: data.retrieved_qa || [],
             metadata: data.metadata
         };
+
+        // Debug logging
+        console.log('📊 Query response data:', {
+            retrieved_docs_count: data.retrieved_docs?.length || 0,
+            retrieved_qa_count: data.retrieved_qa?.length || 0,
+            retrieved_qa_present: !!data.retrieved_qa,
+            retrieved_qa_sample: data.retrieved_qa?.[0]
+        });
 
         // Add to conversations list
         conversations.push(conversationEntry);
@@ -261,8 +476,12 @@ async function handleSendQuery() {
         // Update or add query to list
         updateQueryList(conversationEntry);
 
-        // Update document list with latest results
-        updateDocumentList(data.retrieved_docs);
+        // Update document list with latest results (summaries and QA)
+        console.log('🎨 Calling updateDocumentList with:', {
+            docs_count: data.retrieved_docs?.length || 0,
+            qa_count: (data.retrieved_qa || []).length
+        });
+        updateDocumentList(data.retrieved_docs, data.retrieved_qa || []);
 
         // Set as current conversation
         currentConversationId = data.id;
@@ -330,6 +549,11 @@ function addMessage(role, content, metadata = null) {
             items.push(`🤖 ${metadata.llm_model}`);
         }
 
+        if (metadata.use_qa) {
+            const topK = metadata.qa_top_k ? ` k=${metadata.qa_top_k}` : '';
+            items.push(`🧠 QA${topK}`);
+        }
+
         if (metadata.date_filters) {
             items.push(`📅 Filtered`);
         }
@@ -339,6 +563,16 @@ function addMessage(role, content, metadata = null) {
         ).join('');
 
         bubbleDiv.appendChild(metadataDiv);
+
+        // Add PDF export icon after metadata if message_id exists
+        if (metadata && metadata.message_id) {
+            const exportBtn = document.createElement('button');
+            exportBtn.className = 'pdf-export-icon';
+            exportBtn.innerHTML = '📥';
+            exportBtn.title = 'Export as PDF';
+            exportBtn.onclick = () => exportMessagePDF(metadata.message_id);
+            metadataDiv.appendChild(exportBtn);
+        }
     }
 
     messageDiv.appendChild(bubbleDiv);
@@ -595,7 +829,7 @@ function viewConversationEntry(conversationId) {
     }
 
     // Update document list with this conversation's retrieved docs
-    updateDocumentList(conversation.retrieved_docs);
+    updateDocumentList(conversation.retrieved_docs, conversation.retrieved_qa || []);
 
     // Set as current and highlight in query list
     currentConversationId = conversationId;
@@ -669,7 +903,7 @@ async function loadConversations() {
         // Load most recent conversation's documents
         if (conversations.length > 0) {
             const mostRecent = conversations[conversations.length - 1];
-            updateDocumentList(mostRecent.retrieved_docs);
+            updateDocumentList(mostRecent.retrieved_docs, mostRecent.retrieved_qa || []);
             currentConversationId = mostRecent.id;
             highlightCurrentQuery();
         }
@@ -686,93 +920,186 @@ async function loadConversations() {
 // Document List (Right Panel)
 // ============================================================================
 
-function updateDocumentList(documents) {
+function updateDocumentList(documents, qaItems) {
+    console.log('🔍 updateDocumentList called with:', {
+        documents_type: typeof documents,
+        documents_count: documents?.length || 0,
+        qaItems_type: typeof qaItems,
+        qaItems_count: qaItems?.length || 0,
+        qaItems_isArray: Array.isArray(qaItems),
+        qaItems_sample: qaItems?.[0]
+    });
+
     documentList.innerHTML = '';
 
-    if (!documents || documents.length === 0) {
+    const hasDocuments = documents && documents.length > 0;
+    const hasQA = qaItems && qaItems.length > 0;
+
+    if (!hasDocuments && !hasQA) {
         documentList.innerHTML = '<div class="empty-state">No index documents retrieved.<br><small>Search mode uses web grounding instead of the index.</small></div>';
         return;
     }
 
-    // Deduplicate documents by title and content hash
-    const seenTitles = new Set();
-    const seenHashes = new Set();
-    const uniqueDocs = [];
+    // Render summary documents first
+    if (hasDocuments) {
+        const summaryHeader = document.createElement('div');
+        summaryHeader.className = 'section-header';
+        summaryHeader.textContent = `Summary Documents (${documents.length})`;
+        documentList.appendChild(summaryHeader);
 
-    documents.forEach(doc => {
-        // Get title for comparison
-        const title = getDocumentTitle(doc).toLowerCase().trim();
+        // Deduplicate documents by title and content hash
+        const seenTitles = new Set();
+        const seenHashes = new Set();
+        const uniqueDocs = [];
 
-        // Create simple hash from first 200 chars of summary
-        const content = doc.summary_text || '';
-        const contentHash = simpleHash(content.substring(0, 200));
+        documents.forEach(doc => {
+            // Get title for comparison
+            const title = getDocumentTitle(doc).toLowerCase().trim();
 
-        // Check if we've seen this title or content before
-        if (!seenTitles.has(title) && !seenHashes.has(contentHash)) {
-            seenTitles.add(title);
-            seenHashes.add(contentHash);
-            uniqueDocs.push(doc);
-        }
-    });
+            // Create simple hash from first 200 chars of summary
+            const content = doc.summary_text || '';
+            const contentHash = simpleHash(content.substring(0, 200));
 
-    // Sort by relevance (highest similarity first)
-    uniqueDocs.sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
+            // Check if we've seen this title or content before
+            if (!seenTitles.has(title) && !seenHashes.has(contentHash)) {
+                seenTitles.add(title);
+                seenHashes.add(contentHash);
+                uniqueDocs.push(doc);
+            }
+        });
 
-    uniqueDocs.forEach(doc => {
-        const docItem = document.createElement('div');
-        docItem.className = 'document-item';
+        // Sort by relevance (highest similarity first)
+        uniqueDocs.sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
 
-        // Extract title from metadata or URL
-        const title = getDocumentTitle(doc);
+        uniqueDocs.forEach(doc => {
+            const docItem = document.createElement('div');
+            docItem.className = 'document-item';
 
-        // Extract author
-        const author = getDocumentAuthor(doc);
+            // Extract title from metadata or URL
+            const title = getDocumentTitle(doc);
 
-        // Title
-        const titleDiv = document.createElement('div');
-        titleDiv.className = 'doc-title';
-        titleDiv.textContent = title;
-        docItem.appendChild(titleDiv);
+            // Extract author
+            const author = getDocumentAuthor(doc);
 
-        // Author
-        if (author) {
+            // Title
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'doc-title';
+            titleDiv.textContent = title;
+            docItem.appendChild(titleDiv);
+
+            // Author
+            if (author) {
+                const authorDiv = document.createElement('div');
+                authorDiv.className = 'doc-meta';
+                authorDiv.innerHTML = `<strong>Author:</strong> ${author}`;
+                docItem.appendChild(authorDiv);
+            }
+
+            // Publication date
+            if (doc.publication_date) {
+                const dateDiv = document.createElement('div');
+                dateDiv.className = 'doc-meta';
+                dateDiv.innerHTML = `<strong>Date:</strong> ${doc.publication_date}`;
+                docItem.appendChild(dateDiv);
+            }
+
+            // Relevance score
+            const relevanceDiv = document.createElement('div');
+            relevanceDiv.className = 'doc-relevance';
+            relevanceDiv.textContent = `Relevance: ${(doc.similarity_score * 100).toFixed(1)}%`;
+            docItem.appendChild(relevanceDiv);
+
+            // Summary snippet (first 200 chars)
+            const summaryDiv = document.createElement('div');
+            summaryDiv.className = 'doc-summary';
+            const summaryText = doc.summary_text.substring(0, 200);
+            summaryDiv.textContent = summaryText + (doc.summary_text.length > 200 ? '...' : '');
+            docItem.appendChild(summaryDiv);
+
+            // URL link
+            const urlLink = document.createElement('a');
+            urlLink.className = 'doc-url';
+            urlLink.href = doc.source_url;
+            urlLink.target = '_blank';
+            urlLink.textContent = doc.source_url;
+            docItem.appendChild(urlLink);
+
+            documentList.appendChild(docItem);
+        });
+    }
+
+    // Render Q&A items after summaries with orange theme
+    if (hasQA) {
+        const qaHeader = document.createElement('div');
+        qaHeader.className = 'section-header qa-header';
+        qaHeader.textContent = `Q&A Pairs (${qaItems.length})`;
+        documentList.appendChild(qaHeader);
+
+        qaItems.forEach((qa, index) => {
+            const qaCard = document.createElement('div');
+            qaCard.className = 'document-item qa-card';
+
+            // Title with qa number
+            const title = (qa.doc_metadata && qa.doc_metadata.title) || 'Q&A Pair';
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'doc-title qa-title';
+            titleDiv.textContent = `${title} [qa-${index + 1}]`;
+            qaCard.appendChild(titleDiv);
+
+            // Author
+            const author = (qa.doc_metadata && (qa.doc_metadata.author || qa.doc_metadata.publisher)) || 'Unknown';
             const authorDiv = document.createElement('div');
             authorDiv.className = 'doc-meta';
             authorDiv.innerHTML = `<strong>Author:</strong> ${author}`;
-            docItem.appendChild(authorDiv);
-        }
+            qaCard.appendChild(authorDiv);
 
-        // Publication date
-        if (doc.publication_date) {
+            // Date
+            const dateStr = (qa.doc_metadata && (qa.doc_metadata.creation_date || qa.doc_metadata.publication_date)) || 'N/A';
             const dateDiv = document.createElement('div');
             dateDiv.className = 'doc-meta';
-            dateDiv.innerHTML = `<strong>Date:</strong> ${doc.publication_date}`;
-            docItem.appendChild(dateDiv);
-        }
+            dateDiv.innerHTML = `<strong>Date:</strong> ${dateStr}`;
+            qaCard.appendChild(dateDiv);
 
-        // Relevance score
-        const relevanceDiv = document.createElement('div');
-        relevanceDiv.className = 'doc-relevance';
-        relevanceDiv.textContent = `Relevance: ${(doc.similarity_score * 100).toFixed(1)}%`;
-        docItem.appendChild(relevanceDiv);
+            // Relevance score (orange)
+            const relevanceDiv = document.createElement('div');
+            relevanceDiv.className = 'doc-relevance qa-relevance';
+            relevanceDiv.textContent = `Relevance: ${(qa.similarity * 100).toFixed(1)}%`;
+            qaCard.appendChild(relevanceDiv);
 
-        // Summary snippet (first 200 chars)
-        const summaryDiv = document.createElement('div');
-        summaryDiv.className = 'doc-summary';
-        const summaryText = doc.summary_text.substring(0, 200);
-        summaryDiv.textContent = summaryText + (doc.summary_text.length > 200 ? '...' : '');
-        docItem.appendChild(summaryDiv);
+            // Question
+            const questionDiv = document.createElement('div');
+            questionDiv.className = 'qa-section';
+            questionDiv.innerHTML = `<strong>Question:</strong> ${qa.question || 'N/A'}`;
+            qaCard.appendChild(questionDiv);
 
-        // URL link
-        const urlLink = document.createElement('a');
-        urlLink.className = 'doc-url';
-        urlLink.href = doc.source_url;
-        urlLink.target = '_blank';
-        urlLink.textContent = doc.source_url;
-        docItem.appendChild(urlLink);
+            // Answer
+            const answerDiv = document.createElement('div');
+            answerDiv.className = 'qa-section';
+            answerDiv.innerHTML = `<strong>Answer:</strong> ${qa.answer || 'N/A'}`;
+            qaCard.appendChild(answerDiv);
 
-        documentList.appendChild(docItem);
-    });
+            // Context (if available)
+            if (qa.context) {
+                const contextDiv = document.createElement('div');
+                contextDiv.className = 'qa-section qa-context';
+                const contextSnippet = qa.context.substring(0, 150);
+                contextDiv.innerHTML = `<strong>Context:</strong> ${contextSnippet}${qa.context.length > 150 ? '...' : ''}`;
+                qaCard.appendChild(contextDiv);
+            }
+
+            // URL link (orange)
+            if (qa.source_url) {
+                const urlLink = document.createElement('a');
+                urlLink.className = 'doc-url qa-url';
+                urlLink.href = qa.source_url;
+                urlLink.target = '_blank';
+                urlLink.textContent = qa.source_url;
+                qaCard.appendChild(urlLink);
+            }
+
+            documentList.appendChild(qaCard);
+        });
+    }
 }
 
 function getDocumentTitle(doc) {
@@ -820,6 +1147,59 @@ function getDocumentAuthor(doc) {
 
     return null;
 }
+
+// ============================================================================
+// PDF Export
+// ============================================================================
+
+async function exportMessagePDF(messageId) {
+    try {
+        console.log(`📄 Exporting PDF for message: ${messageId}`);
+
+        // Call export API (no UI changes during generation)
+        const response = await fetch('/api/export_pdf', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+                message_id: messageId
+            })
+        });
+
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.error || 'PDF export failed');
+        }
+
+        // Download PDF
+        const blob = await response.blob();
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+
+        // Extract filename from Content-Disposition header if available
+        const contentDisposition = response.headers.get('Content-Disposition');
+        let filename = 'report.pdf';
+        if (contentDisposition) {
+            const match = contentDisposition.match(/filename="?(.+?)"?$/);
+            if (match) filename = match[1];
+        }
+
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        window.URL.revokeObjectURL(url);
+
+        console.log(`✅ PDF exported: ${filename}`);
+
+    } catch (error) {
+        console.error('Error exporting PDF:', error);
+        alert(`Failed to export PDF: ${error.message}`);
+    }
+}
+
 
 // ============================================================================
 // Utility Functions

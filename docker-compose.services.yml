@@ -11,25 +11,27 @@ services:
       - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
-      - EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-https://embeddings.rapporteur.ai}
-      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-project-70236742-1aaa-4686-816}
-      - PROJECT_ID=${GCP_PROJECT_ID:-project-70236742-1aaa-4686-816}
+      - EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-http://embeddings.192-168-1-3.nip.io}
+      - GCP_PROJECT_ID=${GCP_PROJECT_ID:-rapporteurclients}
+      - PROJECT_ID=${GCP_PROJECT_ID:-rapporteurclients}
       - GCP_LOCATION=${GCP_LOCATION:-us-central1}
       - LOCATION=${GCP_LOCATION:-us-central1}
-      - GOOGLE_APPLICATION_CREDENTIALS=/app/credentials/application_default_credentials.json
+      - GOOGLE_APPLICATION_CREDENTIALS=/home/electric/.config/gcp-keys/rapporteur-sa.json
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
     volumes:
       # Mount src for development
       - ./src:/app/src
       # Mount index file from project root
       - ./research_summaries_with_embeddings_combined.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
+      # Mount QA index file for enriched grounding
+      - ./research_qa_pairs_with_embeddings_combined.jsonl:/app/research_qa_pairs_with_embeddings_combined.jsonl
       # Mount logs
       - ./src/services/logs:/app/src/services/logs
       # Mount GCP credentials
-      - ~/.config/gcloud/application_default_credentials.json:/app/credentials/application_default_credentials.json:ro
+      - /home/electric/.config/gcp-keys/rapporteur-sa.json://home/electric/.config/gcp-keys/rapporteur-sa.json:ro
     networks:
       - services-network
-      - poc_agentic_search_kafka-network
+      - scrapelinkedwebsources_kafka-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -45,7 +47,7 @@ services:
       dockerfile: src/services/frontend/Dockerfile
     container_name: frontend-service
     ports:
-      - "5000:5000"
+      - "5001:5000"
     environment:
       - PYTHONUNBUFFERED=1
       - RAG_SERVICE_URL=http://rag-service:8000
@@ -57,7 +59,7 @@ services:
       - ./src/services/logs:/app/src/services/logs
     networks:
       - services-network
-      - poc_agentic_search_kafka-network
+      - scrapelinkedwebsources_kafka-network
     depends_on:
       rag-service:
         condition: service_healthy
@@ -72,5 +74,5 @@ services:
 networks:
   services-network:
     driver: bridge
-  poc_agentic_search_kafka-network:
+  scrapelinkedwebsources_kafka-network:
     external: true

@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ document_name }}</title>
+    <style>
+        {{ styles }}
+    </style>
+</head>
+<body>
+    <!-- Header Page with Preamble -->
+    <div class="header-page">
+        <div class="preamble">
+            {{ preamble | safe }}
+        </div>
+
+        <!-- Metadata Section -->
+        {% if metadata %}
+        <div class="document-metadata">
+            <h3>Document Information</h3>
+            <table class="metadata-table">
+                <tr><td class="meta-label">Index:</td><td>{{ metadata.index_name }}</td></tr>
+                <tr><td class="meta-label">Model:</td><td>{{ metadata.model }}</td></tr>
+                <tr><td class="meta-label">Index Version:</td><td>{{ metadata.index_version }}</td></tr>
+                <tr><td class="meta-label">Generated:</td><td>{{ metadata.generated_date }}</td></tr>
+                {% if metadata.description %}
+                <tr><td class="meta-label">Description:</td><td>{{ metadata.description }}</td></tr>
+                {% endif %}
+            </table>
+        </div>
+        {% endif %}
+    </div>
+
+    <div class="page-break"></div>
+
+    <!-- Introduction Section -->
+    <div class="section">
+        <h1 class="section-title">Introduction</h1>
+        <div class="introduction">
+            {{ introduction | safe }}
+        </div>
+    </div>
+
+    <!-- Assistant Response -->
+    <div class="section">
+        <h1 class="section-title">Analysis</h1>
+        <div class="content">
+            {{ assistant_response | safe }}
+        </div>
+    </div>
+
+    <!-- Citations Section -->
+    <div class="section">
+        <h1 class="section-title">Citations & References</h1>
+
+        {% if summary_citations %}
+        <div class="citation-subsection">
+            <h2 class="subsection-title">Summary Documents ({{ summary_citations|length }})</h2>
+            {% for citation in summary_citations %}
+            <div class="citation-entry">
+                <div class="citation-main"><a href="{{ citation.url }}" target="_blank">[{{ citation.index }}] {{ citation.author }} ({{ citation.date }}). <em>{{ citation.title }}</em></a></div>
+                <div class="citation-url">{{ citation.display_url }}</div>
+                <div class="citation-meta">[doc_id: {{ citation.doc_id }}]</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+
+        {% if qa_citations %}
+        <div class="citation-subsection">
+            <h2 class="subsection-title">Q&A Pairs ({{ qa_citations|length }})</h2>
+            {% for citation in qa_citations %}
+            <div class="citation-entry">
+                <div class="citation-main"><a href="{{ citation.url }}" target="_blank">[qa-{{ citation.index }}] {{ citation.author }} ({{ citation.date }}). <em>{{ citation.title }}</em></a></div>
+                <div class="citation-url">{{ citation.display_url }}</div>
+                <div class="citation-meta">[doc_id: {{ citation.doc_id }}]</div>
+            </div>
+            {% endfor %}
+        </div>
+        {% endif %}
+    </div>
+</body>
+</html>
