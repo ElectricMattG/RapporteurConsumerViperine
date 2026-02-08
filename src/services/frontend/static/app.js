@@ -413,7 +413,7 @@ async function handleSendQuery() {
             context_depth: 3,
             top_k: summariesTopK,
             temperature: 0.7,
-            max_tokens: 8000,
+            max_tokens: 16000,
             use_qa: useQa,
             qa_top_k: qaTopK
         };
@@ -445,6 +445,14 @@ async function handleSendQuery() {
         // Remove loading indicator
         removeLoadingMessage(loadingId);
 
+        // Ensure metadata exists and has message_id for PDF export
+        if (!data.metadata) {
+            data.metadata = {};
+        }
+        if (data.metadata.message_id === undefined || data.metadata.message_id === null) {
+            data.metadata.message_id = data.id;
+        }
+
         // Add assistant response
         const assistantMessageId = addMessage('assistant', data.assistant_response, data.metadata);
 
@@ -466,7 +474,9 @@ async function handleSendQuery() {
             retrieved_docs_count: data.retrieved_docs?.length || 0,
             retrieved_qa_count: data.retrieved_qa?.length || 0,
             retrieved_qa_present: !!data.retrieved_qa,
-            retrieved_qa_sample: data.retrieved_qa?.[0]
+            retrieved_qa_sample: data.retrieved_qa?.[0],
+            metadata: data.metadata,
+            metadata_message_id: data.metadata?.message_id
         });
 
         // Add to conversations list
@@ -529,8 +539,13 @@ function addMessage(role, content, metadata = null) {
 
     bubbleDiv.appendChild(contentDiv);
 
-    // Add metadata for assistant messages
-    if (role === 'assistant' && metadata) {
+    // Add metadata for assistant messages - ALWAYS create metadata div for assistant messages
+    if (role === 'assistant') {
+        // Ensure metadata exists (defensive programming)
+        if (!metadata) {
+            metadata = {};
+        }
+
         const metadataDiv = document.createElement('div');
         metadataDiv.className = 'message-metadata';
 
@@ -564,8 +579,10 @@ function addMessage(role, content, metadata = null) {
 
         bubbleDiv.appendChild(metadataDiv);
 
-        // Add PDF export icon after metadata if message_id exists
-        if (metadata && metadata.message_id) {
+        // Always add PDF export button for assistant messages
+        // message_id can be 0 (integer) which is falsy, so check explicitly
+        if (metadata.message_id !== undefined && metadata.message_id !== null) {
+            console.log('✅ Adding PDF export button for conversation:', metadata.message_id);
             const exportBtn = document.createElement('button');
             exportBtn.className = 'pdf-export-icon';
             exportBtn.innerHTML = '📥';
@@ -887,6 +904,15 @@ async function loadConversations() {
         // Rebuild conversation thread in chat container
         data.forEach((conv, index) => {
             const userMessageId = addMessage('user', conv.user_query);
+
+            // Ensure metadata exists and has message_id for PDF export
+            if (!conv.metadata) {
+                conv.metadata = {};
+            }
+            if (conv.metadata.message_id === undefined || conv.metadata.message_id === null) {
+                conv.metadata.message_id = conv.id;
+            }
+
             const assistantMessageId = addMessage('assistant', conv.assistant_response, conv.metadata);
 
             // Update conversation with message IDs

@@ -74,7 +74,7 @@ def query_rag():
         start_date = data.get('start_date')
         end_date = data.get('end_date')
         temperature = data.get('temperature', 0.7)
-        max_tokens = data.get('max_tokens', 8000)
+        max_tokens = data.get('max_tokens', 16000)
         use_qa = data.get('use_qa', False)
         qa_top_k = data.get('qa_top_k', 5)
 

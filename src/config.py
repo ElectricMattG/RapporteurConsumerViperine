@@ -306,12 +306,12 @@ defaults = {
     },
     "llm": {
         # Generic LLM configuration (used by Gemini client)
-        "max_length": 16000,  # Maximum output length
+        "max_length": 32000,  # Maximum output length
         "temperature": 0.7,  # Temperature for generation
         "top_p": 0.9,  # Nucleus sampling parameter
         "max_retries": 3,  # Maximum retry attempts
         "retry_delay": 1.0,  # Delay between retries in seconds
-        "max_context_chars": 80000,  # Maximum context characters
+        "max_context_chars": 800000,  # Maximum context characters
     },
     "web_scraper": {
         # Web scraping and URL resolution configuration

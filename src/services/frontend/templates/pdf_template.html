@@ -54,27 +54,11 @@
     <div class="section">
         <h1 class="section-title">Citations & References</h1>
 
-        {% if summary_citations %}
-        <div class="citation-subsection">
-            <h2 class="subsection-title">Summary Documents ({{ summary_citations|length }})</h2>
-            {% for citation in summary_citations %}
+        {% if citations %}
+        <div class="citation-list">
+            {% for citation in citations %}
             <div class="citation-entry">
-                <div class="citation-main"><a href="{{ citation.url }}" target="_blank">[{{ citation.index }}] {{ citation.author }} ({{ citation.date }}). <em>{{ citation.title }}</em></a></div>
-                <div class="citation-url">{{ citation.display_url }}</div>
-                <div class="citation-meta">[doc_id: {{ citation.doc_id }}]</div>
-            </div>
-            {% endfor %}
-        </div>
-        {% endif %}
-
-        {% if qa_citations %}
-        <div class="citation-subsection">
-            <h2 class="subsection-title">Q&A Pairs ({{ qa_citations|length }})</h2>
-            {% for citation in qa_citations %}
-            <div class="citation-entry">
-                <div class="citation-main"><a href="{{ citation.url }}" target="_blank">[qa-{{ citation.index }}] {{ citation.author }} ({{ citation.date }}). <em>{{ citation.title }}</em></a></div>
-                <div class="citation-url">{{ citation.display_url }}</div>
-                <div class="citation-meta">[doc_id: {{ citation.doc_id }}]</div>
+                <a href="{{ citation.url }}" target="_blank">[{{ citation.index }}] {{ citation.formatted_text }}</a>
             </div>
             {% endfor %}
         </div>

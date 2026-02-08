@@ -56,6 +56,57 @@ def generate_fallback_introduction(query: str) -> str:
 providing detailed insights and evidence-based findings. All sources are cited and listed in the references section.</p>"""
 
 
+def format_author_name(name: str) -> str:
+    """
+    Format author name with edge case handling:
+    - Long names (>4 words): take first 2, unless starts with initial (N., M.) then take 3
+    - All-caps multi-word names: convert to Title Case
+    - Single-word all-caps: keep as-is (acronyms like IDF)
+    - Organizational names and non-Latin scripts preserved
+
+    Args:
+        name: Raw author name
+
+    Returns:
+        Formatted author name
+    """
+    if not name or not name.strip():
+        return ""
+
+    author = name.strip()
+    words = author.split()
+
+    # Handle long names (>5 words) - likely includes extra text
+    if len(words) > 6:
+        # Check if first OR second word is an initial (single letter followed by period)
+        # Examples: "N. M. Peter..." or "Nancy M. Smith..."
+        has_initial = False
+        if len(words[0]) == 2 and words[0][1] == '.':
+            has_initial = True  # First word is initial
+        elif len(words) > 1 and len(words[1]) == 2 and words[1][1] == '.':
+            has_initial = True  # Second word is initial (e.g., Nancy M.)
+
+        if has_initial:
+            # Take first 3 words (e.g., "N. M. Peter" or "Nancy M. Smith")
+            author = ' '.join(words[:3])
+            words = author.split()
+        else:
+            # Take first 2 words (e.g., "Michael Bachner" from long string)
+            author = ' '.join(words[:2])
+            words = author.split()
+
+    # Handle all-caps multi-word names (convert to Title Case)
+    # But keep single-word all-caps (acronyms like IDF)
+    if len(words) > 1:
+        # Check if all words are uppercase (ignoring periods)
+        all_caps = all(word.replace('.', '').isupper() for word in words if word.replace('.', '').isalpha())
+        if all_caps:
+            # Convert to Title Case: PETER SMITH -> Peter Smith
+            author = ' '.join(word.title() for word in words)
+
+    return author
+
+
 def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool = False) -> dict:
     """
     Format a citation entry.
@@ -64,53 +115,120 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
         doc_metadata: Document metadata dictionary
         source_url: Source URL of the document
         index: Citation index number
-        is_qa: Whether this is a Q&A citation
+        is_qa: Whether this is a Q&A citation (unused in new format)
 
     Returns:
-        Dictionary with formatted citation fields
+        Dictionary with formatted citation fields and complete citation text
     """
-    # Extract author
-    author = doc_metadata.get('author') or doc_metadata.get('publisher')
-    if not author or author == 'null':
-        # Fallback to domain name
+    # Extract author with fallback chain
+    # First try plural 'authors' array (correct field for summaries)
+    authors_list = doc_metadata.get('authors', [])
+
+    if authors_list and isinstance(authors_list, list) and len(authors_list) > 0:
+        # Filter out null/empty values and get only the first author
+        valid_authors = [a for a in authors_list if a and str(a).lower() not in ['null', 'nan', '', 'none']]
+
+        if valid_authors:
+            # Use only the first author (simplified)
+            author = valid_authors[0]
+        else:
+            author = None
+    else:
+        # Fallback to singular 'author' field (legacy Q&A format)
+        author = doc_metadata.get('author')
+        if author and str(author).lower() not in ['null', 'nan', '', 'none']:
+            # Keep as-is, no formatting
+            pass
+        else:
+            author = None
+
+    # Apply formatting to clean up author name (handles long names, all-caps, etc.)
+    if author:
+        author = format_author_name(author)
+
+    # If no author found after formatting, fall back to publisher
+    if not author:
+        author = doc_metadata.get('publisher')
+        if author:
+            author = format_author_name(author)
+
+    # Final fallback to domain name
+    if not author or str(author).lower() in ['null', 'nan', '', 'none']:
         try:
             parsed = urlparse(source_url)
             author = parsed.netloc.replace('www.', '').split('.')[0].title()
         except:
             author = "Unknown"
 
-    # Extract and format date
-    date = doc_metadata.get('creation_date') or doc_metadata.get('publication_date')
-    if date:
+    # Extract publisher with fallback chain
+    publisher = doc_metadata.get('publisher')
+    if not publisher or publisher == 'null' or publisher == 'nan':
+        publisher = doc_metadata.get('author')
+    if not publisher or publisher == 'null' or publisher == 'nan':
+        # Fallback to domain from URL
         try:
-            # Try to parse and format as "Month Year"
-            if isinstance(date, str):
-                dt = datetime.fromisoformat(date.replace('Z', '+00:00'))
-                date_str = dt.strftime("%B %Y")
-            else:
-                date_str = date
+            parsed = urlparse(source_url)
+            publisher = parsed.netloc.replace('www.', '')
         except:
-            date_str = str(date)[:10]  # Fallback to YYYY-MM-DD
-    else:
-        date_str = "n.d."
+            publisher = "Unknown"
+
+    # Apply formatting to clean up publisher name (handles long names, extra text, etc.)
+    if publisher and publisher != "Unknown":
+        publisher = format_author_name(publisher)
+
+    # Extract and format dates
+    date_field = (doc_metadata.get('publication_date') or
+                  doc_metadata.get('creation_date') or
+                  doc_metadata.get('published_date'))
+
+    month_year = "ND"
+    full_date = "ND"
+
+    if date_field and str(date_field).lower() not in ['null', 'nan', 'none', '']:
+        try:
+            if isinstance(date_field, str):
+                # Handle ISO 8601 format
+                dt = datetime.fromisoformat(date_field.replace('Z', '+00:00'))
+                month_year = dt.strftime("%B %Y")
+                full_date = dt.strftime("%d %B %Y")
+        except:
+            # Fallback to partial date parsing
+            try:
+                date_str = str(date_field)[:10]  # Get YYYY-MM-DD portion
+                if len(date_str) >= 7:  # At least YYYY-MM
+                    parts = date_str.split('-')
+                    if len(parts) >= 2:
+                        year = parts[0]
+                        month_num = int(parts[1])
+                        month_name = datetime(2000, month_num, 1).strftime("%B")
+                        month_year = f"{month_name} {year}"
+                        if len(parts) == 3:
+                            day = parts[2]
+                            full_date = f"{day} {month_name} {year}"
+                        else:
+                            full_date = month_year
+            except:
+                pass
 
     # Extract title
     title = doc_metadata.get('title', 'Untitled Document')
 
-    # Decode URL for display (handles Arabic/special characters)
-    display_url = unquote(source_url)
-
     # Extract document ID
-    doc_id = doc_metadata.get('document_id', 'unknown')
+    doc_id = doc_metadata.get('document_id') or doc_metadata.get('doc_id') or 'unknown'
+
+    # Build formatted citation string with doc_id for cross-referencing
+    formatted_text = f"{author} ({month_year}). {title}. Published by *{publisher}* on {full_date}. [doc_id: {doc_id}]"
 
     return {
         'index': index,
         'author': author,
-        'date': date_str,
+        'publisher': publisher,
+        'month_year': month_year,
+        'full_date': full_date,
         'title': title,
         'url': source_url,
-        'display_url': display_url,
-        'doc_id': doc_id
+        'doc_id': doc_id,
+        'formatted_text': formatted_text
     }
 
 
@@ -262,15 +380,54 @@ def build_pdf_html(
     # Convert assistant response markdown to HTML
     response_html = markdown_to_html(assistant_response)
 
-    # Format citations
-    summary_citations = [
-        format_citation(doc.get('doc_metadata', {}), doc.get('source_url', ''), i+1, is_qa=False)
-        for i, doc in enumerate(retrieved_docs)
-    ]
+    # Format all citations (summary + QA)
+    all_citations = []
+    seen_doc_ids = set()
 
-    qa_citations = [
-        format_citation(qa.get('doc_metadata', {}), qa.get('source_url', ''), i+1, is_qa=True)
-        for i, qa in enumerate(retrieved_qa)
+    # Add summary citations
+    for doc in retrieved_docs:
+        # Check root level first (summaries), then nested (Q&A pairs)
+        doc_id = doc.get('document_id') or doc.get('doc_metadata', {}).get('document_id') or doc.get('doc_metadata', {}).get('doc_id')
+        source_url = doc.get('source_url', '')
+
+        # Use doc_id for deduplication, fallback to source_url
+        dedup_key = doc_id if doc_id and doc_id != 'unknown' else source_url
+
+        if dedup_key not in seen_doc_ids:
+            seen_doc_ids.add(dedup_key)
+            # Get metadata and inject document_id if it's at root level
+            metadata = doc.get('doc_metadata', {}).copy()
+            if doc_id and 'document_id' not in metadata:
+                metadata['document_id'] = doc_id
+            all_citations.append({
+                'metadata': metadata,
+                'url': source_url
+            })
+
+    # Add QA citations (deduplicate against summaries)
+    for qa in retrieved_qa:
+        # Check root level first (if Q&A structure changes), then nested
+        doc_id = qa.get('document_id') or qa.get('doc_metadata', {}).get('document_id') or qa.get('doc_metadata', {}).get('doc_id')
+        source_url = qa.get('source_url', '')
+
+        # Use doc_id for deduplication, fallback to source_url
+        dedup_key = doc_id if doc_id and doc_id != 'unknown' else source_url
+
+        if dedup_key not in seen_doc_ids:
+            seen_doc_ids.add(dedup_key)
+            # Get metadata and inject document_id if it's at root level
+            metadata = qa.get('doc_metadata', {}).copy()
+            if doc_id and 'document_id' not in metadata:
+                metadata['document_id'] = doc_id
+            all_citations.append({
+                'metadata': metadata,
+                'url': source_url
+            })
+
+    # Format citations with sequential numbering
+    formatted_citations = [
+        format_citation(cit['metadata'], cit['url'], i+1)
+        for i, cit in enumerate(all_citations)
     ]
 
     # Prepare metadata for template
@@ -289,8 +446,7 @@ def build_pdf_html(
         metadata=doc_metadata,
         introduction=introduction,
         assistant_response=response_html,
-        summary_citations=summary_citations,
-        qa_citations=qa_citations,
+        citations=formatted_citations,
         styles=styles
     )
 

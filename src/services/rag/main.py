@@ -81,7 +81,7 @@ class QueryLLMRequest(SearchRequest):
     """Request model for query_llm endpoint (extends SearchRequest)."""
     mode: Literal['ask', 'search'] = Field(default='ask', description="Query mode: 'ask' uses index only, 'search' uses web search grounding")
     temperature: float = Field(default=0.7, description="LLM temperature", ge=0.0, le=2.0)
-    max_tokens: int = Field(default=24000, description="Maximum tokens for LLM response", ge=100, le=32000)
+    max_tokens: int = Field(default=24000, description="Maximum tokens for LLM response", ge=100, le=32768)
     use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
     qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=150)
 
@@ -868,13 +868,13 @@ async def query_llm(request: QueryLLMRequest):
             # Optional QA refinement (second-stage prompt)
             if request.use_qa and qa_grounding.get("qa_items"):
                 logger.info(f"[{request_id}] Refining with QA grounding ({len(qa_grounding.get('qa_items', []))} items)")
-                # Use 8192 max tokens for refinement to avoid truncation when adding QA context
+                # Use the user's requested max_tokens for refinement to support large grounding contexts
                 llm_response, full_prompt = await refine_with_qa(
                     draft_response=llm_response,
                     qa_items=qa_grounding.get("qa_items", []),
                     query=request.query,
                     temperature=request.temperature,
-                    max_tokens=8192  # Use max allowed tokens for refinement
+                    max_tokens=request.max_tokens  # Use user's requested max_tokens for large grounding
                 )
 
         execution_time_ms = (time.time() - start_time) * 1000

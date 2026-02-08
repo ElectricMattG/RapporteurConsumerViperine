@@ -25,6 +25,9 @@ Task: Enrich and refine the draft response by integrating the Q&A pairs accordin
 
 Citation Format: When citing Q&A pairs, use the format provided in the Citation field: (Author [qa-N], Month Year). For example: (Al-Arabiya [qa-1], Nov 2024). This differentiates Q&A sources from summary sources while maintaining consistency. When you create a citation don't add any hyperlink to the inline citation just render the in-line citation according to the guideline provided. Don't hyperlink under any circumstances
 
+
+IMPORTANT: For existing citations in the draft response that reference summary sources, keep them as they are without modification. Only apply the new citation format to Q&A pairs. Never change existing citations that reference summary sources.
+
 Even though we have citations in the document and a plan to add these citations, do not generate a citation list at the end. Use the plan to create in-line citations, but do not generate a citations list at the end of the response/output. This means any form of list: references, citations, bibliography, etc. should not be generated at the end of the response/output. Instead, only use in-line citations as per the format provided above."
 
 Goal: Produce a refined response where Q&A details are seamlessly integrated throughout—enriching context, deepening analysis, and substantiating claims—not merely appended as additional information.

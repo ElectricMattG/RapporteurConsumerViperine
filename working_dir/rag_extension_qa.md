@@ -350,3 +350,142 @@ The settings div should be accessable through a setting buttom [button] settings
 (3) Q and A options (int and to include)
 
 (4) publish recent which publihsed to pdf the most recent assistant response
+
+
+CITATION AMENDMENT FOR FINAL DRAFT
+---
+We need to review our citation methodology and how we build the reference section. See here. See:
+
+-/home/electric/workspace/ScrapeLinkedWebSources/src/services/frontend/pdf_generator.py - format citation
+-/home/electric/workspace/ScrapeLinkedWebSources/src/prompts/q_a.py
+
+We have decided to use summaries and q and a pairs. Each source is cited differently in the text and handled differently - as two separate sections - in the citations. The citations method is useful from a data-scientist perspective but may be difficult for a more broader readership to understand, Here is the current prompt:
+
+Citation Format: When citing Q&A pairs, use the format provided in the Citation field: (Author [qa-N], Month Year). For example: (Al-Arabiya [qa-1], Nov 2024). This differentiates Q&A sources from summary sources while maintaining consistency. When you create a citation don't add any hyperlink to the inline citation just render the in-line citation according to the guideline provided. Don't hyperlink under any circumstances
+
+Rather when citing qa pairs treat them as a normal document and cite the document it self as evidence without qa-1:
+
+(Author [qa-N], Month Year)
+(Al-Arabiya [qa-1], Nov 2024)
+
+becomes,
+
+(Author, Month Year)
+(Al-Arabiya, Nov 2024)
+
+the final citation in document is like a normal citation.
+
+-THIS IS DURING PDF CREATION NO GENERATION STAGE OF CITATION-
+-/home/electric/workspace/ScrapeLinkedWebSources/src/services/frontend/pdf_generator.py - format citation
+
+The final citation list should follow the format:
+
+[AUTHOR] ([DATE]). [Title]. published by [Publisher] on [PUBISHED_DATE], dont add a url. Rather use an embedded hyperlink.
+
+[1] The Times of Israel (November 2023). Israeli troops roll into Gaza City as ground offensive intensifies,
+IDF toll rises
+https://www.timesofisrael.com/israeli-troops-roll-into-gaza-city-as-ground-offensive-
+intensifies-idf-toll-rises/
+[doc_id: unknown]
+
+changes to
+
+[1] Cohen, Avi (November 2023). Israeli troops roll into Gaza City as ground offensive intensifies, IDF toll rises. Publihsed by **The Times of Israel** on 23 November 2023.
+
+Where this entire block of text is hyperlinked to source url. Include [doc_id: unknown] from the original system which is found in document_metadata under doc_id - this allows cross referncing to the search system's indices.
+
+
+If this was a q and a pair:
+
+[qa-1] Cohen, Avi (November 2023). Israeli troops roll into Gaza City as ground offensive intensifies, IDF toll rises. Publihsed by **The Times of Israel** on 23 November 2023.
+
+[1] Cohen, Avi (November 2023). Israeli troops roll into Gaza City as ground offensive intensifies, IDF toll rises. Publihsed by **The Times of Israel** on 23 November 2023.
+
+Untilmately q and a pairs and summaries aren't distinguishable in the final document. The citations should be unique and not repeated so if there are mupitple citations in the document. Then only have one citation in the final reference setction.
+
+So we have two updated:
+
+The pdf creation for citations
+The prompt to handle citation formatting
+
+Another consideration in the generative process for summaries that generates the initial prompts:
+
+/home/electric/workspace/ScrapeLinkedWebSources/src/services/rag/main.py
+
+IMPORTANT: When citing sources, use this format: (Author/Publisher, Date) - for example: (Al-Jazeera, Nov 2023) and then hyperlink to the actual url, but don't display the url use the text as an anchor.
+
+Use the Citation information provided for each summary to create your references. One could use the metadata in the grounding instead of the official source, for each document_metadata, document_id (doc_id=doc_87898734dhu), these could then be used on subsequent processing to look up the citation meta-data and replace with a regular expression. This separates the formatting and style and the generative process. Creating a separation of responsibilities between the generative process and document styling.
+
+
+---
+the q and a cards that are rendered still have urls with trailing symbole that when resolved are arabic. Prior to displaying the card in Arabic,
+
+https://www.idf.il/ar/%D8%AC%D9%8A%D8%B4-%D8%A7%D9%84%D8%AF%D9%81%D8%A7%D8%B9-%D8%A7%D9%84%D8%A5%D8%B3%D8%B1%D8%A7%D8%A6%D9%8A%D9%84%D9%8A/%D8%A7%D9%84%D8%AD%D8%B1%D8%A8-%D8%B6%D8%AF-%D8%AD%D9%85%D8%A7%D8%B3/swordsofiron-updates-1/ resolves to actual arabic. We need to resolve to arabic before displaying as a card.
+
+
+Heres ian example of the revised approach. In the text we can see (...Stav Levaton, Dec 2025) and in the citations we see something different. The citation has added the author, byt usses the publihsers in place of the the author. Both text draw on the same source information though. The document id is also not fetched for thehe citations.
+
+The IDF operates under a clearly hierarchical command structure, with a defined chain of
+command from the General Staff down to specific divisions and brigades. Key figures such as
+Chief of Staff Lt. Gen. Eyal Zamir (JNS Staff, Jan 2026; Stav Levaton, Dec 2025)
+
+[11] The Times of Israel (December 2025). IDF to launch comprehensive probes into Gaza
+ground operations, broader war. Published by **The Times of Israel** on 29 December
+2025. [doc_id: unknown]
+
+should be,
+
+[11] Levaton, Stav (December 2025). IDF to launch comprehensive probes into Gaza
+ground operations, broader war. Published by **The Times of Israel** on 29 December
+2025. [doc_id: unknown]
+
+The source meta data contains the relevant data:
+
+"doc_metadata": {"title": "IDF to launch comprehensive probes into Gaza ground operations, broader war", "authors": ["Stav Levaton"], "publication_date": "2025-12-29", "publisher": "The Times of Israel", "publication_venue": "The Times of Israel", "pages": null, "volume": null, "issue": null, "doi": null, "isbn": null, "type": "news_article"}, "embedding_metadata": {"embedding_id": "sum_req_20260108_025143_005", "embedding_dim": 384, "embedding_model": "all-MiniLM-L6-v2", "embedded_at": "2026-01-08T02:58:39.708184"}, "indexed_at": "2026-01-08T02:58:39.708189"}
+
+"document_id": "req_20260108_025143_005" is not in document_metadata but in actual schema
+
+
+Let's revise our recent changes. Don't write any code just see how we can align our updates with the recent changes.
+
+---
+Below is the output from the recent updates on some edge cases. These cases don't have peeople as authors but instead have orgs, we don't have entity information at this point so our logic for orgnaising authors: Stav Cohen to Cohen, Stav, is creating difficult edges cases. Let's simplfiy. if authors are present then just render without reversing. So Stav Cohen is Stav Cohen and NOT Cohen, Stav
+
+
+[2] (IDF), Israel Defense Forces (ND). IDF Press Releases: Israel at War. Published by **Israel
+Defense Forces (IDF)** on ND. [doc_id: unknown]
+موقع جيش الدفاع الإسرائيلي باللغة العربية | الموقع الرسمي لجيش .)Forces, Israel Defense (ND ]3[
+The Israel Defense Forces website in Arabic | The official website of the( الدفاع الإسرائيلي
+Israel Defense Forces). Published by **Government of Israel** on ND. [doc_id: unknown]
+[4] (IDF), Israel Defense Forces (ND). IDF Press Releases: Israel at War. Published by **Israel
+Defense Forces (IDF)** on ND. [doc_id: unknown]
+[5] projects, Contributors to Wikimedia (ND). List of Israel Defense Forces operations.
+Published by **Wikimedia Foundation** on ND. [doc_id: unknown]
+[6] Forces, Israel Defense (January 2026). IDF Press Releases: Israel at War. Published by
+**Israel Defense Forces** on 04 January 2026. [doc_id: unknown]
+
+WE have a number of other edge cases. Below we were adjusting the case to have the first char capitalised and the rest lower case. Let's revert this logic for now, because acronyms like IDF should remain all upper case. We don't have entitiy enrichment yet so revert for now for a simple implementation.
+
+One can also see the for summaries doc_id is still unnnknow despite the logic to update these checkthi s logic so the correct key is used from summaries.
+
+[43] Idf (June 2024). Operations Against the Hamas Tel al-Sultan Battalion in the Rafah Area.
+Published by **IDF** on 23 June 2024. [doc_id: unknown]
+
+---
+Edge cases:
+
+sometimes author is > 5 words (see below). We only want the first two words, in most cases or as a general rule when this happens. So we should validate the author using word count if >4, then take the first two words. If the first words are letters N. or M. or the second word A-Z followed by. The take the first three where N. M. Peter or Nancy M. Smith.
+
+
+[83] Michael Bachner Follow You will receive email alerts from this author. Manage alert
+preferences on your profile page You will no longer receive email alerts from this author.
+Manage alert preferences on your profile page and ToI Staff
+
+gives us Michael Bachner
+
+Most acronyms are one words so single words in where all are Caps ignore, but if there are 2 or word words that are caps then giraffe case. PETER SMITH -> Peter Smith, NANCY DREW -> Nancy Drew. PETER JOHN SMITH - Peter John Smith. YONAH JEREMY BOB - > Yonah Jeremy Bob
+
+The internal doc_id can be removed from the final citation now.
+
+
+add doc_id back into the ref section
