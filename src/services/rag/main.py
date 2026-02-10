@@ -19,6 +19,7 @@ import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Literal, Optional
+from urllib.parse import unquote
 
 import numpy as np
 from confluent_kafka import Producer
@@ -89,6 +90,7 @@ class DocumentResult(BaseModel):
     """Single document result with metadata."""
     document_id: str
     source_url: str
+    source_url_display: Optional[str] = None  # Decoded URL for display
     publication_date: Optional[str]
     similarity_score: float
     summary_text: str
@@ -114,6 +116,7 @@ class QueryLLMResponse(SearchResponse):
     llm_params: Dict[str, float]
     prompt: str
     retrieved_qa: Optional[List[Dict]] = None
+    citation_map: Optional[Dict[str, Dict]] = None  # Map doc_id -> {author, date, card_type, card_index}
 
 class SearchModeResponse(QueryLLMResponse):
     """Response model for search mode with grounding metadata."""
@@ -223,6 +226,119 @@ def load_qa_index(index_path: str) -> List[Dict]:
         logger.warning(f"QA index load: skipped {skipped_incomplete} incomplete lines (missing question/answer/context/metadata)")
 
     return qa_items
+
+
+def decode_url_for_display(url: str) -> str:
+    """
+    Decode percent-encoded URLs for human-readable display.
+    Handles Arabic/Hebrew characters and other international characters.
+
+    Args:
+        url: The percent-encoded URL string
+
+    Returns:
+        Human-readable decoded URL string
+    """
+    try:
+        return unquote(url)
+    except Exception as e:
+        logger.warning(f"Failed to decode URL: {url}, error: {e}")
+        return url  # Return original if decoding fails
+
+
+def _clean_author_name(name: str) -> str:
+    """Clean author name: truncate long names, title-case ALL CAPS, preserve acronyms."""
+    if not name or not name.strip():
+        return 'Unknown'
+    author = name.strip().rstrip(',')
+    words = author.split()
+    # Long names (>6 words) — likely includes scraped junk
+    if len(words) > 6:
+        has_initial = (len(words[0]) == 2 and words[0].endswith('.')) or \
+                      (len(words) > 1 and len(words[1]) == 2 and words[1].endswith('.'))
+        author = ' '.join(words[:3]) if has_initial else ' '.join(words[:2])
+        words = author.split()
+    # Multi-word ALL CAPS → Title Case (but single-word caps kept for acronyms)
+    if len(words) > 1:
+        all_caps = all(w.replace('.', '').isupper() for w in words if w.replace('.', '').isalpha())
+        if all_caps:
+            author = ' '.join(w.title() for w in words)
+    return author
+
+
+def _format_citation_date(pub_date: Optional[str]) -> str:
+    """Parse a date string into 'Month Year' format."""
+    if not pub_date:
+        return 'N.D.'
+    try:
+        date_obj = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
+        return date_obj.strftime('%B %Y')
+    except Exception:
+        return pub_date
+
+
+def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None) -> Dict[str, Dict]:
+    """
+    Build a citation map for converting (doc_id, qa-N) placeholders to (Author, Date) format.
+
+    Keys:
+        - Summaries: keyed by document_id  (e.g. "req_20260108_025143_005")
+        - QA items:  keyed by "doc_id__qa-N" composite  (e.g. "doc_2432eb5092b5__qa-3")
+          where N is 1-indexed matching the grounding text numbering.
+
+    Returns:
+        { key: { author, date, card_type, card_index } }
+    """
+    logger.info(f"🗺️ build_citation_map called with {len(retrieved_docs)} docs, {len(retrieved_qa) if retrieved_qa else 0} QA items")
+    citation_map = {}
+
+    # Process summary documents
+    for index, doc in enumerate(retrieved_docs):
+        doc_id = doc.document_id if hasattr(doc, 'document_id') else doc.get('document_id')
+        doc_metadata = doc.doc_metadata if hasattr(doc, 'doc_metadata') else doc.get('doc_metadata', {})
+
+        authors_list = doc_metadata.get('authors', [])
+        if isinstance(authors_list, list) and authors_list:
+            raw_author = authors_list[0]
+        else:
+            raw_author = doc_metadata.get('author') or doc_metadata.get('publisher') or 'Unknown'
+        author = _clean_author_name(raw_author)
+        formatted_date = _format_citation_date(
+            doc_metadata.get('publication_date') or doc_metadata.get('creation_date')
+        )
+
+        citation_map[doc_id] = {
+            "author": author,
+            "date": formatted_date,
+            "card_type": "sum",
+            "card_index": index
+        }
+
+    # Process QA items — use composite key "doc_id__qa-N" (1-indexed)
+    if retrieved_qa:
+        for index, qa in enumerate(retrieved_qa):
+            qa_metadata = qa.get('doc_metadata', {})
+            doc_id = qa_metadata.get('document_id', qa.get('document_id', 'unknown'))
+
+            author = _clean_author_name(
+                qa_metadata.get('author') or qa_metadata.get('publisher') or 'Unknown'
+            )
+            formatted_date = _format_citation_date(
+                qa_metadata.get('publication_date') or qa_metadata.get('creation_date')
+            )
+
+            qa_num = index + 1  # 1-indexed to match grounding text numbering
+            composite_key = f"{doc_id}__qa-{qa_num}"
+
+            citation_map[composite_key] = {
+                "author": author,
+                "date": formatted_date,
+                "card_type": "qa",
+                "card_index": index
+            }
+
+    return citation_map
+
 
 def dot_product_similarity(query_embedding: List[float], doc_embedding: List[float]) -> float:
     """Calculate dot product similarity between query and document embeddings."""
@@ -389,15 +505,17 @@ async def generate_llm_response(query: str, top_summaries: List[Dict], temperatu
         doc_id = summary.get('document_id', 'unknown')
         source_url = summary.get('source_url', 'N/A')
         doc_metadata = summary.get('doc_metadata', {})
-        pub_date = doc_metadata.get('publication_date', 'N/A')
+        pub_date = doc_metadata.get('publication_date', 'N.D.')
         summary_text = summary.get('summary_text', '')
 
         # Extract author/publisher
         author = doc_metadata.get('authors', [])
         if isinstance(author, list) and author:
-            author = author[0]
+            author = _clean_author_name(author[0])
         elif not author:
-            author = doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown')
+            author = _clean_author_name(doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown'))
+        else:
+            author = _clean_author_name(author)
 
         # Create URL stub
         url_stub = 'N/A'
@@ -479,10 +597,11 @@ def build_qa_grounding_text(qa_items: List[Dict]) -> str:
 
         # Extract metadata for citation formatting
         doc_metadata = item.get('doc_metadata', {})
-        author = doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown')
+        doc_id = doc_metadata.get('document_id', 'unknown')
+        author = _clean_author_name(doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown'))
 
         # Format date
-        date_str = 'N/A'
+        date_str = 'N.D.'
         creation_date = doc_metadata.get('creation_date') or doc_metadata.get('publication_date')
         if creation_date:
             try:
@@ -491,10 +610,10 @@ def build_qa_grounding_text(qa_items: List[Dict]) -> str:
             except:
                 date_str = creation_date[:10] if len(creation_date) >= 10 else creation_date
 
-        # Create citation reference
+        # Create citation reference with document_id for traceability
         citation = f"{author} [qa-{i}], {date_str}"
 
-        lines.append(f"QA Pair {i}:\nCitation: ({citation})\nQ: {q}\nA: {a}\nContext: {c}")
+        lines.append(f"QA Pair {i}:\nDocument ID: {doc_id}\nCitation: ({citation})\nCite as: ({doc_id}, qa-{i})\nQ: {q}\nA: {a}\nContext: {c}")
 
     return "\n\n".join(lines)
 
@@ -822,9 +941,11 @@ async def query_llm(request: QueryLLMRequest):
             retrieved_docs = []
             for result in results:
                 summary = result['summary']
+                source_url = summary.get('source_url', 'N/A')
                 retrieved_docs.append(DocumentResult(
                     document_id=summary.get('document_id', 'unknown'),
-                    source_url=summary.get('source_url', 'N/A'),
+                    source_url=source_url,
+                    source_url_display=decode_url_for_display(source_url),  # Add decoded URL for display
                     publication_date=summary.get('doc_metadata', {}).get('publication_date'),
                     similarity_score=result['similarity'],
                     summary_text=summary.get('summary_text', ''),
@@ -836,6 +957,11 @@ async def query_llm(request: QueryLLMRequest):
             if request.use_qa:
                 logger.info(f"[{request_id}] Searching QA index (top_k={request.qa_top_k})...")
                 qa_grounding = await search_qa_index(query=request.query, top_k=request.qa_top_k)
+
+                # Add source_url_display to QA items
+                for qa_item in qa_grounding.get("qa_items", []):
+                    if 'source_url' in qa_item:
+                        qa_item['source_url_display'] = decode_url_for_display(qa_item['source_url'])
 
         # Step 2: Generate LLM response based on mode
         logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")
@@ -880,6 +1006,16 @@ async def query_llm(request: QueryLLMRequest):
         execution_time_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[{request_id}] Query LLM completed: {len(retrieved_docs)} docs, {execution_time_ms:.2f}ms")
+
+        # Build citation map for converting (doc_id, qa-N) -> (Author, Date) in frontend
+        logger.info(f"[{request_id}] Building citation map...")
+        logger.info(f"[{request_id}]   Retrieved docs: {len(retrieved_docs)}")
+        logger.info(f"[{request_id}]   QA items: {len(qa_grounding.get('qa_items', []))}")
+
+        citation_map = build_citation_map(retrieved_docs, qa_grounding.get("qa_items"))
+
+        logger.info(f"[{request_id}] Citation map built with {len(citation_map)} entries")
+        logger.info(f"[{request_id}] Citation map keys: {list(citation_map.keys())[:5]}...")  # Show first 5
 
         # Return appropriate response based on mode
         if request.mode == 'search':
@@ -927,7 +1063,8 @@ async def query_llm(request: QueryLLMRequest):
                     "max_tokens": request.max_tokens
                 },
                 prompt=full_prompt,
-                retrieved_qa=qa_grounding.get("qa_items")
+                retrieved_qa=qa_grounding.get("qa_items"),
+                citation_map=citation_map  # Add citation map for frontend
             )
 
     except HTTPException:

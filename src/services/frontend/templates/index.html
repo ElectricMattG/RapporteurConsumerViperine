@@ -162,7 +162,7 @@
                     <h4>Query Settings</h4>
                     <div class="setting-item">
                         <label for="summariesTopK">Number of Summaries:</label>
-                        <input type="number" id="summariesTopK" class="setting-input" min="1" max="100" value="25">
+                        <input type="number" id="summariesTopK" class="setting-input" min="1" max="100" value="10">
                     </div>
                 </div>
 
@@ -175,7 +175,11 @@
                     </div>
                     <div class="setting-item">
                         <label for="qaTopK">Number of Q&A Pairs:</label>
-                        <input type="number" id="qaTopK" class="setting-input" min="1" max="50" value="5">
+                        <input type="number" id="qaTopK" class="setting-input" min="1" max="50" value="10">
+                    </div>
+                    <div class="setting-item checkbox-item">
+                        <input type="checkbox" id="citationDebug">
+                        <label for="citationDebug">Citation Debug (show [qa-N])</label>
                     </div>
                 </div>
 

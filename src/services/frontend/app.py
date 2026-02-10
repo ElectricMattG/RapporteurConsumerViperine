@@ -144,7 +144,8 @@ def query_rag():
                 "total_retrieved": rag_response.get('total_retrieved'),
                 "llm_model": rag_response.get('llm_model'),
                 "llm_params": rag_response.get('llm_params'),
-                "date_filters": data.get('start_date') or data.get('end_date')
+                "date_filters": data.get('start_date') or data.get('end_date'),
+                "citation_map": rag_response.get('citation_map', {})
             }
         }
 

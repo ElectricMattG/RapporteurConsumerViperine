@@ -25,6 +25,9 @@ let settings = {
     qa: {
         include_qa: true,
         qa_top_k: 5
+    },
+    display: {
+        citation_debug: false
     }
 };
 
@@ -65,6 +68,7 @@ const metaQuery = document.getElementById('metaQuery');
 const summariesTopKInput = document.getElementById('summariesTopK');
 const includeQaCheckbox = document.getElementById('includeQa');
 const qaTopKInput = document.getElementById('qaTopK');
+const citationDebugCheckbox = document.getElementById('citationDebug');
 
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
@@ -169,7 +173,8 @@ function loadSettings() {
             settings = {
                 metadata: { ...settings.metadata, ...(parsed.metadata || {}) },
                 query: { ...settings.query, ...(parsed.query || {}) },
-                qa: { ...settings.qa, ...(parsed.qa || {}) }
+                qa: { ...settings.qa, ...(parsed.qa || {}) },
+                display: { ...settings.display, ...(parsed.display || {}) }
             };
             console.log('✅ Settings loaded from localStorage');
         }
@@ -190,6 +195,9 @@ function loadSettings() {
     includeQaCheckbox.checked = settings.qa.include_qa !== false;
     qaTopKInput.value = settings.qa.qa_top_k || 5;
     qaTopKInput.disabled = !includeQaCheckbox.checked;
+    if (citationDebugCheckbox) {
+        citationDebugCheckbox.checked = settings.display.citation_debug === true;
+    }
 }
 
 function saveSettings() {
@@ -206,6 +214,7 @@ function saveSettings() {
         settings.query.summaries_top_k = parseInt(summariesTopKInput.value, 10) || 25;
         settings.qa.include_qa = includeQaCheckbox.checked;
         settings.qa.qa_top_k = parseInt(qaTopKInput.value, 10) || 5;
+        settings.display.citation_debug = citationDebugCheckbox ? citationDebugCheckbox.checked : false;
 
         // Save to localStorage
         localStorage.setItem('rag_settings', JSON.stringify(settings));
@@ -299,6 +308,11 @@ includeQaCheckbox.addEventListener('change', () => {
     saveSettings();
 });
 qaTopKInput.addEventListener('input', debouncedSave);
+if (citationDebugCheckbox) {
+    citationDebugCheckbox.addEventListener('change', () => {
+        saveSettings();
+    });
+}
 
 // ============================================================================
 // Event Listeners
@@ -348,6 +362,15 @@ importFileInput.addEventListener('change', (e) => {
     if (file) {
         importSession(file);
         e.target.value = ''; // Reset input
+    }
+});
+
+// Citation link click handler - using event delegation
+document.addEventListener('click', (e) => {
+    if (e.target.classList.contains('citation-link')) {
+        e.preventDefault();
+        const cardId = e.target.dataset.cardId;
+        scrollToAndHighlightCard(cardId);
     }
 });
 
@@ -517,6 +540,194 @@ async function handleSendQuery() {
     }
 }
 
+/**
+ * Convert citation placeholders into clickable links
+ * @param {string} content - The markdown/HTML content with citation placeholders
+ * @param {Object} citationMap - Map of doc_id to citation info {author, date, card_type, card_index}
+ * @returns {string} Content with citations as clickable links
+ */
+function renderCitationsAsLinks(content, citationMap, citationDebug) {
+    console.log('🔗 renderCitationsAsLinks called, debug:', citationDebug);
+    console.log('   Citation map keys:', citationMap ? Object.keys(citationMap).length : 0);
+
+    if (!citationMap || Object.keys(citationMap).length === 0) {
+        console.warn('⚠️ No citation map provided or empty');
+        return content;
+    }
+
+    // Step 1: Split semicolon-separated citation groups into individual citations.
+    // e.g. "(doc_XXX, qa-7; doc_YYY, qa-15)" → "(doc_XXX, qa-7); (doc_YYY, qa-15)"
+    let processed = content.replace(/\(([^)]*;[^)]*)\)/g, (match, inner) => {
+        // Only split if it looks like citation pairs (contains doc_ or req_)
+        if (!inner.match(/doc_|req_/i)) return match;
+        const parts = inner.split(/;\s*/).map(p => `(${p.trim()})`);
+        return parts.join('; ');
+    });
+
+    // Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary)
+    const citationPattern = /\(([a-z0-9_]+),\s*(qa-\d+|summary)\)/gi;
+
+    // Sentinel to mark resolved citations for post-processing
+    const CITE_SENTINEL = '\x00CITE';
+    let resolvedCitations = []; // collect citation objects for grouping
+    let replacementCount = 0;
+
+    const result = processed.replace(citationPattern, (match, docId, refType) => {
+        // Try composite key first (for QA: "doc_XXX__qa-N"), then plain docId (for summaries)
+        const compositeKey = `${docId}__${refType}`;
+        const citationInfo = citationMap[compositeKey] || citationMap[docId];
+
+        if (!citationInfo) {
+            console.warn(`   ⚠️ No citation info for: ${compositeKey} or ${docId}`);
+            return match;
+        }
+
+        const cardId = `${citationInfo.card_type}-${citationInfo.card_index}`;
+        const isQa = citationInfo.card_type === 'qa';
+        replacementCount++;
+
+        if (citationDebug) {
+            // Debug mode: always show [qa-N] for QA citations, render individually
+            let displayText;
+            if (isQa) {
+                displayText = `(${citationInfo.author}, ${citationInfo.date} [${refType}])`;
+            } else {
+                displayText = `(${citationInfo.author}, ${citationInfo.date})`;
+            }
+            return `<a href="#${cardId}" class="citation-link" data-card-id="${cardId}">${displayText}</a>`;
+        }
+
+        // Non-debug mode: emit a sentinel placeholder for later grouping
+        const idx = resolvedCitations.length;
+        resolvedCitations.push({
+            author: citationInfo.author,
+            date: citationInfo.date,
+            cardId: cardId,
+            isQa: isQa,
+            // Parse a sortable date value for ordering within groups
+            dateSort: parseDateForSort(citationInfo.date)
+        });
+        return `${CITE_SENTINEL}[${idx}]`;
+    });
+
+    console.log(`✅ Citation rendering complete: ${replacementCount} replacements made`);
+
+    if (citationDebug || resolvedCitations.length === 0) {
+        return result;
+    }
+
+    // Step 3 (non-debug): Group consecutive citation sentinels separated by "; " or ", "
+    // Pattern: sentinel possibly followed by more sentinels with ; or , separators
+    const groupPattern = new RegExp(
+        `${escapeRegExp(CITE_SENTINEL)}\\[(\\d+)\\]` +
+        `(?:\\s*[;,]\\s*${escapeRegExp(CITE_SENTINEL)}\\[(\\d+)\\])*`,
+        'g'
+    );
+
+    const grouped = result.replace(groupPattern, (match) => {
+        // Extract all indices from the match
+        const idxPattern = new RegExp(`${escapeRegExp(CITE_SENTINEL)}\\[(\\d+)\\]`, 'g');
+        const indices = [];
+        let m;
+        while ((m = idxPattern.exec(match)) !== null) {
+            indices.push(parseInt(m[1], 10));
+        }
+
+        if (indices.length === 0) return match;
+
+        // Single citation — render directly without grouping parentheses
+        if (indices.length === 1) {
+            const c = resolvedCitations[indices[0]];
+            const displayText = `(${c.author}, ${c.date})`;
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">${displayText}</a>`;
+        }
+
+        // Multiple citations — sort by date (newest first), group into single parenthetical
+        const citesForGroup = indices.map(i => resolvedCitations[i]);
+        citesForGroup.sort((a, b) => b.dateSort - a.dateSort);
+
+        // Build grouped citation: (Author, Date; Author2, Date2; ...)
+        // Each segment is independently clickable
+        const segments = citesForGroup.map(c => {
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">${c.author}, ${c.date}</a>`;
+        });
+        return `(${segments.join('; ')})`;
+    });
+
+    // Clean up any remaining ungrouped sentinels (shouldn't happen, but defensive)
+    const leftover = grouped.replace(
+        new RegExp(`${escapeRegExp(CITE_SENTINEL)}\\[(\\d+)\\]`, 'g'),
+        (match, idxStr) => {
+            const c = resolvedCitations[parseInt(idxStr, 10)];
+            if (!c) return match;
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">(${c.author}, ${c.date})</a>`;
+        }
+    );
+
+    return leftover;
+}
+
+/**
+ * Parse a citation date string into a numeric value for sorting.
+ * Returns epoch ms for valid dates, 0 for N.D./unknown.
+ */
+function parseDateForSort(dateStr) {
+    if (!dateStr || dateStr === 'N.D.' || dateStr === 'N/A') return 0;
+    try {
+        const d = new Date(dateStr);
+        return isNaN(d.getTime()) ? 0 : d.getTime();
+    } catch {
+        return 0;
+    }
+}
+
+/** Escape a string for use in a RegExp */
+function escapeRegExp(str) {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Scroll to a card and highlight it with animation
+ * @param {string} cardId - The ID of the card to scroll to (e.g., 'sum-3' or 'qa-7')
+ */
+function scrollToAndHighlightCard(cardId) {
+    const card = document.getElementById(cardId);
+
+    if (!card) {
+        console.warn(`Card not found: ${cardId}`);
+        return;
+    }
+
+    // Scroll the card into view smoothly
+    card.scrollIntoView({ behavior: 'smooth', block: 'center' });
+
+    // Add highlight class
+    card.classList.add('card-highlighted');
+
+    // Remove highlight after 3 seconds
+    setTimeout(() => {
+        card.classList.remove('card-highlighted');
+    }, 3000);
+}
+
+/**
+ * Format an ISO date string to human-readable "Month Year" format.
+ * @param {string} isoDate - ISO date string (e.g. "2025-11-02T19:34:07+00:00")
+ * @returns {string} Formatted date or 'N.D.' if invalid/missing
+ */
+function formatDisplayDate(isoDate) {
+    if (!isoDate || isoDate === 'N/A' || isoDate === 'N.D.') return 'N.D.';
+    try {
+        const d = new Date(isoDate);
+        if (isNaN(d.getTime())) return isoDate;
+        const months = ['January','February','March','April','May','June',
+                        'July','August','September','October','November','December'];
+        return `${months[d.getMonth()]} ${d.getFullYear()}`;
+    } catch {
+        return isoDate;
+    }
+}
+
 function addMessage(role, content, metadata = null) {
     const messageId = `msg-${Date.now()}-${Math.random()}`;
     const messageDiv = document.createElement('div');
@@ -532,7 +743,22 @@ function addMessage(role, content, metadata = null) {
 
     // Render markdown for assistant messages
     if (role === 'assistant') {
-        contentDiv.innerHTML = marked.parse(content);
+        console.log('📝 Adding assistant message');
+        console.log('   Metadata:', metadata);
+        console.log('   Has citation_map:', !!(metadata && metadata.citation_map));
+
+        // First convert citations to links if citation_map is provided
+        let processedContent = content;
+        if (metadata && metadata.citation_map) {
+            console.log('✅ Citation map found, processing citations...');
+            const citDebug = settings.display && settings.display.citation_debug === true;
+            processedContent = renderCitationsAsLinks(content, metadata.citation_map, citDebug);
+        } else {
+            console.warn('⚠️ No citation_map in metadata');
+        }
+
+        // Then parse markdown
+        contentDiv.innerHTML = marked.parse(processedContent);
     } else {
         contentDiv.textContent = content;
     }
@@ -997,9 +1223,10 @@ function updateDocumentList(documents, qaItems) {
         // Sort by relevance (highest similarity first)
         uniqueDocs.sort((a, b) => (b.similarity_score || 0) - (a.similarity_score || 0));
 
-        uniqueDocs.forEach(doc => {
+        uniqueDocs.forEach((doc, index) => {
             const docItem = document.createElement('div');
             docItem.className = 'document-item';
+            docItem.id = `sum-${index}`; // Add ID for citation targeting
 
             // Extract title from metadata or URL
             const title = getDocumentTitle(doc);
@@ -1022,12 +1249,11 @@ function updateDocumentList(documents, qaItems) {
             }
 
             // Publication date
-            if (doc.publication_date) {
-                const dateDiv = document.createElement('div');
-                dateDiv.className = 'doc-meta';
-                dateDiv.innerHTML = `<strong>Date:</strong> ${doc.publication_date}`;
-                docItem.appendChild(dateDiv);
-            }
+            const formattedPubDate = formatDisplayDate(doc.publication_date);
+            const pubDateDiv = document.createElement('div');
+            pubDateDiv.className = 'doc-meta';
+            pubDateDiv.innerHTML = `<strong>Date:</strong> ${formattedPubDate}`;
+            docItem.appendChild(pubDateDiv);
 
             // Relevance score
             const relevanceDiv = document.createElement('div');
@@ -1047,7 +1273,8 @@ function updateDocumentList(documents, qaItems) {
             urlLink.className = 'doc-url';
             urlLink.href = doc.source_url;
             urlLink.target = '_blank';
-            urlLink.textContent = doc.source_url;
+            // Use source_url_display if available (decoded URLs), otherwise use source_url
+            urlLink.textContent = doc.source_url_display || doc.source_url;
             docItem.appendChild(urlLink);
 
             documentList.appendChild(docItem);
@@ -1064,6 +1291,7 @@ function updateDocumentList(documents, qaItems) {
         qaItems.forEach((qa, index) => {
             const qaCard = document.createElement('div');
             qaCard.className = 'document-item qa-card';
+            qaCard.id = `qa-${index}`; // Add ID for citation targeting
 
             // Title with qa number
             const title = (qa.doc_metadata && qa.doc_metadata.title) || 'Q&A Pair';
@@ -1080,10 +1308,11 @@ function updateDocumentList(documents, qaItems) {
             qaCard.appendChild(authorDiv);
 
             // Date
-            const dateStr = (qa.doc_metadata && (qa.doc_metadata.creation_date || qa.doc_metadata.publication_date)) || 'N/A';
+            const rawDate = (qa.doc_metadata && (qa.doc_metadata.creation_date || qa.doc_metadata.publication_date)) || '';
+            const formattedQaDate = formatDisplayDate(rawDate);
             const dateDiv = document.createElement('div');
             dateDiv.className = 'doc-meta';
-            dateDiv.innerHTML = `<strong>Date:</strong> ${dateStr}`;
+            dateDiv.innerHTML = `<strong>Date:</strong> ${formattedQaDate}`;
             qaCard.appendChild(dateDiv);
 
             // Relevance score (orange)
@@ -1119,7 +1348,8 @@ function updateDocumentList(documents, qaItems) {
                 urlLink.className = 'doc-url qa-url';
                 urlLink.href = qa.source_url;
                 urlLink.target = '_blank';
-                urlLink.textContent = qa.source_url;
+                // Use source_url_display if available (decoded URLs), otherwise use source_url
+                urlLink.textContent = qa.source_url_display || qa.source_url;
                 qaCard.appendChild(urlLink);
             }
 

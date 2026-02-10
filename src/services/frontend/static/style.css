@@ -762,6 +762,50 @@ body {
 }
 
 /* ============================================================================
+   Citation Links
+   ============================================================================ */
+
+.citation-link {
+    color: #9ca3af;
+    text-decoration: none;
+    cursor: pointer;
+    padding: 0;
+    border-radius: 0;
+    transition: color 0.2s ease;
+    display: inline;
+}
+
+.citation-link:hover {
+    color: #d1d5db;
+    text-decoration: underline;
+}
+
+/* Card highlight animation when citation is clicked */
+.card-highlighted {
+    animation: highlightPulse 3s ease-in-out;
+    border-color: #f97316 !important; /* Orange highlight */
+    box-shadow: 0 0 20px rgba(249, 115, 22, 0.5);
+}
+
+@keyframes highlightPulse {
+    0% {
+        background-color: rgba(249, 115, 22, 0.3);
+        transform: scale(1);
+    }
+    10% {
+        background-color: rgba(249, 115, 22, 0.5);
+        transform: scale(1.02);
+    }
+    90% {
+        background-color: rgba(249, 115, 22, 0.3);
+    }
+    100% {
+        background-color: transparent;
+        transform: scale(1);
+    }
+}
+
+/* ============================================================================
    Scrollbar Styling
    ============================================================================ */
 
