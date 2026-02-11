@@ -27,6 +27,21 @@
                 {% if metadata.description %}
                 <tr><td class="meta-label">Description:</td><td>{{ metadata.description }}</td></tr>
                 {% endif %}
+                {% if metadata.source %}
+                <tr><td class="meta-label">Source:</td><td>{{ metadata.source }}</td></tr>
+                {% endif %}
+                {% if metadata.coverage %}
+                <tr><td class="meta-label">Coverage:</td><td>{{ metadata.coverage }}</td></tr>
+                {% endif %}
+                {% if metadata.entry_point %}
+                <tr><td class="meta-label">Entry Point:</td><td>{{ metadata.entry_point }}</td></tr>
+                {% endif %}
+                {% if metadata.locale %}
+                <tr><td class="meta-label">Locale:</td><td>{{ metadata.locale }}</td></tr>
+                {% endif %}
+                {% if metadata.query %}
+                <tr><td class="meta-label">Query:</td><td>{{ metadata.query }}</td></tr>
+                {% endif %}
             </table>
         </div>
         {% endif %}

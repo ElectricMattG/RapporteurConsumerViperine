@@ -77,8 +77,8 @@ def format_author_name(name: str) -> str:
     author = unquote(name.strip())
     words = author.split()
 
-    # Handle long names (>4 words) - likely includes extra text
-    if len(words) > 4:
+    # Handle long names (>6 words) - likely includes extra text
+    if len(words) > 6:
         # Check if first OR second word is an initial (single letter followed by period)
         # Examples: "N. M. Peter..." or "Nancy M. Smith..."
         has_initial = False
@@ -217,6 +217,9 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
     # Extract document ID
     doc_id = doc_metadata.get('document_id') or doc_metadata.get('doc_id') or 'unknown'
 
+    # Decode URL for display (convert %D8%A7 etc. to Arabic)
+    decoded_url = unquote(source_url)
+
     # Build formatted citation string (doc_id suppressed from display)
     formatted_text = f"{author} ({month_year}). {title}. Published by *{publisher}* on {full_date}."
 
@@ -227,7 +230,7 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
         'month_year': month_year,
         'full_date': full_date,
         'title': title,
-        'url': source_url,
+        'url': decoded_url,
         'doc_id': doc_id,
         'formatted_text': formatted_text
     }
@@ -283,12 +286,15 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
         composite_key = f"{doc_id}__{ref_type}"
         info = citation_map.get(composite_key) or citation_map.get(doc_id)
         if not info:
+            logger.warning(f"⚠️ PDF Citation NOT RESOLVED: ({doc_id}, {ref_type}) - composite_key='{composite_key}', doc_id='{doc_id}' not in citation_map")
+            logger.warning(f"   Available keys in citation_map: {list(citation_map.keys())[:10]}...")
             return match.group(0)  # Leave unresolved
-        author = unquote(info.get('author', 'Unknown'))
-        date = info.get('date', 'N.D.')
-        url = info.get('url', '')
+        author = unquote(info.get('author', 'Unknown')).strip()
+        date = info.get('date', 'N.D.').strip()
+        url = unquote(info.get('url', ''))
         # No parens here — sentinels handle grouping
-        display = f"{author}, {date}"
+        # Remove double commas by ensuring no trailing/leading commas
+        display = f"{author}, {date}".replace(',,', ',').strip(',')
         if url:
             inner = f'<a href="{url}">{display}</a>'
         else:
@@ -297,9 +303,58 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
 
     resolved = citation_pattern.sub(replace_citation, processed)
 
+    # Step 2b: Second pass — catch bare (doc_id) or (doc_id, doc_id, ...) where LLM omitted ref types
+    bare_pattern = re.compile(
+        r'\(((?:(?:doc_|req_)[a-z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-z0-9_]+)*)\)',
+        re.IGNORECASE
+    )
+
+    def replace_bare_citation(match):
+        inner = match.group(1)
+        doc_ids = [s.strip() for s in inner.split(',') if s.strip()]
+        sentinels = []
+        any_resolved = False
+        for doc_id in doc_ids:
+            info = citation_map.get(doc_id)
+            if not info:
+                continue  # Skip unknown doc_ids
+            author = unquote(info.get('author', 'Unknown')).strip()
+            date = info.get('date', 'N.D.').strip()
+            url = unquote(info.get('url', ''))
+            display = f"{author}, {date}".replace(',,', ',').strip(',')
+            if url:
+                cite_inner = f'<a href="{url}">{display}</a>'
+            else:
+                cite_inner = display
+            logger.info(f"   🔧 Bare PDF citation resolved: ({doc_id}) → {display}")
+            sentinels.append(f'\u27e6{cite_inner}\u27e7')
+            any_resolved = True
+        if not any_resolved:
+            return match.group(0)  # None resolved, leave original
+        return '; '.join(sentinels)
+
+    resolved = bare_pattern.sub(replace_bare_citation, resolved)
+
     # Step 3: Merge adjacent sentinels into grouped parentheticals
     # ⟧; ⟦ or ⟧, ⟦ within same run → collapse into single group
     resolved = re.sub(r'\u27e7\s*[;,]\s*\u27e6', '; ', resolved)
+
+    # Step 3b: Dedup within citation groups (same author+date from summary & QA)
+    def dedup_group(match):
+        inner = match.group(1)
+        parts = inner.split('; ')
+        seen = set()
+        deduped = []
+        for part in parts:
+            # Strip HTML tags to compare display text only
+            clean = re.sub(r'<[^>]+>', '', part).strip()
+            if clean not in seen:
+                seen.add(clean)
+                deduped.append(part)
+        return f'\u27e6{"; ".join(deduped)}\u27e7'
+
+    resolved = re.sub(r'\u27e6([^\u27e7]+)\u27e7', dedup_group, resolved)
+
     # Wrap remaining sentinels as parentheses
     resolved = resolved.replace('\u27e6', '(').replace('\u27e7', ')')
 
@@ -415,7 +470,8 @@ def build_pdf_html(
     introduction: str,
     template_path: str,
     css_path: str,
-    citation_map: dict = None
+    citation_map: dict = None,
+    client_metadata: dict = None
 ) -> str:
     """
     Build complete HTML for PDF from template.
@@ -428,6 +484,8 @@ def build_pdf_html(
         introduction: Introduction HTML
         template_path: Path to HTML template
         css_path: Path to CSS file
+        client_metadata: Optional metadata from frontend settings blade
+                         (takes precedence over disk-based metadata)
 
     Returns:
         Complete HTML string
@@ -440,8 +498,13 @@ def build_pdf_html(
     with open(css_path, 'r') as f:
         styles = f.read()
 
-    # Load index metadata
-    index_metadata = load_index_metadata()
+    # Load index metadata: prefer client-side settings blade, fall back to disk file
+    if client_metadata:
+        logger.info(f"Using client metadata from settings blade")
+        index_metadata = client_metadata
+    else:
+        logger.info(f"No client metadata provided, loading from disk")
+        index_metadata = load_index_metadata()
 
     # Format preamble
     current_date = datetime.now().strftime("%B %d, %Y")
@@ -475,9 +538,11 @@ def build_pdf_html(
             metadata = doc.get('doc_metadata', {}).copy()
             if doc_id and 'document_id' not in metadata:
                 metadata['document_id'] = doc_id
+            # CRITICAL: Decode URL for Arabic/Hebrew character display in PDF
+            decoded_url = unquote(source_url)
             all_citations.append({
                 'metadata': metadata,
-                'url': source_url
+                'url': decoded_url
             })
 
     # Add QA citations (deduplicate against summaries)
@@ -495,9 +560,11 @@ def build_pdf_html(
             metadata = qa.get('doc_metadata', {}).copy()
             if doc_id and 'document_id' not in metadata:
                 metadata['document_id'] = doc_id
+            # CRITICAL: Decode URL for Arabic/Hebrew character display in PDF
+            decoded_url = unquote(source_url)
             all_citations.append({
                 'metadata': metadata,
-                'url': source_url
+                'url': decoded_url
             })
 
     # Format citations with sequential numbering
@@ -509,10 +576,15 @@ def build_pdf_html(
     # Prepare metadata for template
     doc_metadata = {
         'index_name': index_metadata.get('index_name', 'Unknown Index'),
-        'model': 'gemini-2.5-flash',  # Could be passed as parameter
+        'model': 'gemini-2.5-flash',
         'index_version': index_metadata.get('index_version', 'Unknown'),
         'generated_date': current_date,
-        'description': index_metadata.get('description', '')
+        'description': index_metadata.get('description', ''),
+        'source': index_metadata.get('source', ''),
+        'coverage': index_metadata.get('coverage', ''),
+        'entry_point': index_metadata.get('entry_point', ''),
+        'locale': index_metadata.get('locale', ''),
+        'query': index_metadata.get('query', '')
     }
 
     # Render template

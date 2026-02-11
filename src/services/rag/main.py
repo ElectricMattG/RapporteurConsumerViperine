@@ -254,8 +254,8 @@ def _clean_author_name(name: str) -> str:
     # Decode URL-encoded characters (e.g. %D8%A7 → Arabic)
     author = unquote(name.strip()).rstrip(',')
     words = author.split()
-    # Long names (>4 words) — likely includes scraped junk
-    if len(words) > 4:
+    # Long names (>6 words) — likely includes scraped junk
+    if len(words) > 6:
         has_initial = (len(words[0]) == 2 and words[0].endswith('.')) or \
                       (len(words) > 1 and len(words[1]) == 2 and words[1].endswith('.'))
         author = ' '.join(words[:3]) if has_initial else ' '.join(words[:2])
@@ -295,19 +295,22 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
     citation_map = {}
 
     # Process summary documents
+    logger.info("📄 Processing summary documents for citation map...")
     for index, doc in enumerate(retrieved_docs):
         doc_id = doc.document_id if hasattr(doc, 'document_id') else doc.get('document_id')
         doc_metadata = doc.doc_metadata if hasattr(doc, 'doc_metadata') else doc.get('doc_metadata', {})
+
+        logger.info(f"   Summary {index}: doc_id='{doc_id}'")
 
         authors_list = doc_metadata.get('authors', [])
         if isinstance(authors_list, list) and authors_list:
             raw_author = authors_list[0]
         else:
             raw_author = doc_metadata.get('author') or doc_metadata.get('publisher') or 'Unknown'
-        author = _clean_author_name(raw_author)
+        author = _clean_author_name(raw_author).strip()
         formatted_date = _format_citation_date(
             doc_metadata.get('publication_date') or doc_metadata.get('creation_date')
-        )
+        ).strip()
 
         # Get source URL for PDF hyperlinks
         source_url = ''
@@ -316,7 +319,7 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
         elif isinstance(doc, dict):
             source_url = doc.get('source_url', '')
 
-        citation_map[doc_id] = {
+        citation_info = {
             "author": author,
             "date": formatted_date,
             "card_type": "sum",
@@ -324,18 +327,26 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
             "url": source_url
         }
 
+        # Add with both doc_id key and doc_id__summary key for consistent resolution
+        citation_map[doc_id] = citation_info
+        citation_map[f"{doc_id}__summary"] = citation_info
+        logger.info(f"      ✅ Added citation_map['{doc_id}'] and ['{doc_id}__summary'] = {author}, {formatted_date}")
+
     # Process QA items — use composite key "doc_id__qa-N" (1-indexed)
     if retrieved_qa:
+        logger.info("❓ Processing QA items for citation map...")
         for index, qa in enumerate(retrieved_qa):
             qa_metadata = qa.get('doc_metadata', {})
             doc_id = qa_metadata.get('document_id', qa.get('document_id', 'unknown'))
 
+            logger.info(f"   QA {index+1}: doc_id='{doc_id}'")
+
             author = _clean_author_name(
                 qa_metadata.get('author') or qa_metadata.get('publisher') or 'Unknown'
-            )
+            ).strip()
             formatted_date = _format_citation_date(
                 qa_metadata.get('publication_date') or qa_metadata.get('creation_date')
-            )
+            ).strip()
 
             qa_num = index + 1  # 1-indexed to match grounding text numbering
             composite_key = f"{doc_id}__qa-{qa_num}"
@@ -350,7 +361,21 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
                 "card_index": index,
                 "url": qa_source_url
             }
+            logger.info(f"      ✅ Added citation_map['{composite_key}'] = {author}, {formatted_date}")
 
+            # Fallback: also key by plain doc_id if no summary entry exists for this doc
+            if doc_id not in citation_map:
+                citation_map[doc_id] = {
+                    "author": author,
+                    "date": formatted_date,
+                    "card_type": "qa",
+                    "card_index": index,
+                    "url": qa_source_url
+                }
+                logger.info(f"      ➕ Added QA fallback citation_map['{doc_id}'] (no summary entry)")
+
+    logger.info(f"✅ Citation map built with {len(citation_map)} total keys")
+    logger.info(f"   Sample keys: {list(citation_map.keys())[:10]}")
     return citation_map
 
 

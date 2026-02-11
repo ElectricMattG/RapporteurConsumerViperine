@@ -369,8 +369,21 @@ importFileInput.addEventListener('change', (e) => {
 document.addEventListener('click', (e) => {
     if (e.target.classList.contains('citation-link')) {
         e.preventDefault();
-        const cardId = e.target.dataset.cardId;
-        scrollToAndHighlightCard(cardId);
+
+        // Try new dynamic lookup first (docId + refType)
+        const docId = e.target.dataset.docId;
+        const refType = e.target.dataset.refType;
+
+        if (docId && refType) {
+            // New method: lookup by document_id
+            console.log(`📍 Citation clicked: docId='${docId}', refType='${refType}'`);
+            scrollToAndHighlightCard(docId, refType);
+        } else {
+            // Fallback: legacy card ID lookup
+            const cardId = e.target.dataset.cardId;
+            console.log(`📍 Citation clicked (legacy): cardId='${cardId}'`);
+            scrollToAndHighlightCard(cardId);
+        }
     }
 });
 
@@ -564,21 +577,24 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         return parts.join('; ');
     });
 
-    // Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary)
-    const citationPattern = /\(([a-z0-9_]+),\s*(qa-\d+|summary)\)/gi;
+    // Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary) or (req_XXX, summary)
+    // IMPORTANT: Pattern must match uppercase letters for req_ prefix
+    const citationPattern = /\(([a-zA-Z0-9_]+),\s*(qa-\d+|summary)\)/gi;
 
     // Sentinel to mark resolved citations for post-processing
     const CITE_SENTINEL = '\x00CITE';
     let resolvedCitations = []; // collect citation objects for grouping
     let replacementCount = 0;
 
-    const result = processed.replace(citationPattern, (match, docId, refType) => {
+    let result = processed.replace(citationPattern, (match, docId, refType) => {
         // Try composite key first (for QA: "doc_XXX__qa-N"), then plain docId (for summaries)
         const compositeKey = `${docId}__${refType}`;
         const citationInfo = citationMap[compositeKey] || citationMap[docId];
 
         if (!citationInfo) {
-            console.warn(`   ⚠️ No citation info for: ${compositeKey} or ${docId}`);
+            console.warn(`   ⚠️ Citation NOT RESOLVED: (${docId}, ${refType})`);
+            console.warn(`      Tried composite_key='${compositeKey}' and doc_id='${docId}'`);
+            console.warn(`      Available keys in citation_map:`, Object.keys(citationMap).slice(0, 20));
             return match;
         }
 
@@ -590,11 +606,13 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
             // Debug mode: always show [qa-N] for QA citations, render individually
             let displayText;
             if (isQa) {
-                displayText = `(${citationInfo.author}, ${citationInfo.date} [${refType}])`;
+                const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+                displayText = `(${text} [${refType}])`;
             } else {
-                displayText = `(${citationInfo.author}, ${citationInfo.date})`;
+                const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+                displayText = `(${text})`;
             }
-            return `<a href="#${cardId}" class="citation-link" data-card-id="${cardId}">${displayText}</a>`;
+            return `<a href="#${cardId}" class="citation-link" data-card-id="${cardId}" data-doc-id="${docId}" data-ref-type="${refType}">${displayText}</a>`;
         }
 
         // Non-debug mode: emit a sentinel placeholder for later grouping
@@ -603,11 +621,57 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
             author: citationInfo.author,
             date: citationInfo.date,
             cardId: cardId,
+            docId: docId,
+            refType: refType,
             isQa: isQa,
             // Parse a sortable date value for ordering within groups
             dateSort: parseDateForSort(citationInfo.date)
         });
         return `${CITE_SENTINEL}[${idx}]`;
+    });
+
+    // Step 2b: Second pass — catch bare (doc_id) or (doc_id, doc_id, ...) where LLM omitted ref types
+    // Matches single or comma-separated lists of doc_/req_ IDs with no qa-N/summary suffix
+    const bareCitationPattern = /\(((?:(?:doc_|req_)[a-zA-Z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-zA-Z0-9_]+)*)\)/gi;
+    result = result.replace(bareCitationPattern, (match, inner) => {
+        // Split comma-separated doc_ids
+        const docIds = inner.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
+        const sentinels = [];
+        let anyResolved = false;
+
+        for (const docId of docIds) {
+            const citationInfo = citationMap[docId];
+            if (!citationInfo) {
+                console.warn(`   ⚠️ Bare citation NOT resolved: ${docId}`);
+                continue; // Skip unknown doc_ids
+            }
+
+            const cardId = `${citationInfo.card_type}-${citationInfo.card_index}`;
+            replacementCount++;
+            anyResolved = true;
+            console.log(`   🔧 Bare citation resolved: (${docId}) → ${citationInfo.author}, ${citationInfo.date}`);
+
+            if (citationDebug) {
+                const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+                sentinels.push(`<a href="#${cardId}" class="citation-link" data-card-id="${cardId}" data-doc-id="${docId}" data-ref-type="summary">(${text})</a>`);
+            } else {
+                const idx = resolvedCitations.length;
+                resolvedCitations.push({
+                    author: citationInfo.author,
+                    date: citationInfo.date,
+                    cardId: cardId,
+                    docId: docId,
+                    refType: 'summary',
+                    isQa: citationInfo.card_type === 'qa',
+                    dateSort: parseDateForSort(citationInfo.date)
+                });
+                sentinels.push(`${CITE_SENTINEL}[${idx}]`);
+            }
+        }
+
+        if (!anyResolved) return match; // None resolved, leave original
+        if (citationDebug) return sentinels.join('; ');
+        return sentinels.join(', '); // Comma-separated sentinels will group in Step 3
     });
 
     console.log(`✅ Citation rendering complete: ${replacementCount} replacements made`);
@@ -638,18 +702,30 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         // Single citation — render directly without grouping parentheses
         if (indices.length === 1) {
             const c = resolvedCitations[indices[0]];
-            const displayText = `(${c.author}, ${c.date})`;
-            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">${displayText}</a>`;
+            const text = `${c.author}, ${c.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+            const displayText = `(${text})`;
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}" data-doc-id="${c.docId}" data-ref-type="${c.refType}">${displayText}</a>`;
         }
 
         // Multiple citations — sort by date (newest first), group into single parenthetical
         const citesForGroup = indices.map(i => resolvedCitations[i]);
         citesForGroup.sort((a, b) => b.dateSort - a.dateSort);
 
+        // Dedup by author+date (same URL can appear from both summary & QA)
+        const seen = new Set();
+        const dedupedCites = citesForGroup.filter(c => {
+            const key = `${c.author}|${c.date}`;
+            if (seen.has(key)) return false;
+            seen.add(key);
+            return true;
+        });
+
         // Build grouped citation: (Author, Date; Author2, Date2; ...)
         // Each segment is independently clickable
-        const segments = citesForGroup.map(c => {
-            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">${c.author}, ${c.date}</a>`;
+        // Remove double commas that might appear
+        const segments = dedupedCites.map(c => {
+            const text = `${c.author}, ${c.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}" data-doc-id="${c.docId}" data-ref-type="${c.refType}">${text}</a>`;
         });
         return `(${segments.join('; ')})`;
     });
@@ -660,7 +736,8 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         (match, idxStr) => {
             const c = resolvedCitations[parseInt(idxStr, 10)];
             if (!c) return match;
-            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}">(${c.author}, ${c.date})</a>`;
+            const text = `${c.author}, ${c.date}`.replace(/,,+/g, ',').replace(/,\\s*,/g, ',').trim();
+            return `<a href="#${c.cardId}" class="citation-link" data-card-id="${c.cardId}" data-doc-id="${c.docId}" data-ref-type="${c.refType}">(${text})</a>`;
         }
     );
 
@@ -706,14 +783,36 @@ function escapeRegExp(str) {
 }
 
 /**
- * Scroll to a card and highlight it with animation
- * @param {string} cardId - The ID of the card to scroll to (e.g., 'sum-3' or 'qa-7')
+ * Scroll to a card and highlight it when a citation is clicked.
+ * Supports both legacy index-based lookup and new document_id-based lookup.
+ * @param {string} cardIdOrDocId - Either a card ID (e.g., 'sum-3') or document_id (e.g., 'req_xyz')
+ * @param {string|null} refType - Reference type ('qa-N' or 'summary'), null for legacy lookup
  */
-function scrollToAndHighlightCard(cardId) {
-    const card = document.getElementById(cardId);
+function scrollToAndHighlightCard(cardIdOrDocId, refType = null) {
+    let card;
+
+    if (refType) {
+        // New dynamic lookup by document_id
+        console.log(`🎯 Dynamic lookup: docId='${cardIdOrDocId}', refType='${refType}'`);
+
+        if (refType.startsWith('qa-')) {
+            // For QA: find by doc_id AND qa number
+            const qaNum = refType.replace('qa-', '');
+            card = document.querySelector(`.document-item[data-doc-id="${cardIdOrDocId}"][data-qa-num="${qaNum}"]`);
+            console.log(`   QA card search: doc_id='${cardIdOrDocId}', qa_num='${qaNum}'`, card ? '✅' : '❌');
+        } else {
+            // For summaries: find by doc_id
+            card = document.querySelector(`.document-item[data-doc-id="${cardIdOrDocId}"]`);
+            console.log(`   Summary card search: doc_id='${cardIdOrDocId}'`, card ? '✅' : '❌');
+        }
+    } else {
+        // Legacy: lookup by card ID (sum-0, qa-5, etc.)
+        card = document.getElementById(cardIdOrDocId);
+        console.log(`   Legacy lookup: cardId='${cardIdOrDocId}'`, card ? '✅' : '❌');
+    }
 
     if (!card) {
-        console.warn(`Card not found: ${cardId}`);
+        console.warn(`⚠️ Card not found:`, {cardIdOrDocId, refType});
         return;
     }
 
@@ -722,10 +821,11 @@ function scrollToAndHighlightCard(cardId) {
 
     // Add highlight class — blue for summaries, orange for QA
     card.classList.remove('card-highlighted', 'card-highlighted-blue');
-    if (cardId.startsWith('sum-')) {
-        card.classList.add('card-highlighted-blue');
-    } else {
+    const isQa = card.dataset.qaNum || card.id?.startsWith('qa-');
+    if (isQa) {
         card.classList.add('card-highlighted');
+    } else {
+        card.classList.add('card-highlighted-blue');
     }
 
     // Remove highlight after 3 seconds
@@ -1251,6 +1351,7 @@ function updateDocumentList(documents, qaItems) {
             const docItem = document.createElement('div');
             docItem.className = 'document-item';
             docItem.id = `sum-${index}`; // Add ID for citation targeting
+            docItem.dataset.docId = doc.document_id || doc.doc_metadata?.document_id || ''; // Store doc_id for lookup
 
             // Extract title from metadata or URL
             const title = getDocumentTitle(doc);
@@ -1316,6 +1417,8 @@ function updateDocumentList(documents, qaItems) {
             const qaCard = document.createElement('div');
             qaCard.className = 'document-item qa-card';
             qaCard.id = `qa-${index}`; // Add ID for citation targeting
+            qaCard.dataset.docId = qa.document_id || qa.doc_metadata?.document_id || ''; // Store doc_id for lookup
+            qaCard.dataset.qaNum = index + 1; // Store 1-indexed QA number
 
             // Title with qa number
             const title = (qa.doc_metadata && qa.doc_metadata.title) || 'Q&A Pair';
@@ -1436,14 +1539,15 @@ async function exportMessagePDF(messageId) {
     try {
         console.log(`📄 Exporting PDF for message: ${messageId}`);
 
-        // Call export API (no UI changes during generation)
+        // Call export API — always include current settings metadata
         const response = await fetch('/api/export_pdf', {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json'
             },
             body: JSON.stringify({
-                message_id: messageId
+                message_id: messageId,
+                metadata: settings.metadata
             })
         });
 

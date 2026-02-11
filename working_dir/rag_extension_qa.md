@@ -811,3 +811,70 @@ by *YouTube* on 03 November 2023.
 [36] Samuel Ben-Ur, Aaron Goren (December 2025). Palestinian terrorists ambush Israeli
 troops in Rafah; IDF reports 7 Gaza ceasefire violations from November 27 to December
 3. Published by *Samuel Ben-Ur, Aaron Goren* on 03 December 2025.
+
+---
+We have some changes to implement:
+(1) The underlying source_url for the citation section contains special chars %D8%A7%A9%D9 which should be rendered as arabic. We should resolve these before using them as hyperlinks. The applied to pdf_generator when the citation section is built.
+
+(2) In the UI when the markdown is displayed some citations are grouped (cite_1);(cite_2);(cite_3); but for multiple citations we want (cite_1;cite_2;cite_3).
+
+(3) In rendered citation some show two ,, (John Do,,2024) but this should be John Do, 2024. This occurs in the markdown and pdf rendered file
+
+(4) The citations in the markdown UI should be the same clouir as the text.
+
+(5) For some reason the summaries don't always resolve we need to ensure that the citation resolution always occurs.
+
+
+---
+Here is an example from the rendered ui when citation debug is true. This may be coming from resolution but they should be formatted differently
+
+ The IDF operates with a highly structured, hierarchical command system. Its operations are managed through distinct commands (Northern, Southern, Central), divisions (e.g., 91st Division Headquarters, 162nd, 98th), and brigades (e.g., Etzioni Brigade, 55th Reserve Brigade, Nahal Brigade), integrating various branches such as infantry, armor, engineering, Air Force, and Navy (i24NEWS Staff, May 2024); (Israel Defense Forces (IDF), December 2025); (Israel Defense Forces, N.D.); (Israel Defense Forces, N.D.). This aggregated structure allows for large-scale, coordinated military exercises, such as those conducted by the Northern Command along Israel's northern border in May 2024, simulating complex combat scenarios in Lebanon (i24NEWS Staff, May 2024); (i24NEWS Staff, May 2024 [qa-31]). The IDF’s operational doctrine is characterised by a defensive strategic posture
+
+ NOT THIS:
+ (i24NEWS Staff, May 2024); (Israel Defense Forces (IDF), December 2025); (Israel Defense Forces, N.D.); (Israel Defense Forces, N.D.).
+
+ THIS:
+ (i24NEWS Staff, May 2024; Israel Defense Forces (IDF), December 2025; (Israel Defense Forces, N.D.; (Israel Defense Forces, N.D.).
+
+ ---
+ Final push let's compare markdown UI with rendered PDF. The markdown UI shows adjacent ref fori24News one a summary and the other a q and a pair. However, the rendered PDF has maintained two refs. This is technically correct but based on the resolved citations we should dedup. Only have one of them especially if they point to the same url.
+
+Mardown UI (debug)
+ (1) This is evident in its Northern Command conducting extensive readiness exercises involving multiple units, including reserve battalions of the Etzioni Brigade, the 91st Division Headquarters, units from Uzbat Hiram, Air Force, logistics, and ICT personnel, along the northern border in May 2024 (i24NEWS Staff, May 2024); (i24NEWS Staff, May 2024 [qa-31]). These exercises are specifically designed to enhance preparedness and competence in various combat scenarios, including simulating complex situations in Lebanon (i24NEWS Staff, May 2024 [qa-31]).
+
+
+Rendered PDF
+ This is evident in its Northern Command conducting extensive readiness exercises involving
+multiple units, including reserve battalions of the Etzioni Brigade, the 91st Division
+Headquarters, units from Uzbat Hiram, Air Force, logistics, and ICT personnel, along the
+northern border in May 2024 (i24NEWS Staff, May 2024; i24NEWS Staff, May 2024). These
+exercises are specifically designed to enhance preparedness and competence in various
+combat scenarios, including simulating complex situations in Lebanon (i24NEWS Staff, May
+2024).
+
+
+If I take it out of debug mode markdown UI
+
+Resistance Forces: While direct details on the resistance forces' command structure are limited, the documents suggest a more adaptable, potentially networked or decentralized model. The term "axis of resistance" (req_20260203_080733_009) implies a coordinated but not necessarily centrally commanded network of groups, including "Hamas and other Iranian-backed groups" (req_20260108_015144_000). The fact that Hamas "managed to regroup after various invasions" (req_20260108_024954_007) suggests a resilient and possibly disaggregated command that can reconstitute itself even after significant losses. This is further highlighted by an IDF review examining "why Hamas regrouped after invasions and how commands performed across the campaign" (The Jerusalem Post | JPost.com, December 2025). From a military perspective, the Resistance has been able to "break the security
+
+There are still unresolved summaries. In debug mode summaries seem to resolve. What the difference between debug enabled and disabled.
+
+So there are two issues to analyse. Let's look at the code and make a decision on what to fix, check the logs. Don't write any code just analyze.
+
+---
+The meta data is set on start up and populated in the setting blade. However, if I change the data in the setting blade, when I publish, the original meta-data is published too. This means that I can't dynamically update meta-data to reflect my current analysis making a rec for replication problematic. When the setting blade changes then all the published data should draw from the settings blade - it has to be dynamic. Explore how when the meta-data changes in setting the state is updated, this may not happen as I suspect. But it should.
+
+Don't write any code, analyse how the pdf_generator uses the meta-data code in the publihsing process. Analyse how updates to state shoudl take place, given a change in meta-data.
+
+Also check
+
+---
+Some of the cards and subsequent the citations have N.D because there is missing date information. This affects completeness of the citations. We need a strategy (a quick fix) so that we can correct this in the UI and update the state for that query. This will enable use to render the citation with updated date information. This is tricky but it provides a quick fix.
+
+We need to reason through this: how does the pdf_generator set the citations if they are resolved in the UI?
+
+Can we update an inject updated data cleanly while keeping complexity low?
+
+We don't want to get into a situation where complexity is high and we regress the code based.
+
+Where are the updated point? Where is the citation data? How can we update it.?

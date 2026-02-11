@@ -230,10 +230,15 @@ def export_pdf():
             retrieved_qa = data.get('retrieved_qa', [])
             citation_map = data.get('citation_map', {})
 
+        # Extract client-side metadata from settings blade (if provided)
+        client_metadata = data.get('metadata')
+
         if not query or not assistant_response:
             return jsonify({"error": "Missing required fields: query and assistant_response"}), 400
 
         logger.info(f"Generating PDF for query: {query[:50]}...")
+        if client_metadata:
+            logger.info(f"Using client metadata from settings blade: {list(client_metadata.keys())}")
 
         # Generate introduction
         introduction = generate_introduction(query, assistant_response, RAG_SERVICE_URL)
@@ -250,7 +255,8 @@ def export_pdf():
             introduction=introduction,
             template_path=template_path,
             css_path=css_path,
-            citation_map=citation_map
+            citation_map=citation_map,
+            client_metadata=client_metadata
         )
 
         # Convert to PDF
