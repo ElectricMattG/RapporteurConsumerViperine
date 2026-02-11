@@ -159,3 +159,6 @@ k8s/README.md
 
 _dedup_check/
 research_results/
+# Large embedding/index files
+research_qa_pairs_with_embeddings_combined.jsonl
+research_summaries_with_embeddings_combined.jsonl
