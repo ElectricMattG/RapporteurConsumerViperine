@@ -31,7 +31,7 @@ services:
       - /home/electric/.config/gcp-keys/rapporteur-sa.json://home/electric/.config/gcp-keys/rapporteur-sa.json:ro
     networks:
       - services-network
-      - scrapelinkedwebsources_kafka-network
+      - rapporteur_app_kafka-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -59,7 +59,7 @@ services:
       - ./src/services/logs:/app/src/services/logs
     networks:
       - services-network
-      - scrapelinkedwebsources_kafka-network
+      - rapporteur_app_kafka-network
     depends_on:
       rag-service:
         condition: service_healthy
@@ -74,5 +74,5 @@ services:
 networks:
   services-network:
     driver: bridge
-  scrapelinkedwebsources_kafka-network:
+  rapporteur_app_kafka-network:
     external: true
