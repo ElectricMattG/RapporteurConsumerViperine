@@ -73,11 +73,12 @@ def format_author_name(name: str) -> str:
     if not name or not name.strip():
         return ""
 
-    author = name.strip()
+    # Decode URL-encoded characters (e.g. %D8%A7 → Arabic)
+    author = unquote(name.strip())
     words = author.split()
 
-    # Handle long names (>5 words) - likely includes extra text
-    if len(words) > 6:
+    # Handle long names (>4 words) - likely includes extra text
+    if len(words) > 4:
         # Check if first OR second word is an initial (single letter followed by period)
         # Examples: "N. M. Peter..." or "Nancy M. Smith..."
         has_initial = False
@@ -216,8 +217,8 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
     # Extract document ID
     doc_id = doc_metadata.get('document_id') or doc_metadata.get('doc_id') or 'unknown'
 
-    # Build formatted citation string with doc_id for cross-referencing
-    formatted_text = f"{author} ({month_year}). {title}. Published by *{publisher}* on {full_date}. [doc_id: {doc_id}]"
+    # Build formatted citation string (doc_id suppressed from display)
+    formatted_text = f"{author} ({month_year}). {title}. Published by *{publisher}* on {full_date}."
 
     return {
         'index': index,
@@ -242,6 +243,75 @@ def markdown_to_html(md_text: str) -> str:
         'nl2br'
     ])
     return md.convert(md_text)
+
+
+def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
+    """
+    Resolve (doc_id, qa-N|summary) placeholders in the assistant response
+    into hyperlinked (Author, Date) citations for PDF export.
+
+    Mirrors the frontend renderCitationsAsLinks logic but outputs HTML <a> tags
+    linking to the source URL instead of card anchors.
+
+    Args:
+        text: Raw assistant response text with citation placeholders
+        citation_map: Map of doc_id/composite_key to {author, date, url, ...}
+
+    Returns:
+        Text with citations resolved as hyperlinked (Author, Date)
+    """
+    if not citation_map:
+        return text
+
+    # Step 1: Split semicolon-separated citation groups into individual citations
+    # e.g. "(doc_XXX, qa-7; doc_YYY, qa-15)" -> "(doc_XXX, qa-7); (doc_YYY, qa-15)"
+    def split_groups(match):
+        inner = match.group(1)
+        if not re.search(r'doc_|req_', inner, re.IGNORECASE):
+            return match.group(0)
+        parts = [f'({p.strip()})' for p in inner.split(';')]
+        return '; '.join(parts)
+
+    processed = re.sub(r'\(([^)]*;[^)]*)\)', split_groups, text)
+
+    # Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary)
+    citation_pattern = re.compile(r'\(([a-z0-9_]+),\s*(qa-\d+|summary)\)', re.IGNORECASE)
+
+    def replace_citation(match):
+        doc_id = match.group(1)
+        ref_type = match.group(2)
+        composite_key = f"{doc_id}__{ref_type}"
+        info = citation_map.get(composite_key) or citation_map.get(doc_id)
+        if not info:
+            return match.group(0)  # Leave unresolved
+        author = unquote(info.get('author', 'Unknown'))
+        date = info.get('date', 'N.D.')
+        url = info.get('url', '')
+        # No parens here — sentinels handle grouping
+        display = f"{author}, {date}"
+        if url:
+            inner = f'<a href="{url}">{display}</a>'
+        else:
+            inner = display
+        return f'\u27e6{inner}\u27e7'  # Sentinel markers ⟦…⟧
+
+    resolved = citation_pattern.sub(replace_citation, processed)
+
+    # Step 3: Merge adjacent sentinels into grouped parentheticals
+    # ⟧; ⟦ or ⟧, ⟦ within same run → collapse into single group
+    resolved = re.sub(r'\u27e7\s*[;,]\s*\u27e6', '; ', resolved)
+    # Wrap remaining sentinels as parentheses
+    resolved = resolved.replace('\u27e6', '(').replace('\u27e7', ')')
+
+    return resolved
+
+
+def merge_adjacent_pdf_citations(html: str) -> str:
+    """
+    Legacy merge function — kept for backwards compatibility.
+    Merging is now handled via sentinel markers in resolve_citations_for_pdf.
+    """
+    return html
 
 
 def load_index_metadata() -> dict:
@@ -344,7 +414,8 @@ def build_pdf_html(
     retrieved_qa: list,
     introduction: str,
     template_path: str,
-    css_path: str
+    css_path: str,
+    citation_map: dict = None
 ) -> str:
     """
     Build complete HTML for PDF from template.
@@ -378,7 +449,12 @@ def build_pdf_html(
     preamble_text = preamble_text.replace('[Current_Date]', current_date)
 
     # Convert assistant response markdown to HTML
-    response_html = markdown_to_html(assistant_response)
+    # First resolve citation placeholders if citation_map is available
+    resolved_response = assistant_response
+    if citation_map:
+        logger.info(f"Resolving {len(citation_map)} citation map entries for PDF")
+        resolved_response = resolve_citations_for_pdf(assistant_response, citation_map)
+    response_html = markdown_to_html(resolved_response)
 
     # Format all citations (summary + QA)
     all_citations = []

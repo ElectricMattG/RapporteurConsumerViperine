@@ -787,6 +787,12 @@ body {
     box-shadow: 0 0 20px rgba(249, 115, 22, 0.5);
 }
 
+.card-highlighted-blue {
+    animation: highlightPulseBlue 3s ease-in-out;
+    border-color: #3b82f6 !important; /* Blue highlight */
+    box-shadow: 0 0 20px rgba(59, 130, 246, 0.5);
+}
+
 @keyframes highlightPulse {
     0% {
         background-color: rgba(249, 115, 22, 0.3);
@@ -798,6 +804,24 @@ body {
     }
     90% {
         background-color: rgba(249, 115, 22, 0.3);
+    }
+    100% {
+        background-color: transparent;
+        transform: scale(1);
+    }
+}
+
+@keyframes highlightPulseBlue {
+    0% {
+        background-color: rgba(59, 130, 246, 0.3);
+        transform: scale(1);
+    }
+    10% {
+        background-color: rgba(59, 130, 246, 0.5);
+        transform: scale(1.02);
+    }
+    90% {
+        background-color: rgba(59, 130, 246, 0.3);
     }
     100% {
         background-color: transparent;

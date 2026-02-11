@@ -109,7 +109,7 @@ def query_rag():
         response = requests.post(
             f"{RAG_SERVICE_URL}/query_llm",
             json=rag_payload,
-            timeout=120
+            timeout=600
         )
         response.raise_for_status()
 
@@ -220,6 +220,7 @@ def export_pdf():
             assistant_response = message.get('assistant_response', '')
             retrieved_docs = message.get('retrieved_docs', [])
             retrieved_qa = message.get('retrieved_qa', [])
+            citation_map = message.get('metadata', {}).get('citation_map', {})
 
         else:
             # Use provided data
@@ -227,6 +228,7 @@ def export_pdf():
             assistant_response = data.get('assistant_response', '')
             retrieved_docs = data.get('retrieved_docs', [])
             retrieved_qa = data.get('retrieved_qa', [])
+            citation_map = data.get('citation_map', {})
 
         if not query or not assistant_response:
             return jsonify({"error": "Missing required fields: query and assistant_response"}), 400
@@ -247,7 +249,8 @@ def export_pdf():
             retrieved_qa=retrieved_qa,
             introduction=introduction,
             template_path=template_path,
-            css_path=css_path
+            css_path=css_path,
+            citation_map=citation_map
         )
 
         # Convert to PDF

@@ -489,3 +489,325 @@ The internal doc_id can be removed from the final citation now.
 
 
 add doc_id back into the ref section
+
+
+---
+when q and a enrichment return the draft looks like this. The ref is related to the doc_id in the grounding data for citations and qa-N is the order of the q and a pair in the citation data. This means we can map back to the citation data for the q and a paire returned by the rag-service.
+
+The official Arabic landing page, for instance, features sections dedicated to various military commands—Northern, Southern, and Central—along with articles and updates related to ongoing conflicts like the Israel-Hamas War and efforts to protect civilians (doc_1f12284b39b3, qa-7). This proactive approach to public relations is critical for shaping public perception and legitimizing military actions. Following investigations, the Chief of Staff emphasized improving communication and information transfer between the Intelligence-Operational Command for the Return of the Hostages (led by MG (Res.) Nitzan Alon) and the Southern Command and field brigades, particularly focusing on reporting suspected signs of hostages from the field to the command (doc_1f12284b39b3, qa-2).
+
+Before rendering the markdown we need to resolve these by looking up the citation and then replacing these in the generated text using RegExp matches. The replace ment should take the meta-data and add an inline citation and update any data stored in the session with the resolved text. The citation formation should be Author, Creation date. Format for date should be (Author, %Month%Year). There should be fallback that capitalises unresolved. However they should all resolve.
+
+So we need an new method that take the generation, resolves citations, and then replaces the stored generation with resolved refs. Don't wirte any code just plan this update.
+
+As an additional function, we need to add a hyperlink so that when we are in the UI we can click and it should scroll the retrieved summaries and pairs and highlight the q and a pair in the UI. So we link to the cards stored.
+
+In the cards, we shpuild ensure that the url is resolved that it displays the arabic text and not other chars.
+
+
+Let's revisit the requirements from our prevoius implementation strategy. Lets"
+
+- view the frontend logs and code to ensure the citation resolution is taking place
+- let's inspect the state from the front-end session to ensure that the doc_ids are resolved
+- let's ensure that the links to the cards are in place
+- all doc_id qa-M are resolved.
+
+From a recent run it appears that the resolution that we were aiming for did not take place:
+
+The documents reveal a consistent pattern of the IDF proactively addressing perceived threats through continuous training and strategic adaptation. The October 7, 2023, attacks serve as a watershed moment, driving significant policy shifts towards a more integrated national defense posture that explicitly includes civilian resilience (JNS Staff, Jan 2026). This shift is supported by ongoing large-scale military exercises designed to test and improve command structures and operational cooperation across different units and geographical regions (أحمد علوى, Jan 2026; i24NEWS Staff, May 2024; doc_1852a417537b, qa-3). Concurrently, the IDF maintains a centralized communication apparatus to control its narrative and justify its actions, including official press releases and dedicated Arabic-language platforms (Israel Defense Forces (IDF), Ongoing; doc_a85703f4211a, qa-7), while also undertaking rigorous internal reviews to learn from past engagements and enhance future effectiveness (YONAH JEREMY BOB, Dec 2025; doc_c190111a87c5, qa-1; doc_f88b56d35706, qa-2). This interconnectedness underscores a holistic approach to national security, where military operations, strategic planning, public relations, and internal accountability are deeply intertwined.clear
+
+I don't see any evidence in the console logs that the code was ran
+
+✅ Settings loaded from localStorage
+app.js:736 🔄 Conversation cleared - fresh context
+app.js:117 🔔 Notification stream initialized
+app.js:87 ✅ SSE connection opened
+app.js:659 ✅ Adding PDF export button for conversation: 0
+app.js:1024 🔍 updateDocumentList called with: Object
+app.js:94 📬 Notification received: Object
+app.js:99 ✅ Connected to notification stream
+app.js:94 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-09T17:42:49.990935'}
+app.js:1261 📄 Exporting PDF for message: 0
+app.js:1299 ✅ PDF exported: Compare_and_contrast_the_two_forces_20260209_174304.pdf
+(index):1 The file at 'blob:http://192.168.1.3:5001/0e171c11-0324-4aec-9bca-fbc40c0c8a3d' was loaded over an insecure connection. This file should be served over HTTPS.Understand this error
+app.js:94 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-09T17:43:04.991176'}
+app.js:94 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-09T17:43:19.991420'}
+app.js:94 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-09T17:43:34.991661'}
+
+There are no links
+
+Withupdated service:
+
+📝 Adding assistant message
+app.js:618    Metadata: {date_filters: null, execution_time_ms: 48662.35065460205, llm_model: 'gemini-2.5-flash', llm_params: {…}, message_id: 1, …}
+app.js:619    Has citation_map: false
+app.js:627 ⚠️ No citation_map in metadata
+addMessage @ app.js:627
+handleSendQuery @ app.js:466Understand this warning
+app.js:681 ✅ Adding PDF export button for conversation: 1
+app.js:482 📊 Query response data: {retrieved_docs_count: 5, retrieved_qa_count: 15, retrieved_qa_present: true, retrieved_qa_sample: {…}, metadata: {…}, …}
+app.js:499 🎨 Calling updateDocumentList with: {docs_count: 5, qa_count: 15}
+app.js:1046 🔍 updateDocumentList called with: {documents_type: 'object', documents_count: 5, qaItems_type: 'object', qaItems_count: 15, qaItems_isArray: true, …}
+app.js:94 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-09T17:51:21.533601'}
+
+run rag service in terminal and grep the citation map
+
+Citation map present but it doesn't contain keys for the q and a pairs, only for summaries
+
+📝 Adding assistant message
+app.js:618    Metadata:
+{citation_map: {…}, date_filters: null, execution_time_ms: 53745.87059020996, llm_model: 'gemini-2.5-flash', llm_params: {…}, …}
+citation_map
+:
+req_20260202_160259_001
+:
+{author: 'Unknown', card_index: 4, card_type: 'sum', date: 'N/A'}
+req_20260202_161255_000
+:
+{author: 'Unknown', card_index: 1, card_type: 'sum', date: 'N/A'}
+req_20260203_071144_001
+:
+{author: 'Law for Palestine Organization', card_index: 3, card_type: 'sum', date: 'January 2023'}
+req_20260203_083336_000
+:
+{author: 'YouTube', card_index: 0, card_type: 'sum', date: 'December 2024'}
+req_20260203_095649_002
+:
+{author: 'YouTube', card_index: 2, card_type: 'sum', date: 'October 2014'}
+unknown
+:
+{author: 'Associated Press', card_index: 14, card_type: 'qa', date: 'February 2024'}
+[[Prototype]]
+:
+Object
+date_filters
+:
+null
+execution_time_ms
+:
+53745.87059020996
+llm_model
+:
+"gemini-2.5-flash"
+llm_params
+:
+{max_tokens: 16000, temperature: 0.7}
+message_id
+:
+0
+mode
+:
+"ask"
+qa_top_k
+:
+15
+request_id
+:
+"7a1bc8fb-7965-4873-be2d-f2ec437d02cf"
+session_id
+:
+"query_1770660266"
+total_retrieved
+:
+5
+use_qa
+:
+true
+[[Prototype]]
+:
+Object
+app.js:619    Has citation_map: true
+app.js:624 ✅ Citation map found, processing citations...
+app.js:536 🔗 renderCitationsAsLinks called
+app.js:537    Citation map:
+{req_20260202_160259_001: {…}, req_20260202_161255_000: {…}, req_20260203_071144_001: {…}, req_20260203_083336_000: {…}, req_20260203_095649_002: {…}, …}
+req_20260202_160259_001
+:
+{author: 'Unknown', card_index: 4, card_type: 'sum', date: 'N/A'}
+req_20260202_161255_000
+:
+{author: 'Unknown', card_index: 1, card_type: 'sum', date: 'N/A'}
+req_20260203_071144_001
+:
+{author: 'Law for Palestine Organization', card_index: 3, card_type: 'sum', date: 'January 2023'}
+req_20260203_083336_000
+:
+{author: 'YouTube', card_index: 0, card_type: 'sum', date: 'December 2024'}
+req_20260203_095649_002
+:
+{author: 'YouTube', card_index: 2, card_type: 'sum', date: 'October 2014'}
+unknown
+:
+{author: 'Associated Press', card_index: 14, card_type: 'qa', date: 'February 2024'}
+[[Prototype]]
+:
+Object
+app.js:538    Citation map keys: 6
+app.js:574 ✅ Citation rendering complete: 0 replacements made
+app.js:681 ✅ Adding PDF export button for conversation: 0
+app.js:482 📊 Query response data:
+{retrieved_docs_count: 5, retrieved_qa_count: 15, retrieved_qa_present: true, retrieved_qa_sample: {…}, metadata: {…}, …}
+app.js:499 🎨 Calling updateDocumentList with:
+{docs_count: 5, qa_count: 15}
+app.js:1046 🔍 updateDocumentList called with:
+{documents_type: 'object', documents_count: 5, qaItems_type: 'object', qaItems_count: 15, qaItems_isArray: true, …}
+app.js:94 📬 Notification received:
+{type: 'heartbeat', timestamp: '2026-02-09T18:05:32.603933'}
+app.js:94 📬 Notification received:
+{type: 'heartbeat', timestamp: '2026-02-09T18:05:47.604160'}
+app.js:94 📬 Notification received:
+{type: 'heartbeat', timestamp: '2026-02-09T18:06:02.604398'}
+﻿
+
+Press cmd i to turn on code suggestions. Press cmd x to disable code suggestions.
+cmd
+i
+ to turn on code suggestions. Don't show again
+
+ Further reinforcing the continuous monitoring of the situation are reports such as the "Human Rights Scene Report for Palestine" (تقرير المشهد الحقوقي لفلسطين) (doc_1223963491f6, qa-9) and the "Monthly Report July 2023" (التقرير الشهري يوليو \ تموز 2023) published by the 'Department of Negotiation Affairs' (دائرة شؤون المفاوضات) (doc_9d63c434948a, qa-13), which collectively illustrate the breadth and ongoing nature of documentation efforts related to human rights and political developments in the region.
+
+ doc_1223963491f6, qa-9
+
+ Tkae a moment to refelct. Recursliveu scan the code for the draft and frontend to scan the branches to see why the actual q and a pairs aren't mapped.
+
+ ---
+ There are some areas that require cleaning up:
+ The citation resolution is taking place and the citations are populating. The core text is stored as state in the front-end while the markdown is rendered. The links are working and can locate the associated q and a pairs.
+
+- There are some edge-cases where resolution fails, all mentions should resolve:
+
+The documents collectively highlight a persistent and often escalating pattern of rocket attacks emanating from Palestinian-controlled territories and allied groups in neighboring states against Israel. These attacks consistently provoke Israeli retaliatory actions, typically involving airstrikes targeting militant infrastructure. A key theme is the multi-front nature of these conflicts, involving not only Gaza but also Lebanon and Syria. For instance, reports confirm the launching of rockets from Lebanon towards Israel *(سكاي نيوز عربية, April 2023), with specific instances detailing Israel attacking southern Lebanon and Hezbollah launching rockets in response **(doc_3ac209efc138, qa-7; doc_a82863da8959, qa-15)**. The central role of various non-state actors, including Hamas, Palestinian Islamic Jihad, Liwa al-Quds, and Hezbollah, is evident. The articles underscore the cyclical violence, often triggered by specific political or religious tensions, and the ongoing international efforts, or lack thereof, to de-escalate hostilities.
+** show inresolved
+* did resolve
+
+ - TODO:
+ * update the css so the links are more integrated and less prominent. This means the text colour is just noticably different, make it an light grey so that we can see it against the white body text. Also allow the text to wrap across lines, even if it is a hyperlink.
+ * In the pdf_generator, when we build ref sections we use some functions to handle malformed or misscraped metadata. For example, handling author names with word counts. These string processing technique can be leveraged to shape the inline citation. Explore these approaches in: /home/electric/workspace/ScrapeLinkedWebSources/src/services/frontend/pdf_generator.py This is fundamentally a retro-fit.
+ * We need to ensure that the config map has some processing applied to it and that it's complete so that the citations resolve and are placed in the text.
+
+see below for more examples
+
+Key Findings and Insights for Legal and Policy Researchers
+Persistent Threat and Asymmetric Warfare: The articles underscore the enduring security challenge posed by Palestinian rocket attacks. Records from 2023 (Wikimedia contributors, 2023) and even projected into 2025 (Contributors to Wikimedia projects, 2025) demonstrate a continuous reliance on rockets and mortars by groups like Hamas and Palestinian Islamic Jihad (doc_8237b4a6cf77, qa-2; doc_440a39c1be28, qa-18). For example, a report from May 2024 detailed 12 rockets fired from Gaza towards Israeli communities, with 5 intercepted (Emanuel Fabian, May 2024). The "Strategic Assessment 2025" and weekly war summaries by IDSF-Habithonistim's Research Department further reflect this ongoing threat (doc_933d628e2ba3, qa-22; doc_debdbfe18877, qa-20), with Israeli Army data for 2025 being a subject of analysis (يحيى قاسم, January 2026). For legal researchers, this highlights the complexities of applying International Humanitarian Law (IHL) to asymmetric conflicts where non-state actors employ indiscriminate weapons against civilian populations, a clear violation of the principle of distinction. Policy researchers must grapple with strategies for deterrence and defense against such persistent threats. The Al-Qassam Brigades, for example, have demonstrated operational sophistication by anticipating Israeli operations based on seized intelligence, allowing them to identify targets and expected routes for new operations (الجزيرة نت, February 2024). They also actively announce military actions, such as the killing of Israeli soldiers (جريدة الراية, August 2024).
+
+Multi-Front Escalation and State Responsibility: A critical insight is the expansion of rocket attacks beyond Gaza, originating from Southern Lebanon and Syria, as detailed in April 2023 (Contributors to Wikimedia projects, Apr 2023). These incidents, including "rocket salvoes from Syria targeting the occupied Golan Heights," and significant barrages from Lebanon, raise complex questions of state responsibility under international law. While specific details were not always provided, rocket attacks "From Lebanon" were noted in April 2023 (المساهمون في مشاريع ويكيميديا, May 2025).
+
+Let's recursivley scan the code and then plan the up dates. Don't write any code, just assess and plan the updates.
+
+Issue 1 - that is not an issues because the doc is the same but appended is a qa-1 etc thus the doc can be mapped and the uniquenss of the q and a pair is maintained. There is a one-to-many mapping of document to q and a pairs.
+
+Issue 2 - we need multiple content groups.
+
+Issue 3 - Ignore summaries for now, we only need to deal with q and a pairs.
+
+
+---
+There are some minor formatting issues:
+
+(1) double comma's: (Joshua Davidovich,, N/A), (Michael N. Schmitt,, October 2024) this has to do with the multiple authors.
+
+(2) two quotations next two each other for different pairs: (IDSF, N/A); (IDSF, N/A). Here we should have  (IDSF, N/A [qa-1]); (IDSF, N/A [qa-2]).
+
+(3) Date formats, where there is no date in the meta-data an N/A is created, but our citations and referencing should use N.D. instead as this signifies no date. Don't use N/A or null.
+
+(4) Standardising date formatting in the cards: 2025-11-02T19:34:07+00:00.
+
+Another specific incident involved approximately 40 rockets fired from Lebanon at the Galilee Panhandle and Golan Heights, claimed by Hezbollah as a response to IDF airstrikes in Lebanon (Joshua Davidovich,, N/A).
+
+The "List of Palestinian operations against Israel (2023)" covers the period leading up to and following October 7, 2023, which marked the beginning of the broader Israel-Hamas war (Wikimedia contributors, 2023). Documentation surrounding October 7 includes accounts of sex assaults, instructions for the attack given by Yahya al-Sinwar, operational plans, and civilian casualties, drawing from sources like the Daily Mail and the Israel Foreign Ministry (Michael N. Schmitt,, October 2024).
+
+Other future-oriented documents include "A reading of the Israeli Army's data for 2025" by Yahya Qassem (يحيى قاسم, January 2026), a "Palestinian-Israeli War Timeline" covering January to March 2025 (المساهمون في مشاريع ويكيميديا, March 2025), and the "Strategic Assessment 2025" from IDSF-Habithonistim's Research Department, which also produces "Israel Weekly War Summaries" focusing on the Israel-Hamas war and Iranian Axis hostilities (IDSF, N/A); (IDSF, N/A).
+
+Documentation surrounding October 7 includes accounts of sex assaults, instructions for the attack given by Yahya al-Sinwar, operational plans, and civilian casualties, drawing from sources like the Daily Mail and the Israel Foreign Ministry (Michael N. Schmitt,, October 2024).
+
+Assess these and the source code. Let's formulate the final updates.
+
+---
+final update
+
+Below we see an extract with resolve q and a pairs: all the q and a dervie citations have qa-N, this is useful for audit purposes, but not always necessary. Let's restrict these:
+
+(1) by default they are not part of the citation, but we can opt to include them if we include an env_var CITATION_DEBUG=True. Or a config variable that set citation_debug=true. Otherwise, don't render with qa-N. This provide flexibilty to dynamically render depending on use needs. By default that are turned off.
+
+missiles against Israeli aircraft (الجزيرة نت, May 2023); (الجزيرة نت, May 2023 [qa-16]). This raises significant policy questions regarding the effectiveness of existing interdiction measures and potential illicit supply chains, impacting international non-proliferation and arms control efforts. The presence of anti-tank shells ("Al-Yassin 105") and anti-personnel explosives (عبد الوهاب الجندى, May 2024; Press TV Website Staff, Nov 2024) further demonstrates an adaptable and diversified arsenal. Specifically, Al-Qassam Brigades have targeted Israeli bulldozers with 'Yassin 105' shells (Sayed Ahmed, July 2024 [qa-3]), and anti-tank missiles were used extensively in Jabalia, with 120 fired in a single week (IDSF, N.D. [qa-18]). Other groups like Al-Aqsa Martyrs' Brigades have deployed anti-tank shells against military vehicles, while Al-Quds Brigades have used "pre-planted high-explosive barrel bombs" to destroy Israeli vehicles (المساهمون في مشاريع ويكيميديا, December 2024 [qa-15]). The use of "anti-personnel devices" and machine guns in ambushes by Al-Qassam Brigades (أنباء إكسبريس, August 2024 [qa-23]) and the intensification of "explosive devices" by resistance in Jenin (المساهمون في مشاريع ويكيميديا, August 2024 [qa-22]), including "homemade explosives" that disabled armored vehicles (موقع التقرير العربي, N.D. [qa-9]), further illustrate this diverse arsenal. Mortar shells have also been consistently employed, with Al-Qassam Brigades and Al-Quds Brigades targeting Israeli forces and vehicles with both standard and "heavy mortar shells" in Rafah (الجزيرة نت, May 2024 [qa-25]).
+
+(2) Multiple citation: (Sayed Ahmed, July 2024 [qa-3]); (المساهمون في مشاريع ويكيميديا, December 2024 [qa-15]); (أنباء إكسبريس, August 2024 [qa-23]); (موقع التقرير العربي, N.D. [qa-9]); (المساهمون في مشاريع ويكيميديا, June 2023 [qa-10]), as in: Anti-tank shells (Al-Yassin 105), various explosive devices (including "pre-planted high-explosive barrel bombs" and "anti-personnel devices"), and "homemade explosives" are consistently used in direct engagements and ambushes against military vehicles and personnel (عبد الوهاب الجندى, May 2024); (Press TV Website Staff, Nov 2024); (Al Jazeera Net, Jun 2024); (Sayed Ahmed, July 2024 [qa-3]); (المساهمون في مشاريع ويكيميديا, December 2024 [qa-15]); (أنباء إكسبريس, August 2024 [qa-23]); (موقع التقرير العربي, N.D. [qa-9]); (المساهمون في مشاريع ويكيميديا, June 2023 [qa-10]). Mortar shells, including "heavy mortar shells," and surface-to-air missiles also appear (Press TV Website Staff, Nov 2024); (الجزيرة نت, May 2024 [qa-25]); (الجزيرة نت, May 2023 [qa-16]).
+
+should be dealt with differently when CITATION_DEBUG=False. Rather group them:
+
+(Sayed Ahmed, July 2024 [qa-3]); (المساهمون في مشاريع ويكيميديا, December 2024 [qa-15]); (أنباء إكسبريس, August 2024 [qa-23]); (موقع التقرير العربي, N.D. [qa-9]); (المساهمون في مشاريع ويكيميديا, June 2023 [qa-10]),
+
+(Sayed Ahmed, July 2024, المساهمون في مشاريع ويكيميديا, December 2024, أنباء إكسبريس, August 2024, موقع التقرير العربي, N.D., المساهمون في مشاريع ويكيميديا, June 2023)
+
+(3) The order when CITATION_DEBUG=False should be grouped should be order either by date of author surname, this can be tricky when there are different languages.
+
+
+
+
+Some final check the double ,, is still present (منذر قروي,, December 2024), there should be one , only. OTher than that beautiful
+
+More advanced and diverse munitions include 'Rajoum' short-range rockets of 114mm caliber used by Al-Qassam Brigades (المساهمون في مشاريع ويكيميديا, August 2024; الجزيرة نت, June 2024), and the deployment of a Zuwari drone to target a military site in Jabalia (منذر قروي,, December 2024). Resistance in the West Bank has also shown adaptability, employing shooting from passing vehicles without explosives or rockets, a tactic effective due to quick withdrawal and car burning for concealment (مركز رؤية للتنمية السياسية, September 2023).
+
+---
+We want to repeat this with the summaries now. As we did with the q and a we want the summaries to render
+
+(1) summaries reflec the document identifier now when they are generated: "document_id": "req_20260107_221154_000"
+
+In much the same way we did with q and a pairs, we want to do with summaries. We want to use the state data from the call that contains the summaries meta-data to resolve the document_id with the summaries and build a reference.citation using the same approach to the as citations: same rules, same formatting, same approach verbatim. (Author, Date)
+
+(1) linke to scrollable card on the left
+(2) have the same fomratting and style, indisinguishable from the q and a approach
+(3) reusing the logic from the prevoius approach will enable this.
+
+---
+
+The author filed in the cards for summaries and citations should nbe dealth with as with do with other, take the first N word if leng > K number of words.
+
+Joshua Davidovich Follow You will receive email alerts from this author. Manage alert preferences on your profile page You will no longer receive email alerts from this author. Manage alert preferences on your profile page and ToI Staf
+
+
+Here we see citation are seriated in brackets. If citations are adjacent as detected by regExp we should merge them:
+
+(Yumna Patel, June 2023); (Jerusalem Post Staff, June 2024)
+(Yumna Patel, June 2023; Jerusalem Post Staff, June 2024)
+
+(Jerusalem Post Staff, June 2024); (Israel Defense Forces (IDF), August 2024)
+(Jerusalem Post Staff, June 2024; Israel Defense Forces (IDF), August 2024)
+
+Exploiting Terrain and Infrastructure: Operations in Jenin and Rafah highlight the use of urban terrain and underground infrastructure to negate Israeli air superiority (Yumna Patel, June 2023); (Jerusalem Post Staff, June 2024). Israeli forces acknowledge using drones for reconnaissance and targeting in such environments (Jerusalem Post Staff, June 2024); (Israel Defense Forces (IDF), August 2024).
+
+Exploiting Terrain and Infrastructure: Operations in Jenin and Rafah highlight the use of urban terrain and underground infrastructure to negate Israeli air superiority (Yumna Patel, June 2023; Jerusalem Post Staff, June 2024). Israeli forces acknowledge using drones for reconnaissance and targeting in such environments (Jerusalem Post Staff, June 2024; Israel Defense Forces (IDF), August 2024).
+
+---
+Finally, let's take the logic we use for citation resolution for summaries and q and a pairs. That is the req_ and the doc_ resolution, using the state from the response and add this to the /home/electric/workspace/ScrapeLinkedWebSources/src/services/frontend/pdf_generator.py. This should allows us to resolve in excately the same way as we did in the UI, but for export PDFs. In the PDF though, lets add hyperlinks, so that the in-line citation links out to the web-site.
+
+We have the logic and plan for this. Let's analyse the code and come up with a plan to add this to /home/electric/workspace/ScrapeLinkedWebSources/src/services/frontend/pdf_generator.py
+
+---
+Ensure the embedding hyperlinke are resolved so that any char %J%I%5%9 are rendered as arabic.
+
+Groups of links  (Contributors to
+Wikimedia projects, 2024); (Abdullah Amin, December 2023); (IDF Media Center, February
+2024); (Peter Beaumont, December 2023); (IDF, December 2023); (IDF, Media Center,
+,الجزيرة نت( ;)2024 May ,عبد الوهاب الجندى( ;)2024 January 2024); (Emanuel Fabian, May
+May 2024); (Emanuel Fabian, November 2023); (Unknown, May 2024); (Andie Parry,
+March 2024); (IDF, June 2024).
+
+should be merged
+
+(Contributors to Wikimedia projects, 2024; Abdullah Amin, December 2023; IDF Media Center, February
+2024; Peter Beaumont, December 2023; IDF, December 2023; I...).
+
+Supress doc and rec id [35] Unknown (November 2023). Battle of Tel al-Hawa, Gaza, Palestine 3-11-2023. Published
+by *YouTube* on 03 November 2023. [doc_id: req_20260203_081208_001]
+[36] Samuel Ben-Ur, Aaron Goren (December 2025). Palestinian terrorists ambush Israeli
+troops in Rafah; IDF reports 7 Gaza ceasefire violations from November 27 to December
+3. Published by *Samuel Ben-Ur, Aaron Goren* on 03 December 2025. [doc_id:
+doc_af51f527d0c0]
+
+
+Supress doc and rec id [35] Unknown (November 2023). Battle of Tel al-Hawa, Gaza, Palestine 3-11-2023. Published
+by *YouTube* on 03 November 2023.
+[36] Samuel Ben-Ur, Aaron Goren (December 2025). Palestinian terrorists ambush Israeli
+troops in Rafah; IDF reports 7 Gaza ceasefire violations from November 27 to December
+3. Published by *Samuel Ben-Ur, Aaron Goren* on 03 December 2025.

@@ -613,7 +613,7 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
     console.log(`✅ Citation rendering complete: ${replacementCount} replacements made`);
 
     if (citationDebug || resolvedCitations.length === 0) {
-        return result;
+        return mergeAdjacentCitations(result);
     }
 
     // Step 3 (non-debug): Group consecutive citation sentinels separated by "; " or ", "
@@ -664,7 +664,26 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         }
     );
 
-    return leftover;
+    return mergeAdjacentCitations(leftover);
+}
+
+/**
+ * Merge adjacent citation links separated by "); (" into a single grouped parenthetical.
+ * e.g. (Author, Date); (Author2, Date2) → (Author, Date; Author2, Date2)
+ * Works on already-rendered <a> citation links.
+ */
+function mergeAdjacentCitations(html) {
+    // Match: (<a ...>text</a>)  followed by ;/,/whitespace  then  (<a ...>text</a>)
+    // Repeat to handle chains of 3+
+    const adjacentPattern = /\(<a ([^>]+)>([^<]+)<\/a>\)\s*[;,]\s*\(<a ([^>]+)>([^<]+)<\/a>\)/g;
+    let prev = '';
+    let result = html;
+    // Iteratively merge pairs until stable (handles chains of 3+)
+    while (result !== prev) {
+        prev = result;
+        result = result.replace(adjacentPattern, '(<a $1>$2</a>; <a $3>$4</a>)');
+    }
+    return result;
 }
 
 /**
@@ -701,12 +720,17 @@ function scrollToAndHighlightCard(cardId) {
     // Scroll the card into view smoothly
     card.scrollIntoView({ behavior: 'smooth', block: 'center' });
 
-    // Add highlight class
-    card.classList.add('card-highlighted');
+    // Add highlight class — blue for summaries, orange for QA
+    card.classList.remove('card-highlighted', 'card-highlighted-blue');
+    if (cardId.startsWith('sum-')) {
+        card.classList.add('card-highlighted-blue');
+    } else {
+        card.classList.add('card-highlighted');
+    }
 
     // Remove highlight after 3 seconds
     setTimeout(() => {
-        card.classList.remove('card-highlighted');
+        card.classList.remove('card-highlighted', 'card-highlighted-blue');
     }, 3000);
 }
 

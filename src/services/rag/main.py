@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).parent / "src"))
 from src.clients.embedding_client import EmbeddingServiceClient
 from src.clients.llm_gcp_client import GeminiLLMClient
 from src.prompts.q_a import build_qa_refinement_prompt
+from src.prompts.summaries import build_summary_prompt
 
 # Configure logging
 logging.basicConfig(
@@ -250,10 +251,11 @@ def _clean_author_name(name: str) -> str:
     """Clean author name: truncate long names, title-case ALL CAPS, preserve acronyms."""
     if not name or not name.strip():
         return 'Unknown'
-    author = name.strip().rstrip(',')
+    # Decode URL-encoded characters (e.g. %D8%A7 → Arabic)
+    author = unquote(name.strip()).rstrip(',')
     words = author.split()
-    # Long names (>6 words) — likely includes scraped junk
-    if len(words) > 6:
+    # Long names (>4 words) — likely includes scraped junk
+    if len(words) > 4:
         has_initial = (len(words[0]) == 2 and words[0].endswith('.')) or \
                       (len(words) > 1 and len(words[1]) == 2 and words[1].endswith('.'))
         author = ' '.join(words[:3]) if has_initial else ' '.join(words[:2])
@@ -307,11 +309,19 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
             doc_metadata.get('publication_date') or doc_metadata.get('creation_date')
         )
 
+        # Get source URL for PDF hyperlinks
+        source_url = ''
+        if hasattr(doc, 'source_url'):
+            source_url = doc.source_url or ''
+        elif isinstance(doc, dict):
+            source_url = doc.get('source_url', '')
+
         citation_map[doc_id] = {
             "author": author,
             "date": formatted_date,
             "card_type": "sum",
-            "card_index": index
+            "card_index": index,
+            "url": source_url
         }
 
     # Process QA items — use composite key "doc_id__qa-N" (1-indexed)
@@ -330,11 +340,15 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
             qa_num = index + 1  # 1-indexed to match grounding text numbering
             composite_key = f"{doc_id}__qa-{qa_num}"
 
+            # Get source URL for PDF hyperlinks
+            qa_source_url = qa.get('source_url') or qa_metadata.get('source_url', '')
+
             citation_map[composite_key] = {
                 "author": author,
                 "date": formatted_date,
                 "card_type": "qa",
-                "card_index": index
+                "card_index": index,
+                "url": qa_source_url
             }
 
     return citation_map
@@ -497,80 +511,7 @@ async def generate_llm_response(query: str, top_summaries: List[Dict], temperatu
 
     Returns: (llm_response, full_prompt)
     """
-    # Format summaries for context
-    summaries_text = []
-    for i, result in enumerate(top_summaries, 1):
-        summary = result['summary']
-        score = result['similarity']
-        doc_id = summary.get('document_id', 'unknown')
-        source_url = summary.get('source_url', 'N/A')
-        doc_metadata = summary.get('doc_metadata', {})
-        pub_date = doc_metadata.get('publication_date', 'N.D.')
-        summary_text = summary.get('summary_text', '')
-
-        # Extract author/publisher
-        author = doc_metadata.get('authors', [])
-        if isinstance(author, list) and author:
-            author = _clean_author_name(author[0])
-        elif not author:
-            author = _clean_author_name(doc_metadata.get('author') or doc_metadata.get('publisher', 'Unknown'))
-        else:
-            author = _clean_author_name(author)
-
-        # Create URL stub
-        url_stub = 'N/A'
-        if source_url != 'N/A':
-            try:
-                from urllib.parse import urlparse
-                parsed = urlparse(source_url)
-                url_stub = parsed.netloc.replace('www.', '')
-                # Shorten YouTube URLs
-                if 'youtube.com' in url_stub or 'youtu.be' in url_stub:
-                    url_stub = 'youtube.com'
-            except:
-                url_stub = source_url[:30] + '...'
-
-        # Format date
-        date_str = pub_date
-        if pub_date != 'N/A':
-            try:
-                date_obj = datetime.strptime(pub_date, '%Y-%m-%d')
-                date_str = date_obj.strftime('%b %Y')
-            except:
-                pass
-
-        # Create citation reference
-        citation = f"{author}, {date_str}, {url_stub}"
-
-        summaries_text.append(
-            f"Summary {i} (similarity: {score:.4f}):\n"
-            f"Citation: {citation}\n"
-            f"Full URL: {source_url}\n"
-            f"Content: {summary_text}\n"
-        )
-
-    context = "\n\n".join(summaries_text)
-
-    prompt = f"""Given these summaries, that contain key information from reputable news sources and sometimes international agencies, synthesise the information to communicate the key facts, events and outcomes, with reference to dates if available. All events are real events they are not hypothetical scenarios so treat them as such.
-
-    The synthesis of should incorporate the available context to provide a new document that yeilds insights and understanding, not just repeating facts from the different documents. The document should speak to legal and policy researchers highlight policy and legal aspects of the documents. Cite the documents as below. When you cite summaries, don't refer to them as 'summaries', rather refer to them as 'artilces' and/or 'documents.'
-
-IMPORTANT: When citing sources, use this format: (Author/Publisher, Date) - for example: (Al-Jazeera, Nov 2023) and then hyperlink to the actual url, but don't display the url use the text as an anchor.
-Use the Citation information provided for each summary to create your references.
-
-Original Query: {query}
-
-Top {len(top_summaries)} Summaries:
-
-{context}
-
-Please provide:
-1. A high-level overview of the main themes across these summaries
-2. Key findings or insights that emerge
-3. Any patterns or connections between the summaries
-4. Notable differences or contrasting viewpoints if any
-
-Overview:"""
+    prompt = build_summary_prompt(query, top_summaries, clean_author_fn=_clean_author_name)
 
     logger.info(f"Generating LLM response with {len(top_summaries)} summaries as grounding")
 
