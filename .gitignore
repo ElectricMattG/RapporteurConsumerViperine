@@ -158,6 +158,10 @@ k8s/kafka-kraft-direct.yaml
 k8s/README.md
 
 _dedup_check/
+
+# JSONL data files in root
+/*.jsonl
+/*.jsonl.bak.*
 research_results/
 # Large embedding/index files
 research_qa_pairs_with_embeddings_combined.jsonl
