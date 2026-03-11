@@ -26,7 +26,7 @@ import numpy as np
 from confluent_kafka import Producer
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
@@ -69,6 +69,7 @@ class ServiceState:
         self.unlinked_enrichments: Dict[str, List[Dict]] = {}
         self.linked_index_path: Optional[str] = None
         self.unlinked_index_path: Optional[str] = None
+        self.enrichment_retriever = None  # EnrichmentRetriever, instantiated at startup
 
 state = ServiceState()
 
@@ -84,6 +85,21 @@ class SearchRequest(BaseModel):
     start_date: Optional[str] = Field(None, description="Filter start date (YYYY-MM-DD)")
     end_date: Optional[str] = Field(None, description="Filter end date (YYYY-MM-DD)")
     post_filter_top_k: Optional[int] = Field(None, description="Post-filter top-k by date")
+    enrich: bool = Field(default=False, description="Include BBOA media enrichment in results")
+    enrich_types: List[str] = Field(default=["all"], description="Enrichment type filter: events, executive_orders, media, risk, all")
+    get_linked: bool = Field(default=False, description="Include event-linked records and expand to all articles for matched events")
+
+    @field_validator("enrich_types")
+    @classmethod
+    def validate_enrich_types(cls, v: List[str]) -> List[str]:
+        valid = {"events", "executive_orders", "media", "risk", "all"}
+        invalid = [t for t in v if t not in valid]
+        if invalid:
+            raise ValueError(
+                f"Unknown enrich_types: {invalid!r}. "
+                f"Valid values: {sorted(valid)}"
+            )
+        return v
 
 class QueryLLMRequest(SearchRequest):
     """Request model for query_llm endpoint (extends SearchRequest)."""
@@ -114,6 +130,7 @@ class SearchResponse(BaseModel):
     retrieved_docs: List[DocumentResult]
     total_retrieved: int
     execution_time_ms: float
+    enrichment_results: Optional[List[Dict]] = None
 
 class QueryLLMResponse(SearchResponse):
     """Response model for query_llm endpoint (extends SearchResponse)."""
@@ -139,6 +156,21 @@ class GroundingPreviewRequest(BaseModel):
     post_filter_top_k: Optional[int] = Field(None, description="Post-filter top-k by date")
     use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
     qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=50)
+    enrich: bool = Field(default=False, description="Include BBOA media enrichment in preview")
+    enrich_types: List[str] = Field(default=["all"], description="Enrichment type filter: events, executive_orders, media, risk, all")
+    get_linked: bool = Field(default=False, description="Include event-linked records and expand to all articles for matched events")
+
+    @field_validator("enrich_types")
+    @classmethod
+    def validate_enrich_types(cls, v: List[str]) -> List[str]:
+        valid = {"events", "executive_orders", "media", "risk", "all"}
+        invalid = [t for t in v if t not in valid]
+        if invalid:
+            raise ValueError(
+                f"Unknown enrich_types: {invalid!r}. "
+                f"Valid values: {sorted(valid)}"
+            )
+        return v
 
 
 class GroundingPreviewResponse(BaseModel):
@@ -151,6 +183,8 @@ class GroundingPreviewResponse(BaseModel):
     retrieved_qa: Optional[List[Dict]] = None
     total_retrieved: int
     execution_time_ms: float
+    enrichment_results: Optional[List[Dict]] = None
+    enrichment_preview: Optional[str] = None
 
 
 # ============================================================================
@@ -625,13 +659,19 @@ async def search_qa_index(
     }
 
 
-async def generate_llm_response(query: str, top_summaries: List[Dict], temperature: float, max_tokens: int) -> tuple[str, str]:
+async def generate_llm_response(query: str, top_summaries: List[Dict], temperature: float, max_tokens: int, enrichment_text: str = "") -> tuple[str, str]:
     """
     Generate LLM response using retrieved summaries as grounding.
+
+    Args:
+        enrichment_text: Optional BBOA enrichment context block appended after
+            primary grounding to give the LLM additional event/media/risk context.
 
     Returns: (llm_response, full_prompt)
     """
     prompt = build_summary_prompt(query, top_summaries, clean_author_fn=_clean_author_name)
+    if enrichment_text:
+        prompt = prompt + "\n\n" + enrichment_text
 
     logger.info(f"Generating LLM response with {len(top_summaries)} summaries as grounding")
 
@@ -786,10 +826,10 @@ async def startup_event():
     """Load index and initialize clients on startup."""
     logger.info("🚀 Starting Summary Query Service...")
 
-    # Index path - use root level index with 131 summaries
-    # Path calculation: main.py is in src/services/rag/, so go up 3 levels to project root
+    # Index path - env var override for dev/demo; falls back to project root combined file
     project_root = Path(__file__).parent.parent.parent.parent
-    index_path = project_root / "research_summaries_with_embeddings_combined.jsonl"
+    index_env = os.environ.get('INDEX_PATH')
+    index_path = Path(index_env) if index_env else project_root / "research_summaries_with_embeddings_combined.jsonl"
 
     # Check if index exists
     if not index_path.exists():
@@ -838,6 +878,14 @@ async def startup_event():
         f"📎 Enrichment indices: linked={len(state.linked_enrichments)} URLs, "
         f"unlinked={len(state.unlinked_enrichments)} URLs"
     )
+
+    from src.services.rag.enrichment_retriever import \
+        EnrichmentRetriever  # noqa: E402
+    state.enrichment_retriever = EnrichmentRetriever(
+        linked_map=state.linked_enrichments,
+        unlinked_map=state.unlinked_enrichments,
+    )
+    logger.info("✅ EnrichmentRetriever ready")
 
     # Initialize clients
     logger.info("🔧 Initializing embedding client...")
@@ -965,6 +1013,15 @@ async def search(request: SearchRequest):
                 doc_metadata=summary.get('doc_metadata', {})
             ))
 
+        # Enrichment lookup (optional)
+        enrichment_results = None
+        if request.enrich and state.enrichment_retriever and retrieved_docs:
+            urls = [doc.source_url for doc in retrieved_docs]
+            enrichment_results = state.enrichment_retriever.lookup(
+                urls, enrich_types=request.enrich_types, get_linked=request.get_linked
+            )
+            logger.info(f"[{request_id}] Enrichment: {len(enrichment_results)} records")
+
         execution_time_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[{request_id}] Search completed: {len(retrieved_docs)} docs, {execution_time_ms:.2f}ms")
@@ -981,7 +1038,8 @@ async def search(request: SearchRequest):
             },
             retrieved_docs=retrieved_docs,
             total_retrieved=len(retrieved_docs),
-            execution_time_ms=execution_time_ms
+            execution_time_ms=execution_time_ms,
+            enrichment_results=enrichment_results,
         )
 
     except Exception as e:
@@ -1053,6 +1111,21 @@ async def query_llm(request: QueryLLMRequest):
                     if 'source_url' in qa_item:
                         qa_item['source_url_display'] = decode_url_for_display(qa_item['source_url'])
 
+        # Enrichment lookup (optional; used in ask mode to augment LLM grounding)
+        enrichment_results = None
+        enrichment_text = ""
+        if request.enrich and state.enrichment_retriever and retrieved_docs:
+            urls = [doc.source_url for doc in retrieved_docs]
+            enrichment_results = state.enrichment_retriever.lookup(
+                urls, enrich_types=request.enrich_types, get_linked=request.get_linked
+            )
+            if enrichment_results:
+                enrichment_text = state.enrichment_retriever.format_for_grounding(enrichment_results)
+                logger.info(
+                    f"[{request_id}] Enrichment: {len(enrichment_results)} records "
+                    f"for {len(urls)} primary docs"
+                )
+
         # Step 2: Generate LLM response based on mode
         logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")
 
@@ -1078,7 +1151,8 @@ async def query_llm(request: QueryLLMRequest):
                 query=request.query,
                 top_summaries=results,
                 temperature=request.temperature,
-                max_tokens=request.max_tokens
+                max_tokens=request.max_tokens,
+                enrichment_text=enrichment_text,
             )
 
             # Optional QA refinement (second-stage prompt)
@@ -1154,7 +1228,8 @@ async def query_llm(request: QueryLLMRequest):
                 },
                 prompt=full_prompt,
                 retrieved_qa=qa_grounding.get("qa_items"),
-                citation_map=citation_map  # Add citation map for frontend
+                citation_map=citation_map,
+                enrichment_results=enrichment_results,
             )
 
     except HTTPException:
@@ -1202,6 +1277,18 @@ async def grounding_preview(request: GroundingPreviewRequest):
         if request.use_qa:
             qa_grounding = await search_qa_index(query=request.query, top_k=request.qa_top_k)
 
+        # Enrichment lookup (optional)
+        enrichment_results = None
+        enrichment_preview = None
+        if request.enrich and state.enrichment_retriever and retrieved_docs:
+            urls = [doc.source_url for doc in retrieved_docs]
+            enrichment_results = state.enrichment_retriever.lookup(
+                urls, enrich_types=request.enrich_types, get_linked=request.get_linked
+            )
+            if enrichment_results:
+                enrichment_preview = state.enrichment_retriever.format_for_grounding(enrichment_results)
+                logger.info(f"[{request_id}] Enrichment preview: {len(enrichment_results)} records")
+
         execution_time_ms = (time.time() - start_time) * 1000
 
         return GroundingPreviewResponse(
@@ -1212,7 +1299,9 @@ async def grounding_preview(request: GroundingPreviewRequest):
             retrieved_docs=retrieved_docs,
             retrieved_qa=qa_grounding.get("qa_items"),
             total_retrieved=len(retrieved_docs),
-            execution_time_ms=execution_time_ms
+            execution_time_ms=execution_time_ms,
+            enrichment_results=enrichment_results,
+            enrichment_preview=enrichment_preview,
         )
 
     except Exception as e:
