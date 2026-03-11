@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 import uuid
@@ -63,6 +64,11 @@ class ServiceState:
         self.embedding_client: Optional[EmbeddingServiceClient] = None
         self.llm_client: Optional[GeminiLLMClient] = None
         self.startup_time: Optional[datetime] = None
+        # Enrichment indices: keyed by normalised URL → list of matching records
+        self.linked_enrichments: Dict[str, List[Dict]] = {}
+        self.unlinked_enrichments: Dict[str, List[Dict]] = {}
+        self.linked_index_path: Optional[str] = None
+        self.unlinked_index_path: Optional[str] = None
 
 state = ServiceState()
 
@@ -229,6 +235,60 @@ def load_qa_index(index_path: str) -> List[Dict]:
     return qa_items
 
 
+def load_enrichment_index(index_path: str) -> Dict[str, List[Dict]]:
+    """
+    Load an enrichment JSONL file (linked or unlinked) into a URL-keyed lookup map.
+
+    Each record is stored under its normalised ``link`` value.  Multiple records
+    that share the same normalised URL (e.g. same article appearing in different
+    time windows) are collected into a list so no data is silently dropped.
+
+    Returns an empty dict and logs a warning on any IO or parse error so the
+    caller can continue with graceful degradation.
+    """
+    lookup: Dict[str, List[Dict]] = {}
+    if not index_path:
+        return lookup
+
+    path = Path(index_path)
+    if not path.exists():
+        logger.warning(f"⚠️  Enrichment index not found: {index_path}; skipping")
+        return lookup
+
+    malformed = 0
+    loaded = 0
+    try:
+        with open(path, 'r') as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError as e:
+                    malformed += 1
+                    logger.debug(f"Skipping malformed enrichment line: {e}")
+                    continue
+
+                raw_url = record.get('link', '')
+                key = normalise_url(raw_url)
+                if not key:
+                    continue
+
+                lookup.setdefault(key, []).append(record)
+                loaded += 1
+
+    except OSError as e:
+        logger.warning(f"⚠️  Could not read enrichment index {index_path}: {e}; skipping")
+        return {}
+
+    if malformed:
+        logger.warning(f"Enrichment index {path.name}: skipped {malformed} malformed lines")
+
+    logger.info(f"✅ Loaded enrichment index {path.name}: {loaded} records → {len(lookup)} unique URLs")
+    return lookup
+
+
 def decode_url_for_display(url: str) -> str:
     """
     Decode percent-encoded URLs for human-readable display.
@@ -245,6 +305,26 @@ def decode_url_for_display(url: str) -> str:
     except Exception as e:
         logger.warning(f"Failed to decode URL: {url}, error: {e}")
         return url  # Return original if decoding fails
+
+
+def normalise_url(url: str) -> str:
+    """
+    Produce a stable foreign-key string from a URL for enrichment index lookups.
+
+    Strips scheme (http/https), lowercases the host, removes trailing slash,
+    and drops fragment/query to tolerate minor URL variations between indices.
+    """
+    if not url:
+        return ""
+    # Remove scheme
+    normalised = re.sub(r'^https?://', '', url.strip().lower())
+    # Remove fragment
+    normalised = normalised.split('#')[0]
+    # Remove query string
+    normalised = normalised.split('?')[0]
+    # Strip trailing slash
+    normalised = normalised.rstrip('/')
+    return normalised
 
 
 def _clean_author_name(name: str) -> str:
@@ -736,6 +816,29 @@ async def startup_event():
         state.qa_index_path = str(qa_index_path)
         logger.warning(f"⚠️  QA index not found at {qa_index_path}; continuing with summaries only")
 
+    # Load enrichment indices (linked and unlinked BBOA media)
+    linked_env = os.environ.get('LINKED_INDEX_PATH')
+    unlinked_env = os.environ.get('UNLINKED_INDEX_PATH')
+
+    # Default: find the most-recent timestamped linked/unlinked file in project root
+    def _find_enrichment_file(prefix: str) -> Optional[Path]:
+        candidates = sorted(project_root.glob(f"{prefix}_*.jsonl"), reverse=True)
+        return candidates[0] if candidates else None
+
+    linked_path = Path(linked_env) if linked_env else _find_enrichment_file("linked_media_bboa_full")
+    unlinked_path = Path(unlinked_env) if unlinked_env else _find_enrichment_file("unlinked_media_bboa_full")
+
+    state.linked_index_path = str(linked_path) if linked_path else None
+    state.unlinked_index_path = str(unlinked_path) if unlinked_path else None
+
+    state.linked_enrichments = load_enrichment_index(str(linked_path)) if linked_path else {}
+    state.unlinked_enrichments = load_enrichment_index(str(unlinked_path)) if unlinked_path else {}
+
+    logger.info(
+        f"📎 Enrichment indices: linked={len(state.linked_enrichments)} URLs, "
+        f"unlinked={len(state.unlinked_enrichments)} URLs"
+    )
+
     # Initialize clients
     logger.info("🔧 Initializing embedding client...")
     state.embedding_client = EmbeddingServiceClient()
@@ -814,6 +917,12 @@ async def readiness():
         "index_loaded": state.index_loaded,
         "total_summaries": len(state.summaries),
         "index_path": state.index_path,
+        "enrichment": {
+            "linked_urls": len(state.linked_enrichments),
+            "linked_index_path": state.linked_index_path,
+            "unlinked_urls": len(state.unlinked_enrichments),
+            "unlinked_index_path": state.unlinked_index_path,
+        },
         "timestamp": datetime.now().isoformat()
     }
 
