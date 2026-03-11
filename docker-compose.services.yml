@@ -21,10 +21,10 @@ services:
     volumes:
       # Mount src for development
       - ./src:/app/src
-      # Mount index file from project root
-      - ./research_summaries_with_embeddings_combined.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
-      # Mount QA index file for enriched grounding
-      - ./research_qa_pairs_with_embeddings_combined.jsonl:/app/research_qa_pairs_with_embeddings_combined.jsonl
+      # Mount index file from project root (using filtered version)
+      - ./research_summaries_filtered.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
+      # Mount QA index file for enriched grounding (using filtered version)
+      - ./research_qa_pairs_filtered.jsonl:/app/research_qa_pairs_with_embeddings_combined.jsonl
       # Mount logs
       - ./src/services/logs:/app/src/services/logs
       # Mount GCP credentials

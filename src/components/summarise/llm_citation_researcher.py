@@ -254,7 +254,7 @@ class CitationResearchClient(Base):
 
             # Build API call kwargs (no tools support for web search)
             max_tokens = self._app_config.get('openai.max_tokens') or 16000
-            temperature = self._app_config.get('openai.temperature') or 0.7
+            temperature = self._app_config.get('openai.temperature') or 0.5
             api_kwargs = {
                 'model': self.model_name,
                 'messages': [{"role": "user", "content": prompt}],
@@ -280,7 +280,7 @@ class CitationResearchClient(Base):
             self._logger.info(f"   🔍 Google Search grounding ENABLED for web access")
 
         # Gemini uses the async generate_content method with optional search grounding
-        temperature = self._app_config.get('openai.temperature') or 0.7
+        temperature = self._app_config.get('openai.temperature') or 0.5
         max_tokens = self._app_config.get('openai.max_tokens') or 16000
         response = await self.client.generate_content(
             prompt=prompt,

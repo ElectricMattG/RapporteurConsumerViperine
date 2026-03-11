@@ -17,7 +17,8 @@ let settings = {
         coverage: "2023-2026",
         entry_point: "Doha-Qatar",
         locale: "Modern Standard Arabic",
-        query: "Israeli Defense Force Latest News"
+        query: "Israeli Defense Force Latest News",
+        llm_model: "gemini-2.5-pro"
     },
     query: {
         summaries_top_k: 25
@@ -448,7 +449,7 @@ async function handleSendQuery() {
             mode: queryModeSelect.value,
             context_depth: 3,
             top_k: summariesTopK,
-            temperature: 0.7,
+            temperature: 0.5,
             max_tokens: 16000,
             use_qa: useQa,
             qa_top_k: qaTopK
@@ -570,16 +571,30 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
 
     // Step 1: Split semicolon-separated citation groups into individual citations.
     // e.g. "(doc_XXX, qa-7; doc_YYY, qa-15)" → "(doc_XXX, qa-7); (doc_YYY, qa-15)"
-    let processed = content.replace(/\(([^)]*;[^)]*)\)/g, (match, inner) => {
+    let processed = content.replace(/\(\s*([^)]*;[^)]*)\)/g, (match, inner) => {
         // Only split if it looks like citation pairs (contains doc_ or req_)
         if (!inner.match(/doc_|req_/i)) return match;
         const parts = inner.split(/;\s*/).map(p => `(${p.trim()})`);
         return parts.join('; ');
     });
 
+    // Step 1b: Normalize fused citations where LLM omits comma: (req_XXX_summary) → (req_XXX, summary)
+    // Also handles (req_XXX_qa-N) → (req_XXX, qa-N)
+    processed = processed.replace(/\(\s*((?:doc_|req_)[a-zA-Z0-9_]+?)_(summary|qa-\d+)\s*\)/gi, (match, docId, refType) => {
+        console.log(`   🔧 Fused citation normalized: ${match} → (${docId}, ${refType})`);
+        return `(${docId}, ${refType})`;
+    });
+
+    // Step 1c: Normalize prefixed citations: (e.g., req_XXX, summary) → (req_XXX, summary)
+    // Strips any freetext before the doc_id when a type suffix follows
+    processed = processed.replace(/\(\s*[^)]*?,\s*((?:doc_|req_)[a-zA-Z0-9_]+),\s*(summary|qa-\d+)\s*\)/gi, (match, docId, refType) => {
+        console.log(`   🔧 Prefixed citation normalized: ${match} → (${docId}, ${refType})`);
+        return `(${docId}, ${refType})`;
+    });
+
     // Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary) or (req_XXX, summary)
     // IMPORTANT: Pattern must match uppercase letters for req_ prefix
-    const citationPattern = /\(([a-zA-Z0-9_]+),\s*(qa-\d+|summary)\)/gi;
+    const citationPattern = /\(\s*([a-zA-Z0-9_]+),\s*(qa-\d+|summary)\s*\)/gi;
 
     // Sentinel to mark resolved citations for post-processing
     const CITE_SENTINEL = '\x00CITE';
@@ -620,6 +635,7 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         resolvedCitations.push({
             author: citationInfo.author,
             date: citationInfo.date,
+            url: citationInfo.url || '',
             cardId: cardId,
             docId: docId,
             refType: refType,
@@ -632,7 +648,7 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
 
     // Step 2b: Second pass — catch bare (doc_id) or (doc_id, doc_id, ...) where LLM omitted ref types
     // Matches single or comma-separated lists of doc_/req_ IDs with no qa-N/summary suffix
-    const bareCitationPattern = /\(((?:(?:doc_|req_)[a-zA-Z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-zA-Z0-9_]+)*)\)/gi;
+    const bareCitationPattern = /\(\s*((?:(?:doc_|req_)[a-zA-Z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-zA-Z0-9_]+)*)\s*\)/gi;
     result = result.replace(bareCitationPattern, (match, inner) => {
         // Split comma-separated doc_ids
         const docIds = inner.split(/\s*,\s*/).map(s => s.trim()).filter(Boolean);
@@ -659,6 +675,7 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
                 resolvedCitations.push({
                     author: citationInfo.author,
                     date: citationInfo.date,
+                    url: citationInfo.url || '',
                     cardId: cardId,
                     docId: docId,
                     refType: 'summary',
@@ -672,6 +689,116 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         if (!anyResolved) return match; // None resolved, leave original
         if (citationDebug) return sentinels.join('; ');
         return sentinels.join(', '); // Comma-separated sentinels will group in Step 3
+    });
+
+    // Step 2c: Third pass — catch "(text - req_XXX)" or "(text - doc_XXX, req_YYY)" where LLM embeds doc_id(s) after a dash
+    // e.g. "(July 2024 - req_20260203_072214_001)" or "(IAF strikes - req_XXX, req_YYY)"
+    const dashDocIdPattern = /\(\s*([^)]+?)\s*[-–—]\s*((?:(?:doc_|req_)[a-zA-Z0-9_]+(?:\s*,\s*)?)+)\s*\)/gi;
+    result = result.replace(dashDocIdPattern, (match, textBefore, docIdsPart) => {
+        // Split the doc_ids portion on commas
+        const docIds = docIdsPart.split(/\s*,\s*/).filter(id => /^(doc_|req_)/i.test(id));
+        if (docIds.length === 0) return match;
+
+        const sentinels = [];
+        let anyResolved = false;
+        for (const docId of docIds) {
+            const citationInfo = citationMap[docId];
+            if (!citationInfo) {
+                console.warn(`   ⚠️ Dash-separated citation NOT resolved: ${docId}`);
+                continue;
+            }
+            anyResolved = true;
+            const cardId = `${citationInfo.card_type}-${citationInfo.card_index}`;
+            replacementCount++;
+            console.log(`   🔧 Dash citation resolved: (${textBefore} - ${docId}) → ${citationInfo.author}, ${citationInfo.date}`);
+
+            if (citationDebug) {
+                const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+                sentinels.push(`<a href="#${cardId}" class="citation-link" data-card-id="${cardId}" data-doc-id="${docId}" data-ref-type="summary">(${text})</a>`);
+            } else {
+                const idx = resolvedCitations.length;
+                resolvedCitations.push({
+                    author: citationInfo.author,
+                    date: citationInfo.date,
+                    url: citationInfo.url || '',
+                    cardId: cardId,
+                    docId: docId,
+                    refType: 'summary',
+                    isQa: citationInfo.card_type === 'qa',
+                    dateSort: parseDateForSort(citationInfo.date)
+                });
+                sentinels.push(`${CITE_SENTINEL}[${idx}]`);
+            }
+        }
+
+        if (!anyResolved) return match;
+        if (citationDebug) return sentinels.join('; ');
+        return sentinels.join(', ');
+    });
+
+    // Step 2d: Fourth pass — catch "(freetext, req_XXX)" or "(freetext, doc_XXX)"
+    // e.g. "(Gabriel-5, req_20260108_014029_001)" where LLM mixes description with doc_id
+    const commaDocIdPattern = /\(\s*([^)]+?),\s*((?:doc_|req_)[a-zA-Z0-9_]+)\s*\)/gi;
+    result = result.replace(commaDocIdPattern, (match, textBefore, docId) => {
+        // Skip if textBefore itself is a doc_/req_ id (already handled by Step 2)
+        if (/^(doc_|req_)/i.test(textBefore.trim())) return match;
+        const citationInfo = citationMap[docId];
+        if (!citationInfo) {
+            console.warn(`   ⚠️ Comma-separated citation NOT resolved: ${docId}`);
+            return match;
+        }
+
+        const cardId = `${citationInfo.card_type}-${citationInfo.card_index}`;
+        replacementCount++;
+        console.log(`   🔧 Comma citation resolved: (${textBefore}, ${docId}) → ${citationInfo.author}, ${citationInfo.date}`);
+
+        if (citationDebug) {
+            const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+            return `<a href="#${cardId}" class="citation-link" data-card-id="${cardId}" data-doc-id="${docId}" data-ref-type="summary">(${text})</a>`;
+        } else {
+            const idx = resolvedCitations.length;
+            resolvedCitations.push({
+                author: citationInfo.author,
+                date: citationInfo.date,
+                url: citationInfo.url || '',
+                cardId: cardId,
+                docId: docId,
+                refType: 'summary',
+                isQa: citationInfo.card_type === 'qa',
+                dateSort: parseDateForSort(citationInfo.date)
+            });
+            return `${CITE_SENTINEL}[${idx}]`;
+        }
+    });
+
+    // Step 2e: Catch-all — find any remaining (freetext... req_XXX ...freetext) where doc_id is embedded anywhere
+    // e.g. "(e.g., delayed response at Kibbutz Magen, as per req_20260107_232758_009)"
+    const embeddedDocIdPattern = /\([^)]*?\b((?:doc_|req_)[a-zA-Z0-9_]+)\b[^)]*\)/gi;
+    result = result.replace(embeddedDocIdPattern, (match, docId) => {
+        const citationInfo = citationMap[docId];
+        if (!citationInfo) return match;
+
+        const cardId = `${citationInfo.card_type}-${citationInfo.card_index}`;
+        replacementCount++;
+        console.log(`   🔧 Embedded citation resolved: ${match.substring(0, 60)}... → ${citationInfo.author}, ${citationInfo.date}`);
+
+        if (citationDebug) {
+            const text = `${citationInfo.author}, ${citationInfo.date}`.replace(/,,+/g, ',').replace(/,\s*,/g, ',').trim();
+            return `<a href="#${cardId}" class="citation-link" data-card-id="${cardId}" data-doc-id="${docId}" data-ref-type="summary">(${text})</a>`;
+        } else {
+            const idx = resolvedCitations.length;
+            resolvedCitations.push({
+                author: citationInfo.author,
+                date: citationInfo.date,
+                url: citationInfo.url || '',
+                cardId: cardId,
+                docId: docId,
+                refType: 'summary',
+                isQa: citationInfo.card_type === 'qa',
+                dateSort: parseDateForSort(citationInfo.date)
+            });
+            return `${CITE_SENTINEL}[${idx}]`;
+        }
     });
 
     console.log(`✅ Citation rendering complete: ${replacementCount} replacements made`);
@@ -711,10 +838,10 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
         const citesForGroup = indices.map(i => resolvedCitations[i]);
         citesForGroup.sort((a, b) => b.dateSort - a.dateSort);
 
-        // Dedup by author+date (same URL can appear from both summary & QA)
+        // Dedup by URL first (same source from summary & QA), fallback to author+date
         const seen = new Set();
         const dedupedCites = citesForGroup.filter(c => {
-            const key = `${c.author}|${c.date}`;
+            const key = c.url ? c.url : `${c.author}|${c.date}`;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;

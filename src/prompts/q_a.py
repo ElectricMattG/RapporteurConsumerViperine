@@ -44,7 +44,7 @@ Citation Format: When citing Q&A pairs, use an unconventional format that you ma
       "similarity": 0.4935777518734378
     }}
 
-when we add a pair to the response, use the following pattern: (doc_document_id, qa-N) where N is the index of the Q&A pair in the grounding text (starting from 1). For example: (doc_2432eb5092b5, qa-1). This allows us to track which Q&A pairs are being cited and ensures that we can link back to the original source if needed. Do not hyperlink the in-line citation; just render it according to the format provided. Never add hyperlinks to the in-line citations under any circumstances.
+when we add a pair to the response, use the following pattern: (doc_document_id, qa-N) where N is the index of the Q&A pair in the grounding text (starting from 1). For example: (doc_2432eb5092b5, qa-1). This allows us to track which Q&A pairs are being cited and ensures that we can link back to the original source if needed. Do not hyperlink the in-line citation; just render it according to the format provided. Never add hyperlinks to the in-line citations under any circumstances. IMPORTANT: Never render with doc_1 or doc_3, never use incremental numbering for the document ID. Always use the actual document_id from the grounding data for the in-line citation.
 
 IMPORTANT: For existing citations in the draft response that reference summary sources, keep them as they are without modification. Only apply the new citation format to Q&A pairs. Never change existing citations that reference summary sources.
 

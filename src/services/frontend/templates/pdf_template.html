@@ -73,7 +73,7 @@
         <div class="citation-list">
             {% for citation in citations %}
             <div class="citation-entry">
-                <a href="{{ citation.url }}" target="_blank">[{{ citation.index }}] {{ citation.formatted_text }}</a>
+                <a href="{{ citation.url }}" title="{{ citation.url }}" target="_blank">[{{ citation.index }}] {{ citation.formatted_text }}</a>
             </div>
             {% endfor %}
         </div>

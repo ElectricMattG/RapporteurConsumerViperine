@@ -51,7 +51,7 @@ class GeminiLLMClient(Base):
 
         # LLM generation parameters from config (compatible with SimpleLLMClient)
         self.max_length = self._app_config.get('llm.max_length') or 500
-        self.temperature = self._app_config.get('llm.temperature') or 0.7
+        self.temperature = self._app_config.get('llm.temperature') or 0.5
         self.top_p = self._app_config.get('llm.top_p') or 0.9
         self.max_retries = self._app_config.get('llm.max_retries') or 3
         self.retry_delay = self._app_config.get('llm.retry_delay') or 1.0

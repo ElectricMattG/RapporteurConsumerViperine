@@ -102,7 +102,7 @@ def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=
 
     The synthesis of should incorporate the available context to provide a new document that yeilds insights and understanding, not just repeating facts from the different documents. The document should speak to legal and policy researchers highlight policy and legal aspects of the documents. Cite the documents as below. When you cite summaries, don't refer to them as 'summaries', rather refer to them as 'artilces' and/or 'documents.'
 
-IMPORTANT: When citing sources, use the "Cite as" field provided for each summary. The format is: (document_id, summary) - for example: (req_20260107_221154_000, summary). Always include the exact document_id and the word "summary" separated by a comma. Do not use the actual source meta-data for in-line citations. Do not hyperlink the in-line citation; just render it according to the format provided above. Never add hyperlinks to the in-line citations under any circumstances.
+IMPORTANT: When citing sources, use the "Cite as" field provided for each summary. The format is: (document_id, summary) - for example: (req_20260107_221154_000, summary). Always include the exact document_id and the word "summary" separated by a comma. Do not use the actual source meta-data for in-line citations. Do not hyperlink the in-line citation; just render it according to the format provided above. Never add hyperlinks to the in-line citations under any circumstances. IMPORTANT: Never render with doc_1 or doc_3, never use incremental numbering for the document ID. Always use the actual document_id from the grounding data for the in-line citation.
 
 Original Query: {query}
 

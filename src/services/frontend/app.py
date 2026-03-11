@@ -59,7 +59,7 @@ def query_rag():
         "top_k": 3,
         "start_date": "2025-01-01",
         "end_date": "2026-01-07",
-        "temperature": 0.7,
+        "temperature": 0.5,
         "max_tokens": 4000
     }
     """
@@ -73,7 +73,7 @@ def query_rag():
         top_k = data.get('top_k', 3)
         start_date = data.get('start_date')
         end_date = data.get('end_date')
-        temperature = data.get('temperature', 0.7)
+        temperature = data.get('temperature', 0.5)
         max_tokens = data.get('max_tokens', 16000)
         use_qa = data.get('use_qa', False)
         qa_top_k = data.get('qa_top_k', 5)

@@ -186,6 +186,7 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
     full_date = "ND"
 
     if date_field and str(date_field).lower() not in ['null', 'nan', 'none', '']:
+        date_str_raw = str(date_field).strip()
         try:
             if isinstance(date_field, str):
                 # Handle ISO 8601 format
@@ -193,23 +194,28 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
                 month_year = dt.strftime("%B %Y")
                 full_date = dt.strftime("%d %B %Y")
         except:
-            # Fallback to partial date parsing
-            try:
-                date_str = str(date_field)[:10]  # Get YYYY-MM-DD portion
-                if len(date_str) >= 7:  # At least YYYY-MM
-                    parts = date_str.split('-')
-                    if len(parts) >= 2:
-                        year = parts[0]
-                        month_num = int(parts[1])
-                        month_name = datetime(2000, month_num, 1).strftime("%B")
-                        month_year = f"{month_name} {year}"
-                        if len(parts) == 3:
-                            day = parts[2]
-                            full_date = f"{day} {month_name} {year}"
-                        else:
-                            full_date = month_year
-            except:
-                pass
+            # Handle year-only dates like "2026" or "2024"
+            if date_str_raw.isdigit() and len(date_str_raw) == 4:
+                month_year = date_str_raw
+                full_date = date_str_raw
+            else:
+                # Fallback to partial date parsing
+                try:
+                    date_str = date_str_raw[:10]  # Get YYYY-MM-DD portion
+                    if len(date_str) >= 7:  # At least YYYY-MM
+                        parts = date_str.split('-')
+                        if len(parts) >= 2:
+                            year = parts[0]
+                            month_num = int(parts[1])
+                            month_name = datetime(2000, month_num, 1).strftime("%B")
+                            month_year = f"{month_name} {year}"
+                            if len(parts) == 3:
+                                day = parts[2]
+                                full_date = f"{day} {month_name} {year}"
+                            else:
+                                full_date = month_year
+                except:
+                    pass
 
     # Extract title
     title = doc_metadata.get('title', 'Untitled Document')
@@ -231,6 +237,7 @@ def format_citation(doc_metadata: dict, source_url: str, index: int, is_qa: bool
         'full_date': full_date,
         'title': title,
         'url': decoded_url,
+        'raw_url': source_url,  # Keep original percent-encoded URL for href
         'doc_id': doc_id,
         'formatted_text': formatted_text
     }
@@ -275,10 +282,27 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
         parts = [f'({p.strip()})' for p in inner.split(';')]
         return '; '.join(parts)
 
-    processed = re.sub(r'\(([^)]*;[^)]*)\)', split_groups, text)
+    processed = re.sub(r'\(\s*([^)]*;[^)]*)\)', split_groups, text)
+
+    # Step 1b: Normalize fused citations where LLM omits comma: (req_XXX_summary) → (req_XXX, summary)
+    def normalize_fused(match):
+        doc_id = match.group(1)
+        ref_type = match.group(2)
+        logger.info(f"   🔧 Fused PDF citation normalized: ({doc_id}_{ref_type}) → ({doc_id}, {ref_type})")
+        return f'({doc_id}, {ref_type})'
+    processed = re.sub(r'\(\s*((?:doc_|req_)[a-zA-Z0-9_]+?)_(summary|qa-\d+)\s*\)', normalize_fused, processed, flags=re.IGNORECASE)
+
+    # Step 1c: Normalize prefixed citations: (e.g., req_XXX, summary) → (req_XXX, summary)
+    # Strips any freetext before the doc_id when a type suffix follows
+    def normalize_prefixed(match):
+        doc_id = match.group(1)
+        ref_type = match.group(2)
+        logger.info(f"   🔧 Prefixed PDF citation normalized: (..., {doc_id}, {ref_type}) → ({doc_id}, {ref_type})")
+        return f'({doc_id}, {ref_type})'
+    processed = re.sub(r'\(\s*[^)]*?,\s*((?:doc_|req_)[a-zA-Z0-9_]+),\s*(summary|qa-\d+)\s*\)', normalize_prefixed, processed, flags=re.IGNORECASE)
 
     # Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary)
-    citation_pattern = re.compile(r'\(([a-z0-9_]+),\s*(qa-\d+|summary)\)', re.IGNORECASE)
+    citation_pattern = re.compile(r'\(\s*([a-z0-9_]+),\s*(qa-\d+|summary)\s*\)', re.IGNORECASE)
 
     def replace_citation(match):
         doc_id = match.group(1)
@@ -291,12 +315,13 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
             return match.group(0)  # Leave unresolved
         author = unquote(info.get('author', 'Unknown')).strip()
         date = info.get('date', 'N.D.').strip()
-        url = unquote(info.get('url', ''))
+        raw_url = info.get('url', '')  # Keep original encoded URL for href
+        decoded_url = unquote(raw_url)  # Decode for tooltip
         # No parens here — sentinels handle grouping
         # Remove double commas by ensuring no trailing/leading commas
         display = f"{author}, {date}".replace(',,', ',').strip(',')
-        if url:
-            inner = f'<a href="{url}">{display}</a>'
+        if raw_url:
+            inner = f'<a href="{decoded_url}" title="{decoded_url}">{display}</a>'
         else:
             inner = display
         return f'\u27e6{inner}\u27e7'  # Sentinel markers ⟦…⟧
@@ -305,7 +330,7 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
 
     # Step 2b: Second pass — catch bare (doc_id) or (doc_id, doc_id, ...) where LLM omitted ref types
     bare_pattern = re.compile(
-        r'\(((?:(?:doc_|req_)[a-z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-z0-9_]+)*)\)',
+        r'\(\s*((?:(?:doc_|req_)[a-z0-9_]+)(?:\s*,\s*(?:doc_|req_)[a-z0-9_]+)*)\s*\)',
         re.IGNORECASE
     )
 
@@ -320,10 +345,11 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
                 continue  # Skip unknown doc_ids
             author = unquote(info.get('author', 'Unknown')).strip()
             date = info.get('date', 'N.D.').strip()
-            url = unquote(info.get('url', ''))
+            raw_url = info.get('url', '')  # Keep original encoded URL for href
+            decoded_url = unquote(raw_url)  # Decode for tooltip
             display = f"{author}, {date}".replace(',,', ',').strip(',')
-            if url:
-                cite_inner = f'<a href="{url}">{display}</a>'
+            if raw_url:
+                cite_inner = f'<a href="{decoded_url}" title="{decoded_url}">{display}</a>'
             else:
                 cite_inner = display
             logger.info(f"   🔧 Bare PDF citation resolved: ({doc_id}) → {display}")
@@ -335,6 +361,98 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
 
     resolved = bare_pattern.sub(replace_bare_citation, resolved)
 
+    # Step 2c: Third pass — catch "(text - req_XXX)" or "(text - doc_XXX, req_YYY)" where LLM embeds doc_id(s) after dash
+    # e.g. "(July 2024 - req_20260203_072214_001)" or "(IAF strikes - req_XXX, req_YYY)"
+    dash_pattern = re.compile(
+        r'\(\s*([^)]+?)\s*[-–—]\s*((?:(?:doc_|req_)[a-zA-Z0-9_]+(?:\s*,\s*)?)+)\s*\)',
+        re.IGNORECASE
+    )
+
+    def replace_dash_citation(match):
+        text_before = match.group(1)
+        doc_ids_part = match.group(2)
+        # Split on commas to handle multiple doc_ids
+        doc_ids = [d.strip() for d in doc_ids_part.split(',') if re.match(r'^(doc_|req_)', d.strip(), re.IGNORECASE)]
+        if not doc_ids:
+            return match.group(0)
+        parts = []
+        for doc_id in doc_ids:
+            info = citation_map.get(doc_id)
+            if not info:
+                continue
+            author = unquote(info.get('author', 'Unknown')).strip()
+            date = info.get('date', 'N.D.').strip()
+            raw_url = info.get('url', '')  # Keep original encoded URL for href
+            decoded_url = unquote(raw_url)  # Decode for tooltip
+            display = f"{author}, {date}".replace(',,', ',').strip(',')
+            if raw_url:
+                cite_inner = f'<a href="{decoded_url}" title="{decoded_url}">{display}</a>'
+            else:
+                cite_inner = display
+            logger.info(f"   🔧 Dash PDF citation resolved: ({text_before} - {doc_id}) → {display}")
+            parts.append(f'\u27e6{cite_inner}\u27e7')
+        if not parts:
+            return match.group(0)
+        return '; '.join(parts)
+
+    resolved = dash_pattern.sub(replace_dash_citation, resolved)
+
+    # Step 2d: Fourth pass — catch "(freetext, req_XXX)" or "(freetext, doc_XXX)"
+    # e.g. "(Gabriel-5, req_20260108_014029_001)" where LLM mixes description with doc_id
+    comma_docid_pattern = re.compile(
+        r'\(\s*([^)]+?),\s*((?:doc_|req_)[a-zA-Z0-9_]+)\s*\)',
+        re.IGNORECASE
+    )
+
+    def replace_comma_docid_citation(match):
+        text_before = match.group(1).strip()
+        doc_id = match.group(2)
+        # Skip if text_before is itself a doc_/req_ id (handled by Step 2)
+        if re.match(r'^(doc_|req_)', text_before, re.IGNORECASE):
+            return match.group(0)
+        info = citation_map.get(doc_id)
+        if not info:
+            return match.group(0)
+        author = unquote(info.get('author', 'Unknown')).strip()
+        date = info.get('date', 'N.D.').strip()
+        raw_url = info.get('url', '')  # Keep original encoded URL for href
+        decoded_url = unquote(raw_url)  # Decode for tooltip
+        display = f"{author}, {date}".replace(',,', ',').strip(',')
+        if raw_url:
+            cite_inner = f'<a href="{decoded_url}" title="{decoded_url}">{display}</a>'
+        else:
+            cite_inner = display
+        logger.info(f"   🔧 Comma PDF citation resolved: ({text_before}, {doc_id}) → {display}")
+        return f'\u27e6{cite_inner}\u27e7'
+
+    resolved = comma_docid_pattern.sub(replace_comma_docid_citation, resolved)
+
+    # Step 2e: Catch-all — find any remaining (freetext... req_XXX ...freetext) where doc_id is embedded anywhere
+    # e.g. "(e.g., delayed response at Kibbutz Magen on October 7, 2023, as per req_20260107_232758_009)"
+    embedded_pattern = re.compile(
+        r'\([^)]*?\b((?:doc_|req_)[a-zA-Z0-9_]+)\b[^)]*\)',
+        re.IGNORECASE
+    )
+
+    def replace_embedded_citation(match):
+        doc_id = match.group(1)
+        info = citation_map.get(doc_id)
+        if not info:
+            return match.group(0)
+        author = unquote(info.get('author', 'Unknown')).strip()
+        date = info.get('date', 'N.D.').strip()
+        raw_url = info.get('url', '')
+        decoded_url = unquote(raw_url)
+        display = f"{author}, {date}".replace(',,', ',').strip(',')
+        if raw_url:
+            cite_inner = f'<a href="{decoded_url}" title="{decoded_url}">{display}</a>'
+        else:
+            cite_inner = display
+        logger.info(f"   \U0001f527 Embedded PDF citation resolved: {match.group(0)[:60]}... \u2192 {display}")
+        return f'\u27e6{cite_inner}\u27e7'
+
+    resolved = embedded_pattern.sub(replace_embedded_citation, resolved)
+
     # Step 3: Merge adjacent sentinels into grouped parentheticals
     # ⟧; ⟦ or ⟧, ⟦ within same run → collapse into single group
     resolved = re.sub(r'\u27e7\s*[;,]\s*\u27e6', '; ', resolved)
@@ -343,14 +461,24 @@ def resolve_citations_for_pdf(text: str, citation_map: dict) -> str:
     def dedup_group(match):
         inner = match.group(1)
         parts = inner.split('; ')
-        seen = set()
+        seen_urls_inline = set()
+        seen_text = set()
         deduped = []
         for part in parts:
-            # Strip HTML tags to compare display text only
-            clean = re.sub(r'<[^>]+>', '', part).strip()
-            if clean not in seen:
-                seen.add(clean)
-                deduped.append(part)
+            # Extract URL from href for URL-based dedup
+            url_match = re.search(r'href="([^"]+)"', part)
+            if url_match:
+                url_key = url_match.group(1).rstrip('/')
+                if url_key in seen_urls_inline:
+                    continue  # Same URL already in this group
+                seen_urls_inline.add(url_key)
+            else:
+                # No URL — fallback to text-based dedup
+                clean = re.sub(r'<[^>]+>', '', part).strip()
+                if clean in seen_text:
+                    continue
+                seen_text.add(clean)
+            deduped.append(part)
         return f'\u27e6{"; ".join(deduped)}\u27e7'
 
     resolved = re.sub(r'\u27e6([^\u27e7]+)\u27e7', dedup_group, resolved)
@@ -443,7 +571,7 @@ Title:"""
         # Try to call RAG service /generate_text endpoint
         response = requests.post(
             f"{rag_service_url}/generate_text",
-            json={"prompt": prompt, "max_tokens": 50, "temperature": 0.3},
+            json={"prompt": prompt, "max_tokens": 50, "temperature": 0.5},
             timeout=10
         )
 
@@ -508,8 +636,7 @@ def build_pdf_html(
 
     # Format preamble
     current_date = datetime.now().strftime("%B %d, %Y")
-    preamble_text = PREAMBLE.replace('[Document_Name]', query[:100])
-    preamble_text = preamble_text.replace('[Current_Date]', current_date)
+    preamble_text = PREAMBLE.replace('[Current_Date]', current_date)
 
     # Convert assistant response markdown to HTML
     # First resolve citation placeholders if citation_map is available
@@ -519,52 +646,46 @@ def build_pdf_html(
         resolved_response = resolve_citations_for_pdf(assistant_response, citation_map)
     response_html = markdown_to_html(resolved_response)
 
-    # Format all citations (summary + QA)
+    # Format all citations (summary + QA) — dedup by URL
     all_citations = []
-    seen_doc_ids = set()
 
-    # Add summary citations
+    # Add summary citations — dedup by URL (different doc_ids can point to same article)
+    seen_urls = set()
     for doc in retrieved_docs:
-        # Check root level first (summaries), then nested (Q&A pairs)
         doc_id = doc.get('document_id') or doc.get('doc_metadata', {}).get('document_id') or doc.get('doc_metadata', {}).get('doc_id')
         source_url = doc.get('source_url', '')
 
-        # Use doc_id for deduplication, fallback to source_url
-        dedup_key = doc_id if doc_id and doc_id != 'unknown' else source_url
+        # Primary dedup by URL, fallback to doc_id
+        url_key = unquote(source_url).rstrip('/').lower() if source_url else ''
+        dedup_key = url_key if url_key else (doc_id if doc_id and doc_id != 'unknown' else f'no_url_{len(all_citations)}')
 
-        if dedup_key not in seen_doc_ids:
-            seen_doc_ids.add(dedup_key)
-            # Get metadata and inject document_id if it's at root level
+        if dedup_key not in seen_urls:
+            seen_urls.add(dedup_key)
             metadata = doc.get('doc_metadata', {}).copy()
             if doc_id and 'document_id' not in metadata:
                 metadata['document_id'] = doc_id
-            # CRITICAL: Decode URL for Arabic/Hebrew character display in PDF
-            decoded_url = unquote(source_url)
             all_citations.append({
                 'metadata': metadata,
-                'url': decoded_url
+                'url': source_url  # Keep raw URL — format_citation will decode for display
             })
 
-    # Add QA citations (deduplicate against summaries)
+    # Add QA citations (deduplicate against summaries by URL)
     for qa in retrieved_qa:
-        # Check root level first (if Q&A structure changes), then nested
         doc_id = qa.get('document_id') or qa.get('doc_metadata', {}).get('document_id') or qa.get('doc_metadata', {}).get('doc_id')
         source_url = qa.get('source_url', '')
 
-        # Use doc_id for deduplication, fallback to source_url
-        dedup_key = doc_id if doc_id and doc_id != 'unknown' else source_url
+        # Primary dedup by URL, fallback to doc_id
+        url_key = unquote(source_url).rstrip('/').lower() if source_url else ''
+        dedup_key = url_key if url_key else (doc_id if doc_id and doc_id != 'unknown' else f'no_url_{len(all_citations)}')
 
-        if dedup_key not in seen_doc_ids:
-            seen_doc_ids.add(dedup_key)
-            # Get metadata and inject document_id if it's at root level
+        if dedup_key not in seen_urls:
+            seen_urls.add(dedup_key)
             metadata = qa.get('doc_metadata', {}).copy()
             if doc_id and 'document_id' not in metadata:
                 metadata['document_id'] = doc_id
-            # CRITICAL: Decode URL for Arabic/Hebrew character display in PDF
-            decoded_url = unquote(source_url)
             all_citations.append({
                 'metadata': metadata,
-                'url': decoded_url
+                'url': source_url  # Keep raw URL — format_citation will decode for display
             })
 
     # Format citations with sequential numbering
@@ -576,7 +697,7 @@ def build_pdf_html(
     # Prepare metadata for template
     doc_metadata = {
         'index_name': index_metadata.get('index_name', 'Unknown Index'),
-        'model': 'gemini-2.5-flash',
+        'model': 'gemini-2.5-pro',
         'index_version': index_metadata.get('index_version', 'Unknown'),
         'generated_date': current_date,
         'description': index_metadata.get('description', ''),

@@ -869,7 +869,9 @@ Don't write any code, analyse how the pdf_generator uses the meta-data code in t
 Also check
 
 ---
-Some of the cards and subsequent the citations have N.D because there is missing date information. This affects completeness of the citations. We need a strategy (a quick fix) so that we can correct this in the UI and update the state for that query. This will enable use to render the citation with updated date information. This is tricky but it provides a quick fix.
+Some of the cards and subsequent the citations have N.D because there is missing date information. This affects completeness of the citations in the final document.
+
+We need a strategy (a quick fix) so that we can correct this in the UI and update the state for that query. This will enable use to render the citation with updated date information. This is tricky but it provides a quick fix.
 
 We need to reason through this: how does the pdf_generator set the citations if they are resolved in the UI?
 
@@ -877,4 +879,264 @@ Can we update an inject updated data cleanly while keeping complexity low?
 
 We don't want to get into a situation where complexity is high and we regress the code based.
 
-Where are the updated point? Where is the citation data? How can we update it.?
+Where are the updated point? Where is the citation data? How can we update it.?n Dont write any code, let's see if we can come up with a solution that cognitively lightweight.
+
+---
+Let's create a viewer for the index data. The view uses a python server in the background.
+
+-It has a simple interface that renders the jsonl for the q and a pairs.
+
+-It neatly displays document meta-data and we can scroll forward and backward.
+
+-We can update data and click write, it updates the index on ALL recs with the document_id.
+
+- We create a class for this in components: /home/electric/workspace/RapporteurApp/src/components
+
+DataViewer.py
+Inhertis logger from Base
+
+---
+Two issues there are some parts of the text where:
+
+IDF: While demonstrating significant operational capabilities, internal reports and analyses (like the State Comptroller's report in July 2024 - req_20260203_072214_001)
+
+Resistance Forces: An article from alkhanadeq.com (April 14, 2025 - req_20260203_094303_002) projects a "human crisis and unease" within the Israeli army by April 2025, suggesting a perception of their own resilience and ability to impose costs on the IDF. Their ability to conduct "sophisticated and brutal" attacks (October 7, 2023 - req_20260107_232953_002) is highlighted as a significant challenge to Israeli deterrence. Their actions have been seen as breaking Israel's security doctrine and forcing it into long-term, costly wars (محمود جمال, February 2025 [qa-1]).
+
+Here it doesn't resolve, let's explore why. Analyse the code
+
+✅ Settings loaded from localStorage
+app.js:1012 🔄 Conversation cleared - fresh context
+app.js:121 🔔 Notification stream initialized
+app.js:91 ✅ SSE connection opened
+app.js:98 📬 Notification received: {type: 'connected', timestamp: '2026-02-11T17:51:00.071185'}
+app.js:103 ✅ Connected to notification stream
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:51:15.071499'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:51:30.071764'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:51:45.072035'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:52:00.072271'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:52:15.072507'}
+app.js:870 📝 Adding assistant message
+app.js:871    Metadata: {citation_map: {…}, date_filters: null, execution_time_ms: 79226.318359375, llm_model: 'gemini-2.5-flash', llm_params: {…}, …}
+app.js:872    Has citation_map: true
+app.js:877 ✅ Citation map found, processing citations...
+app.js:563 🔗 renderCitationsAsLinks called, debug: true
+app.js:564    Citation map keys: 200
+app.js:652    🔧 Bare citation resolved: (req_20260108_001031_009) → i24NEWS Staff, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260203_102941_007) → أحمد علوى, January 2026
+app.js:652    🔧 Bare citation resolved: (req_20260108_010630_010) → Israel Defense Forces (IDF), December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_003844_005) → IDF, June 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_002522_001) → Foundation for Defense of Democracies, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_001031_009) → i24NEWS Staff, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_024954_007) → Yonah Jeremy Bob, December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_013300_004) → Foundation for Defense of Democracies (FDD), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_001031_009) → i24NEWS Staff, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260203_102941_007) → أحمد علوى, January 2026
+app.js:652    🔧 Bare citation resolved: (req_20260107_225924_002) → Emanuel Fabian, July 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_003844_005) → IDF, June 2024
+app.js:652    🔧 Bare citation resolved: (req_20260107_230310_003) → Emanuel Fabian, July 2023
+app.js:652    🔧 Bare citation resolved: (req_20260107_234446_004) → Peter Beaumont, December 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_021613_014) → The Jerusalem Post, June 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_010250_004) → Critical Threats, September 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_010630_010) → Israel Defense Forces (IDF), December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_004031_003) → Israel Defense Forces (IDF), 2026
+app.js:652    🔧 Bare citation resolved: (req_20260108_013450_005) → Israel Defense Forces (IDF), Ongoing (updates from June 2024 to January 2026 visible)
+app.js:652    🔧 Bare citation resolved: (req_20260108_013839_010) → Israel Defense Forces (IDF), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260203_080733_009) → alkhanadeq.com, January 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_031023_013) → JNS Staff, January 2026
+app.js:652    🔧 Bare citation resolved: (req_20260108_010630_010) → Israel Defense Forces (IDF), December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_024954_007) → Yonah Jeremy Bob, December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_030451_001) → Israel Defense Forces (IDF), December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_010250_004) → Critical Threats, September 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_011405_004) → FDD Staff, November 2024
+app.js:652    🔧 Bare citation resolved: (req_20260107_234446_004) → Peter Beaumont, December 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_003844_005) → IDF, June 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_002908_005) → Emanuel Fabian, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_014029_007) → Israel Defense Forces, January 2026
+app.js:652    🔧 Bare citation resolved: (req_20260108_024954_007) → Yonah Jeremy Bob, December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_003844_005) → IDF, June 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_013300_004) → Foundation for Defense of Democracies (FDD), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260107_232953_002) → Dr. Omer Dostri, November 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_001031_009) → i24NEWS Staff, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260203_091235_001) → Israel Defense Forces, N.D.
+2app.js:652    🔧 Bare citation resolved: (req_20260107_225924_002) → Emanuel Fabian, July 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_010250_004) → Critical Threats, September 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_013839_010) → Israel Defense Forces (IDF), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_002908_005) → Emanuel Fabian, May 2024
+app.js:652    🔧 Bare citation resolved: (req_20260107_232953_002) → Dr. Omer Dostri, November 2023
+app.js:652    🔧 Bare citation resolved: (req_20260108_010250_004) → Critical Threats, September 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_013839_010) → Israel Defense Forces (IDF), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260107_232758_009) → Stav Levaton, September 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_013112_000) → Stav Levaton, December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_031023_013) → JNS Staff, January 2026
+app.js:652    🔧 Bare citation resolved: (req_20260108_013839_010) → Israel Defense Forces (IDF), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_013300_004) → Foundation for Defense of Democracies (FDD), January 2025
+app.js:652    🔧 Bare citation resolved: (req_20260108_010250_004) → Critical Threats, September 2024
+app.js:652    🔧 Bare citation resolved: (req_20260108_024954_007) → Yonah Jeremy Bob, December 2025
+app.js:652    🔧 Bare citation resolved: (req_20260107_234446_004) → Peter Beaumont, December 2023
+app.js:677 ✅ Citation rendering complete: 102 replacements made
+app.js:935 ✅ Adding PDF export button for conversation: 0
+app.js:509 📊 Query response data: {retrieved_docs_count: 50, retrieved_qa_count: 50, retrieved_qa_present: true, retrieved_qa_sample: {…}, metadata: {…}, …}
+app.js:526 🎨 Calling updateDocumentList with: {docs_count: 50, qa_count: 50}
+app.js:1300 🔍 updateDocumentList called with: {documents_type: 'object', documents_count: 50, qaItems_type: 'object', qaItems_count: 50, qaItems_isArray: true, …}
+app.js:379 📍 Citation clicked: docId='doc_0afe40240f08', refType='qa-1'
+app.js:796 🎯 Dynamic lookup: docId='doc_0afe40240f08', refType='qa-1'
+app.js:802    QA card search: doc_id='doc_0afe40240f08', qa_num='1' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:52:30.072749'}
+app.js:379 📍 Citation clicked: docId='req_20260108_010630_010', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_010630_010', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_010630_010' ✅
+app.js:379 📍 Citation clicked: docId='req_20260108_003844_005', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_003844_005', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_003844_005' ✅
+app.js:379 📍 Citation clicked: docId='req_20260108_002522_001', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_002522_001', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_002522_001' ✅
+app.js:379 📍 Citation clicked: docId='req_20260108_001031_009', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_001031_009', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_001031_009' ✅
+app.js:379 📍 Citation clicked: docId='req_20260108_024954_007', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_024954_007', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_024954_007' ✅
+app.js:379 📍 Citation clicked: docId='doc_d157e1b65044', refType='qa-13'
+app.js:796 🎯 Dynamic lookup: docId='doc_d157e1b65044', refType='qa-13'
+app.js:802    QA card search: doc_id='doc_d157e1b65044', qa_num='13' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:52:45.073026'}
+app.js:379 📍 Citation clicked: docId='doc_5d4a87024e33', refType='qa-7'
+app.js:796 🎯 Dynamic lookup: docId='doc_5d4a87024e33', refType='qa-7'
+app.js:802    QA card search: doc_id='doc_5d4a87024e33', qa_num='7' ✅
+app.js:379 📍 Citation clicked: docId='doc_af7f93ac21c5', refType='qa-41'
+app.js:796 🎯 Dynamic lookup: docId='doc_af7f93ac21c5', refType='qa-41'
+app.js:802    QA card search: doc_id='doc_af7f93ac21c5', qa_num='41' ✅
+app.js:379 📍 Citation clicked: docId='doc_5edae3c8a923', refType='qa-10'
+app.js:796 🎯 Dynamic lookup: docId='doc_5edae3c8a923', refType='qa-10'
+app.js:802    QA card search: doc_id='doc_5edae3c8a923', qa_num='10' ✅
+app.js:379 📍 Citation clicked: docId='doc_5bf03a93e3a0', refType='qa-30'
+app.js:796 🎯 Dynamic lookup: docId='doc_5bf03a93e3a0', refType='qa-30'
+app.js:802    QA card search: doc_id='doc_5bf03a93e3a0', qa_num='30' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:53:00.073275'}
+app.js:379 📍 Citation clicked: docId='req_20260108_013450_005', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_013450_005', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_013450_005' ❌
+app.js:815 ⚠️ Card not found: {cardIdOrDocId: 'req_20260108_013450_005', refType: 'summary'}
+scrollToAndHighlightCard @ app.js:815
+(anonymous) @ app.js:380Understand this warning
+app.js:379 📍 Citation clicked: docId='req_20260108_010630_010', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_010630_010', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_010630_010' ✅
+app.js:379 📍 Citation clicked: docId='req_20260108_004031_003', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_004031_003', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_004031_003' ❌
+app.js:815 ⚠️ Card not found: {cardIdOrDocId: 'req_20260108_004031_003', refType: 'summary'}
+scrollToAndHighlightCard @ app.js:815
+(anonymous) @ app.js:380Understand this warning
+app.js:379 📍 Citation clicked: docId='req_20260108_013450_005', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_013450_005', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_013450_005' ❌
+app.js:815 ⚠️ Card not found: {cardIdOrDocId: 'req_20260108_013450_005', refType: 'summary'}
+scrollToAndHighlightCard @ app.js:815
+(anonymous) @ app.js:380Understand this warning
+app.js:379 📍 Citation clicked: docId='req_20260108_013839_010', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_013839_010', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_013839_010' ✅
+app.js:379 📍 Citation clicked: docId='req_20260203_080733_009', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260203_080733_009', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260203_080733_009' ✅
+app.js:379 📍 Citation clicked: docId='doc_0afe40240f08', refType='qa-1'
+app.js:796 🎯 Dynamic lookup: docId='doc_0afe40240f08', refType='qa-1'
+app.js:802    QA card search: doc_id='doc_0afe40240f08', qa_num='1' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:53:15.073524'}
+app.js:379 📍 Citation clicked: docId='req_20260108_031023_013', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_031023_013', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_031023_013' ✅
+app.js:379 📍 Citation clicked: docId='doc_088f0fc6b3a8', refType='qa-4'
+app.js:796 🎯 Dynamic lookup: docId='doc_088f0fc6b3a8', refType='qa-4'
+app.js:802    QA card search: doc_id='doc_088f0fc6b3a8', qa_num='4' ✅
+app.js:379 📍 Citation clicked: docId='doc_19995adf8c5c', refType='qa-18'
+app.js:796 🎯 Dynamic lookup: docId='doc_19995adf8c5c', refType='qa-18'
+app.js:802    QA card search: doc_id='doc_19995adf8c5c', qa_num='18' ✅
+app.js:379 📍 Citation clicked: docId='doc_3625bafe4a90', refType='qa-8'
+app.js:796 🎯 Dynamic lookup: docId='doc_3625bafe4a90', refType='qa-8'
+app.js:802    QA card search: doc_id='doc_3625bafe4a90', qa_num='8' ✅
+app.js:379 📍 Citation clicked: docId='req_20260203_091235_001', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260203_091235_001', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260203_091235_001' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:53:30.073775'}
+app.js:379 📍 Citation clicked: docId='doc_5d35bdb6f722', refType='qa-21'
+app.js:796 🎯 Dynamic lookup: docId='doc_5d35bdb6f722', refType='qa-21'
+app.js:802    QA card search: doc_id='doc_5d35bdb6f722', qa_num='21' ✅
+app.js:379 📍 Citation clicked: docId='doc_ea55b5b37177', refType='qa-5'
+app.js:796 🎯 Dynamic lookup: docId='doc_ea55b5b37177', refType='qa-5'
+app.js:802    QA card search: doc_id='doc_ea55b5b37177', qa_num='5' ✅
+app.js:379 📍 Citation clicked: docId='req_20260107_225924_002', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260107_225924_002', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260107_225924_002' ✅
+app.js:379 📍 Citation clicked: docId='doc_8dc999cbdd68', refType='qa-47'
+app.js:796 🎯 Dynamic lookup: docId='doc_8dc999cbdd68', refType='qa-47'
+app.js:802    QA card search: doc_id='doc_8dc999cbdd68', qa_num='47' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:53:45.074042'}
+app.js:379 📍 Citation clicked: docId='req_20260108_010250_004', refType='summary'
+app.js:796 🎯 Dynamic lookup: docId='req_20260108_010250_004', refType='summary'
+app.js:806    Summary card search: doc_id='req_20260108_010250_004' ✅
+app.js:379 📍 Citation clicked: docId='doc_35b1e75c1da7', refType='qa-34'
+app.js:796 🎯 Dynamic lookup: docId='doc_35b1e75c1da7', refType='qa-34'
+app.js:802    QA card search: doc_id='doc_35b1e75c1da7', qa_num='34' ✅
+app.js:379 📍 Citation clicked: docId='doc_43b5014efe31', refType='qa-24'
+app.js:796 🎯 Dynamic lookup: docId='doc_43b5014efe31', refType='qa-24'
+app.js:802    QA card search: doc_id='doc_43b5014efe31', qa_num='24' ✅
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:54:00.074297'}
+app.js:379 📍 Citation clicked: docId='doc_0afe40240f08', refType='qa-1'
+app.js:796 🎯 Dynamic lookup: docId='doc_0afe40240f08', refType='qa-1'
+app.js:802    QA card search: doc_id='doc_0afe40240f08', qa_num='1' ✅
+app.js:1540 📄 Exporting PDF for message: 0
+app.js:1579 ✅ PDF exported: Compare_and_contrast_the_two_forces_20260211_175406.pdf
+(index):1 The file at 'blob:http://192.168.1.3:5001/1b05b8e9-6025-469d-8259-78f82a9ffbe3' was loaded over an insecure connection. This file should be served over HTTPS.Understand this error
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:54:15.074562'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:54:30.074822'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:54:45.075094'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:55:00.075364'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:55:15.075686'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:55:30.075960'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:55:45.076196'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:56:00.076440'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:56:15.076686'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:56:30.076945'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:56:45.077215'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:57:00.077466'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:57:15.077711'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:57:30.077962'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:57:45.078214'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:58:00.078456'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:58:15.078700'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:58:30.078951'}
+app.js:98 📬 Notification received: {type: 'heartbeat', timestamp: '2026-02-11T17:58:45.079222'}
+
+(2) The in-line citations are looking good but the actual reference list still show ND, despite the actual source data being updated. I can't find any ND in the body but the citations list:
+
+[4] Contributors to Wikimedia projects (ND). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on ND.
+[5] Contributors to Wikimedia projects (ND). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on ND.
+[6] Contributors to Wikimedia projects (ND). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on ND.
+[
+
+---
+Citation section refers to the same articles multiple times, probably by mention.
+
+[1] Contributors to Wikimedia projects (2026). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on 2026.
+[2] Yonah Jeremy Bob (December 2025). IDF to probe Gaza operations, Hamas survival | The
+Jerusalem Post. Published by *The Jerusalem Post* on 29 December 2025.
+[3] Contributors to Wikimedia projects (ND). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on ND.
+[4] Contributors to Wikimedia projects (ND). List of Israel Defense Forces operations.
+Published by *Wikimedia Foundation* on ND.
+[
+
+  Each of theses have the same hyper link, Contributors to Wikimedia projects (2026). List of Israel Defense Forces operations. consider a dedup strategy for the citation section based on the hyperlink url. Also enusre that we resolve the hyperlink so it there is arabic it doesn appears as %A7%D8... etc
+
+
+  If a citation group all refer to the same underlying url: and press releases (Israel Defense Forces (IDF), January 2025; IDF,
+January 2025).  here are different citation but the hyperlink is the same
+
+Here is the prompt we can use, store it in:

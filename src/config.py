@@ -31,7 +31,7 @@ defaults = {
         # GCP Gemini configuration (alternative to local LLM)
         "project_id": "rapporteurclients",  # Set via PROJECT_ID env var or config
         "location": "us-central1",  # GCP region for Vertex AI
-        "model_name": "gemini-2.5-flash",  # Fast model with good performance
+        "model_name": "gemini-2.5-pro",  # Fast model with good performance
         "timeout": 300,  # Request timeout for Gemini API
         "api_key": None,  # Set via GOOGLE_API_KEY env var or config (for direct API, not Vertex AI)
         # Note: Uses llm.* settings for temperature, top_p, max_length, etc.
@@ -300,14 +300,14 @@ defaults = {
         "model_name": "gpt-4o",  # Specific model name for citation research (faster than gpt-5.1)
         "timeout": 180,  # Request timeout in seconds
         "max_tokens": 32000,  # Maximum tokens in response (increased to prevent truncation)
-        "temperature": 0.7,  # Temperature for generation
+        "temperature": 0.5,  # Temperature for generation
         "reasoning_effort": "medium",  # Reasoning effort: low, medium, high
         "verbosity": "medium",  # Verbosity level: low, medium, high
     },
     "llm": {
         # Generic LLM configuration (used by Gemini client)
         "max_length": 32000,  # Maximum output length
-        "temperature": 0.7,  # Temperature for generation
+        "temperature": 0.5,  # Temperature for generation
         "top_p": 0.9,  # Nucleus sampling parameter
         "max_retries": 3,  # Maximum retry attempts
         "retry_delay": 1.0,  # Delay between retries in seconds

@@ -1,0 +1,659 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DataViewer — Index Browser</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #242736;
+    --border: #2e3144;
+    --text: #e1e4ed;
+    --text-dim: #8b8fa3;
+    --accent: #6c8aff;
+    --accent-dim: #4a5e99;
+    --green: #3ecf8e;
+    --orange: #f5a623;
+    --red: #e5534b;
+    --mono: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+  }
+
+  /* ---- Header ---- */
+  .header {
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 16px;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .header .stats {
+    font-size: 12px;
+    color: var(--text-dim);
+    flex-shrink: 0;
+  }
+  .search-box {
+    flex: 1;
+    max-width: 400px;
+    position: relative;
+  }
+  .search-box input {
+    width: 100%;
+    padding: 6px 12px 6px 32px;
+    border-radius: 6px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 13px;
+    outline: none;
+  }
+  .search-box input:focus { border-color: var(--accent); }
+  .search-box::before {
+    content: '🔍';
+    position: absolute;
+    left: 8px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 13px;
+  }
+  .search-results {
+    position: absolute;
+    top: 100%;
+    left: 0;
+    right: 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    max-height: 300px;
+    overflow-y: auto;
+    display: none;
+    z-index: 200;
+  }
+  .search-results.show { display: block; }
+  .search-result-item {
+    padding: 8px 12px;
+    cursor: pointer;
+    font-size: 13px;
+    border-bottom: 1px solid var(--border);
+  }
+  .search-result-item:hover { background: var(--surface2); }
+  .search-result-item .match-type {
+    font-size: 10px;
+    color: var(--accent);
+    text-transform: uppercase;
+    margin-left: 8px;
+  }
+
+  /* ---- Navigation ---- */
+  .nav-bar {
+    background: var(--surface2);
+    border-bottom: 1px solid var(--border);
+    padding: 8px 24px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    position: sticky;
+    top: 49px;
+    z-index: 90;
+  }
+  .nav-btn {
+    padding: 5px 14px;
+    border-radius: 5px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    cursor: pointer;
+    font-size: 13px;
+    transition: background 0.15s;
+  }
+  .nav-btn:hover { background: var(--accent-dim); }
+  .nav-btn:disabled { opacity: 0.4; cursor: default; }
+  .nav-btn.primary {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: #fff;
+    font-weight: 600;
+  }
+  .nav-btn.primary:hover { background: #5a7ae6; }
+  .nav-btn.danger {
+    background: var(--red);
+    border-color: var(--red);
+    color: #fff;
+  }
+  .nav-info {
+    font-size: 13px;
+    color: var(--text-dim);
+    min-width: 140px;
+    text-align: center;
+  }
+  .nav-jump {
+    width: 70px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    font-size: 13px;
+    text-align: center;
+  }
+  .nav-spacer { flex: 1; }
+  .status-msg {
+    font-size: 12px;
+    padding: 3px 10px;
+    border-radius: 4px;
+    display: none;
+  }
+  .status-msg.show { display: inline-block; }
+  .status-msg.success { background: rgba(62,207,142,0.15); color: var(--green); }
+  .status-msg.error { background: rgba(229,83,75,0.15); color: var(--red); }
+
+  /* ---- Main layout ---- */
+  .main {
+    display: flex;
+    gap: 0;
+    height: calc(100vh - 98px);
+  }
+
+  /* ---- Metadata panel (left) ---- */
+  .meta-panel {
+    width: 380px;
+    min-width: 320px;
+    border-right: 1px solid var(--border);
+    overflow-y: auto;
+    padding: 16px;
+    flex-shrink: 0;
+  }
+  .meta-panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+  .meta-field {
+    margin-bottom: 10px;
+  }
+  .meta-field label {
+    display: block;
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.3px;
+    margin-bottom: 3px;
+  }
+  .meta-field input,
+  .meta-field textarea {
+    width: 100%;
+    padding: 6px 8px;
+    border-radius: 4px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-size: 13px;
+    font-family: var(--mono);
+    outline: none;
+  }
+  .meta-field input:focus,
+  .meta-field textarea:focus {
+    border-color: var(--accent);
+  }
+  .meta-field input[readonly] {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .meta-field .url-link {
+    font-size: 12px;
+    color: var(--accent);
+    text-decoration: none;
+    word-break: break-all;
+    display: block;
+    margin-top: 2px;
+  }
+  .meta-field .url-link:hover { text-decoration: underline; }
+
+  .meta-actions {
+    margin-top: 16px;
+    display: flex;
+    gap: 8px;
+  }
+
+  /* ---- Records panel (right) ---- */
+  .records-panel {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px 24px;
+  }
+  .records-panel h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    color: var(--text-dim);
+    letter-spacing: 0.5px;
+    margin-bottom: 12px;
+  }
+
+  .record-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 12px;
+    transition: border-color 0.15s;
+  }
+  .record-card:hover { border-color: var(--accent-dim); }
+  .record-card .qa-badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 3px;
+    background: rgba(108,138,255,0.15);
+    color: var(--accent);
+    margin-bottom: 8px;
+  }
+  .record-card .question {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    margin-bottom: 6px;
+    line-height: 1.4;
+  }
+  .record-card .answer {
+    font-size: 13px;
+    color: var(--text-dim);
+    line-height: 1.5;
+    margin-bottom: 8px;
+  }
+  .record-card .chunk-info {
+    font-size: 11px;
+    color: var(--text-dim);
+    font-family: var(--mono);
+    opacity: 0.7;
+  }
+
+  /* ---- Toasts ---- */
+  .toast-container {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    z-index: 500;
+  }
+  .toast {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 16px;
+    margin-top: 8px;
+    font-size: 13px;
+    animation: slideIn 0.2s ease;
+  }
+  .toast.success { border-left: 3px solid var(--green); }
+  .toast.error { border-left: 3px solid var(--red); }
+  @keyframes slideIn {
+    from { opacity: 0; transform: translateX(30px); }
+    to { opacity: 1; transform: translateX(0); }
+  }
+
+  /* ---- Empty state ---- */
+  .empty-state {
+    text-align: center;
+    padding: 60px 24px;
+    color: var(--text-dim);
+  }
+  .empty-state h2 { font-size: 18px; margin-bottom: 8px; color: var(--text); }
+  .empty-state p { font-size: 14px; }
+
+  /* ---- Keyboard hints ---- */
+  .kbd-hints {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-left: auto;
+  }
+  kbd {
+    display: inline-block;
+    padding: 1px 5px;
+    border-radius: 3px;
+    border: 1px solid var(--border);
+    background: var(--surface);
+    font-family: var(--mono);
+    font-size: 11px;
+  }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<div class="header">
+  <h1>📊 DataViewer</h1>
+  <span class="stats">{{ index_file }} · {{ total_docs }} docs · {{ total_records }} records</span>
+  <div class="search-box">
+    <input type="text" id="searchInput" placeholder="Search by doc_id, title, or author…">
+    <div class="search-results" id="searchResults"></div>
+  </div>
+  <div class="kbd-hints">
+    <kbd>←</kbd> <kbd>→</kbd> navigate &nbsp;
+    <kbd>Ctrl+S</kbd> save
+  </div>
+</div>
+
+<!-- Navigation -->
+<div class="nav-bar">
+  <button class="nav-btn" id="btnFirst" title="First">⏮</button>
+  <button class="nav-btn" id="btnPrev" title="Previous (←)">◀ Prev</button>
+  <input type="number" class="nav-jump" id="jumpInput" min="1" value="1" title="Jump to document #">
+  <span class="nav-info" id="navInfo">— / —</span>
+  <button class="nav-btn" id="btnNext" title="Next (→)">Next ▶</button>
+  <button class="nav-btn" id="btnLast" title="Last">⏭</button>
+  <div class="nav-spacer"></div>
+  <button class="nav-btn primary" id="btnUpdate" title="Apply metadata changes to all records with this doc_id">✏️ Apply</button>
+  <button class="nav-btn danger" id="btnWrite" title="Write ALL changes to disk (Ctrl+S)">💾 Write to Disk</button>
+  <span class="status-msg" id="statusMsg"></span>
+</div>
+
+<!-- Main content -->
+<div class="main">
+  <!-- Left: Metadata Editor -->
+  <div class="meta-panel" id="metaPanel">
+    <h2>Document Metadata</h2>
+    <div class="meta-field">
+      <label>Document ID</label>
+      <input type="text" id="metaDocId" readonly>
+    </div>
+    <div class="meta-field">
+      <label>Title</label>
+      <input type="text" id="metaTitle">
+    </div>
+    <div class="meta-field">
+      <label>Author</label>
+      <input type="text" id="metaAuthor">
+    </div>
+    <div class="meta-field">
+      <label>Creation Date</label>
+      <input type="text" id="metaDate" placeholder="e.g. 2024-03-15">
+    </div>
+    <div class="meta-field">
+      <label>Language</label>
+      <input type="text" id="metaLang">
+    </div>
+    <div class="meta-field">
+      <label>Content Type</label>
+      <input type="text" id="metaContentType">
+    </div>
+    <div class="meta-field">
+      <label>Source URL</label>
+      <a class="url-link" id="metaUrlLink" href="#" target="_blank" rel="noopener"></a>
+    </div>
+  </div>
+
+  <!-- Right: QA Records -->
+  <div class="records-panel" id="recordsPanel">
+    <h2 id="recordsHeading">Q&amp;A Pairs</h2>
+    <div id="recordsList"></div>
+  </div>
+</div>
+
+<div class="toast-container" id="toasts"></div>
+
+<script>
+(function() {
+  // State
+  let currentIndex = 0;
+  let totalDocs = {{ total_docs }};
+  let pendingChanges = {};  // doc_id -> {field: value}
+  let searchTimeout = null;
+
+  // Elements
+  const navInfo     = document.getElementById('navInfo');
+  const jumpInput   = document.getElementById('jumpInput');
+  const searchInput = document.getElementById('searchInput');
+  const searchResults = document.getElementById('searchResults');
+  const recordsList = document.getElementById('recordsList');
+  const statusMsg   = document.getElementById('statusMsg');
+
+  // Metadata fields (editable)
+  const fields = {
+    title:         document.getElementById('metaTitle'),
+    author:        document.getElementById('metaAuthor'),
+    creation_date: document.getElementById('metaDate'),
+    language:      document.getElementById('metaLang'),
+    content_type:  document.getElementById('metaContentType'),
+  };
+  const docIdField = document.getElementById('metaDocId');
+  const urlLink    = document.getElementById('metaUrlLink');
+
+  // --------------- Data fetching ---------------
+  async function loadDoc(idx) {
+    try {
+      const resp = await fetch(`/api/doc/${idx}`);
+      const data = await resp.json();
+      if (data.error) { showToast(data.error, 'error'); return; }
+      currentIndex = data.index;
+      renderDoc(data);
+    } catch(e) {
+      showToast('Failed to load document', 'error');
+    }
+  }
+
+  function renderDoc(data) {
+    // Update nav
+    navInfo.textContent = `${data.index + 1} / ${data.total_docs}`;
+    jumpInput.value = data.index + 1;
+    jumpInput.max = data.total_docs;
+    totalDocs = data.total_docs;
+
+    // Update metadata panel from first record
+    const meta = data.records[0] || {};
+    docIdField.value = data.doc_id;
+    fields.title.value         = meta.title || '';
+    fields.author.value        = meta.author || '';
+    fields.creation_date.value = meta.creation_date || '';
+    fields.language.value      = meta.language || '';
+    fields.content_type.value  = meta.content_type || '';
+
+    if (meta.source_url) {
+      urlLink.href = meta.source_url;
+      urlLink.textContent = meta.display_url || meta.source_url;
+      urlLink.style.display = 'block';
+    } else {
+      urlLink.style.display = 'none';
+    }
+
+    // Render records
+    recordsList.innerHTML = '';
+    document.getElementById('recordsHeading').textContent =
+      `Q&A Pairs (${data.record_count} records)`;
+
+    data.records.forEach((rec, i) => {
+      const card = document.createElement('div');
+      card.className = 'record-card';
+
+      const badge = rec.qa_index !== ''
+        ? `<span class="qa-badge">QA-${rec.qa_index} of ${rec.qa_total}</span>`
+        : (rec.chunk_id ? `<span class="qa-badge">${rec.chunk_id}</span>` : '');
+
+      const question = rec.question
+        ? `<div class="question">Q: ${escapeHtml(rec.question)}</div>`
+        : '';
+      const answer = rec.answer
+        ? `<div class="answer">A: ${escapeHtml(rec.answer)}</div>`
+        : '';
+      const chunkInfo = rec.word_count
+        ? `<div class="chunk-info">${rec.word_count} words · chunk ${rec.chunk_index || '-'}</div>`
+        : '';
+
+      card.innerHTML = badge + question + answer + chunkInfo;
+      recordsList.appendChild(card);
+    });
+
+    // Enable/disable nav buttons
+    document.getElementById('btnPrev').disabled = currentIndex <= 0;
+    document.getElementById('btnFirst').disabled = currentIndex <= 0;
+    document.getElementById('btnNext').disabled = currentIndex >= totalDocs - 1;
+    document.getElementById('btnLast').disabled = currentIndex >= totalDocs - 1;
+  }
+
+  // --------------- Apply & Write ---------------
+  async function applyUpdate() {
+    const docId = docIdField.value;
+    const updates = {};
+    for (const [key, el] of Object.entries(fields)) {
+      updates[key] = el.value;
+    }
+
+    try {
+      const resp = await fetch('/api/update', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ doc_id: docId, updates }),
+      });
+      const data = await resp.json();
+      if (data.error) {
+        showToast(data.error, 'error');
+      } else {
+        showToast(`Updated ${data.updated} records for ${docId}`, 'success');
+      }
+    } catch(e) {
+      showToast('Update failed', 'error');
+    }
+  }
+
+  async function writeToDisk() {
+    try {
+      const resp = await fetch('/api/write', {
+        method: 'POST',
+      });
+      const data = await resp.json();
+      if (data.error) {
+        showToast(`Write failed: ${data.error}`, 'error');
+      } else {
+        showToast(`✅ Wrote ${data.records} records to disk`, 'success');
+        showStatus('Saved', 'success');
+      }
+    } catch(e) {
+      showToast('Write to disk failed', 'error');
+    }
+  }
+
+  // --------------- Search ---------------
+  async function doSearch(query) {
+    if (!query) { searchResults.classList.remove('show'); return; }
+    try {
+      const resp = await fetch(`/api/search?q=${encodeURIComponent(query)}`);
+      const data = await resp.json();
+      searchResults.innerHTML = '';
+      if (!data.results || data.results.length === 0) {
+        searchResults.innerHTML = '<div class="search-result-item" style="color:var(--text-dim)">No results</div>';
+        searchResults.classList.add('show');
+        return;
+      }
+      data.results.forEach(r => {
+        const item = document.createElement('div');
+        item.className = 'search-result-item';
+        item.innerHTML = `${escapeHtml(r.doc_id)} <span class="match-type">${r.match}</span>`;
+        item.addEventListener('click', () => {
+          loadDoc(r.index);
+          searchResults.classList.remove('show');
+          searchInput.value = '';
+        });
+        searchResults.appendChild(item);
+      });
+      searchResults.classList.add('show');
+    } catch(e) {
+      console.error('Search failed', e);
+    }
+  }
+
+  // --------------- UI Helpers ---------------
+  function showToast(msg, type) {
+    const container = document.getElementById('toasts');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = msg;
+    container.appendChild(toast);
+    setTimeout(() => toast.remove(), 4000);
+  }
+
+  function showStatus(msg, type) {
+    statusMsg.textContent = msg;
+    statusMsg.className = `status-msg show ${type}`;
+    setTimeout(() => statusMsg.classList.remove('show'), 3000);
+  }
+
+  function escapeHtml(s) {
+    const div = document.createElement('div');
+    div.textContent = s;
+    return div.innerHTML;
+  }
+
+  // --------------- Event Listeners ---------------
+  document.getElementById('btnPrev').addEventListener('click', () => loadDoc(currentIndex - 1));
+  document.getElementById('btnNext').addEventListener('click', () => loadDoc(currentIndex + 1));
+  document.getElementById('btnFirst').addEventListener('click', () => loadDoc(0));
+  document.getElementById('btnLast').addEventListener('click', () => loadDoc(totalDocs - 1));
+  document.getElementById('btnUpdate').addEventListener('click', applyUpdate);
+  document.getElementById('btnWrite').addEventListener('click', writeToDisk);
+
+  jumpInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      const idx = parseInt(jumpInput.value, 10) - 1;
+      if (!isNaN(idx)) loadDoc(idx);
+    }
+  });
+
+  searchInput.addEventListener('input', () => {
+    clearTimeout(searchTimeout);
+    searchTimeout = setTimeout(() => doSearch(searchInput.value.trim()), 250);
+  });
+
+  // Close search on outside click
+  document.addEventListener('click', (e) => {
+    if (!e.target.closest('.search-box')) {
+      searchResults.classList.remove('show');
+    }
+  });
+
+  // Keyboard navigation
+  document.addEventListener('keydown', (e) => {
+    // Don't navigate when typing in inputs
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+      // Ctrl+S in any context = write
+      if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+        e.preventDefault();
+        writeToDisk();
+      }
+      return;
+    }
+    if (e.key === 'ArrowLeft')  { loadDoc(currentIndex - 1); }
+    if (e.key === 'ArrowRight') { loadDoc(currentIndex + 1); }
+    if (e.key === 'Home')       { loadDoc(0); }
+    if (e.key === 'End')        { loadDoc(totalDocs - 1); }
+    if ((e.ctrlKey || e.metaKey) && e.key === 's') {
+      e.preventDefault();
+      writeToDisk();
+    }
+  });
+
+  // Initial load
+  loadDoc(0);
+})();
+</script>
+</body>
+</html>

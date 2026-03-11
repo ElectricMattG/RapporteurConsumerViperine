@@ -82,7 +82,7 @@ class SearchRequest(BaseModel):
 class QueryLLMRequest(SearchRequest):
     """Request model for query_llm endpoint (extends SearchRequest)."""
     mode: Literal['ask', 'search'] = Field(default='ask', description="Query mode: 'ask' uses index only, 'search' uses web search grounding")
-    temperature: float = Field(default=0.7, description="LLM temperature", ge=0.0, le=2.0)
+    temperature: float = Field(default=0.5, description="LLM temperature", ge=0.0, le=2.0)
     max_tokens: int = Field(default=24000, description="Maximum tokens for LLM response", ge=100, le=32768)
     use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
     qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=150)
@@ -270,13 +270,28 @@ def _clean_author_name(name: str) -> str:
 
 def _format_citation_date(pub_date: Optional[str]) -> str:
     """Parse a date string into 'Month Year' format."""
-    if not pub_date:
+    if not pub_date or str(pub_date).lower() in ('null', 'none', 'nan', ''):
         return 'N.D.'
+    pub_date = str(pub_date).strip()
     try:
         date_obj = datetime.fromisoformat(pub_date.replace('Z', '+00:00'))
         return date_obj.strftime('%B %Y')
     except Exception:
+        pass
+    # Handle year-only dates like "2026" or "2024"
+    if pub_date.isdigit() and len(pub_date) == 4:
         return pub_date
+    # Handle partial dates like "2024-05"
+    try:
+        parts = pub_date.split('-')
+        if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+            year = parts[0]
+            month_num = int(parts[1])
+            month_name = datetime(2000, month_num, 1).strftime('%B')
+            return f'{month_name} {year}'
+    except Exception:
+        pass
+    return pub_date
 
 
 def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None) -> Dict[str, Dict]:
@@ -597,7 +612,7 @@ async def refine_with_qa(draft_response: str, qa_items: List[Dict], query: str, 
 
     return refined_response, prompt
 
-async def generate_web_search_response(query: str, temperature: float = 0.7, max_tokens: int = 4000) -> tuple:
+async def generate_web_search_response(query: str, temperature: float = 0.5, max_tokens: int = 4000) -> tuple:
     """
     Generate LLM response using web search grounding.
 
@@ -1000,7 +1015,7 @@ async def query_llm(request: QueryLLMRequest):
                 execution_time_ms=execution_time_ms,
                 mode=request.mode,
                 llm_response=llm_response,
-                llm_model="gemini-2.5-flash",
+                llm_model="gemini-2.5-pro",
                 llm_params={
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens
@@ -1023,7 +1038,7 @@ async def query_llm(request: QueryLLMRequest):
                 execution_time_ms=execution_time_ms,
                 mode=request.mode,
                 llm_response=llm_response,
-                llm_model="gemini-2.5-flash",
+                llm_model="gemini-2.5-pro",
                 llm_params={
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens
@@ -1094,6 +1109,173 @@ async def grounding_preview(request: GroundingPreviewRequest):
     except Exception as e:
         logger.error(f"[{request_id}] Grounding preview error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# Metadata Query Route
+# ============================================================================
+
+class MetadataQueryRequest(BaseModel):
+    """Request model for metadata-based index lookup (no embedding search)."""
+    source_url: Optional[str] = Field(None, description="Filter by exact source URL")
+    document_id: Optional[str] = Field(None, description="Filter by document_id (summary ID or QA doc_id)")
+    start_date: Optional[str] = Field(None, description="Filter start date (YYYY-MM-DD)")
+    end_date: Optional[str] = Field(None, description="Filter end date (YYYY-MM-DD)")
+    include_summaries: bool = Field(default=True, description="Search the summary index")
+    include_qa: bool = Field(default=True, description="Search the QA index")
+    max_results: int = Field(default=100, description="Max results per index", ge=1, le=500)
+
+
+class MetadataQueryResponse(BaseModel):
+    """Response model for metadata query."""
+    request_id: str
+    filters_applied: Dict[str, Optional[str]]
+    retrieved_docs: List[DocumentResult]
+    retrieved_qa: List[Dict]
+    total_summaries: int
+    total_qa: int
+    execution_time_ms: float
+
+
+def _strip_hierarchy_prefix(text: str) -> str:
+    """Strip section hierarchy prefix from chunk context.
+
+    QA contexts are stored as ``a > b > c: actual content``.
+    This returns just the content after the colon.
+    """
+    if ' > ' not in text:
+        return text
+    last_gt = text.rfind(' > ')
+    colon_pos = text.find(': ', last_gt)
+    if colon_pos != -1:
+        stripped = text[colon_pos + 2:]
+        return stripped if stripped else text
+    return text
+
+
+def _match_date_range(pub_date_str: Optional[str], start_date: Optional[str], end_date: Optional[str]) -> bool:
+    """Check whether a publication date falls within the given range."""
+    if not pub_date_str:
+        return False
+    try:
+        doc_date = datetime.strptime(pub_date_str[:10], '%Y-%m-%d').date()
+        start = datetime.strptime(start_date, '%Y-%m-%d').date() if start_date else None
+        end = datetime.strptime(end_date, '%Y-%m-%d').date() if end_date else None
+        return (not start or doc_date >= start) and (not end or doc_date <= end)
+    except (ValueError, AttributeError):
+        return False
+
+
+@app.post("/query_metadata", response_model=MetadataQueryResponse)
+async def query_metadata(request: MetadataQueryRequest):
+    """
+    Query the summary and QA indices by metadata filters instead of semantic search.
+
+    Supports filtering by source_url, document_id, and date range.
+    Returns matching summaries and QA pairs without embedding computation or LLM calls.
+    """
+    start_time = time.time()
+    request_id = str(uuid.uuid4())
+
+    has_url = bool(request.source_url)
+    has_doc_id = bool(request.document_id)
+    has_date = bool(request.start_date or request.end_date)
+
+    if not (has_url or has_doc_id or has_date):
+        raise HTTPException(
+            status_code=422,
+            detail="At least one filter required: source_url, document_id, or date range"
+        )
+
+    logger.info(
+        f"[{request_id}] Metadata query: source_url={request.source_url}, "
+        f"document_id={request.document_id}, dates={request.start_date}..{request.end_date}"
+    )
+
+    retrieved_docs: List[DocumentResult] = []
+    retrieved_qa: List[Dict] = []
+
+    # --- Search summaries ---
+    if request.include_summaries and state.index_loaded:
+        for summary in state.summaries:
+            # URL filter
+            if has_url and summary.get('source_url') != request.source_url:
+                continue
+            # Document ID filter
+            if has_doc_id and summary.get('document_id') != request.document_id:
+                continue
+            # Date filter
+            if has_date:
+                pub_date = summary.get('doc_metadata', {}).get('publication_date')
+                if not _match_date_range(pub_date, request.start_date, request.end_date):
+                    continue
+
+            retrieved_docs.append(DocumentResult(
+                document_id=summary.get('document_id', 'unknown'),
+                source_url=summary.get('source_url', 'N/A'),
+                source_url_display=decode_url_for_display(summary.get('source_url', '')),
+                publication_date=summary.get('doc_metadata', {}).get('publication_date'),
+                similarity_score=1.0,  # exact match, not similarity-based
+                summary_text=summary.get('summary_text', ''),
+                doc_metadata=summary.get('doc_metadata', {})
+            ))
+
+            if len(retrieved_docs) >= request.max_results:
+                break
+
+    # --- Search QA index ---
+    if request.include_qa and state.qa_index_loaded:
+        for qa in state.qa_items:
+            qa_meta = qa.get('doc_metadata', {})
+            qa_source_url = qa.get('source_url') or qa_meta.get('source_url')
+            qa_doc_id = qa_meta.get('document_id')
+
+            # URL filter
+            if has_url and qa_source_url != request.source_url:
+                continue
+            # Document ID filter
+            if has_doc_id and qa_doc_id != request.document_id:
+                continue
+            # Date filter
+            if has_date:
+                pub_date = qa_meta.get('creation_date') or qa_meta.get('publication_date')
+                if not _match_date_range(pub_date, request.start_date, request.end_date):
+                    continue
+
+            raw_context = qa.get('context') or ''
+            retrieved_qa.append({
+                'question': qa.get('question'),
+                'answer': qa.get('answer'),
+                'context': _strip_hierarchy_prefix(raw_context),
+                'source_url': qa_source_url,
+                'source_url_display': decode_url_for_display(qa_source_url or ''),
+                'doc_metadata': qa_meta,
+            })
+
+            if len(retrieved_qa) >= request.max_results:
+                break
+
+    execution_time_ms = (time.time() - start_time) * 1000
+
+    logger.info(
+        f"[{request_id}] Metadata query completed: "
+        f"{len(retrieved_docs)} summaries, {len(retrieved_qa)} QA pairs, {execution_time_ms:.2f}ms"
+    )
+
+    return MetadataQueryResponse(
+        request_id=request_id,
+        filters_applied={
+            "source_url": request.source_url,
+            "document_id": request.document_id,
+            "start_date": request.start_date,
+            "end_date": request.end_date,
+        },
+        retrieved_docs=retrieved_docs,
+        retrieved_qa=retrieved_qa,
+        total_summaries=len(retrieved_docs),
+        total_qa=len(retrieved_qa),
+        execution_time_ms=execution_time_ms,
+    )
 
 
 # ============================================================================
