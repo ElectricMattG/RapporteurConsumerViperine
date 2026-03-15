@@ -294,3 +294,57 @@ kafka_docker_build_push: kafka_docker_build kafka_docker_tag kafka_docker_push #
 docker_build_all: docker_build_push kafka_docker_build_push ## Build and push all Docker images (consumers + Kafka)
 	@echo ""
 	@echo "$(GREEN)$(BOLD)All Docker images built and pushed successfully!$(RESET)"
+
+# ============================================================================
+# RAG + Frontend Services
+# ============================================================================
+
+.PHONY: services_build
+services_build: ## Build RAG and frontend service images
+	@echo "$(YELLOW)$(BOLD)Building RAG and frontend service images...$(RESET)"
+	@docker-compose -f docker-compose.services.yml build
+	@echo "$(GREEN)$(BOLD)Build complete.$(RESET)"
+
+.PHONY: services_up
+services_up: ## Start RAG and frontend services (detached)
+	@echo "$(YELLOW)$(BOLD)Starting RAG and frontend services...$(RESET)"
+	@docker-compose -f docker-compose.services.yml up -d
+	@echo ""
+	@echo "$(GREEN)$(BOLD)Services started:$(RESET)"
+	@echo "  RAG service:      http://localhost:8000"
+	@echo "  Frontend service: http://localhost:5001"
+	@echo ""
+	@echo "Logs: make services_logs"
+	@echo "Stop:  make services_down"
+
+.PHONY: services_down
+services_down: ## Stop and remove RAG and frontend service containers
+	@echo "$(YELLOW)$(BOLD)Stopping services...$(RESET)"
+	@docker-compose -f docker-compose.services.yml down
+	@echo "$(GREEN)$(BOLD)Services stopped.$(RESET)"
+
+.PHONY: services_restart
+services_restart: services_down services_up ## Restart RAG and frontend services
+
+.PHONY: services_logs
+services_logs: ## Tail logs from RAG and frontend services
+	@docker-compose -f docker-compose.services.yml logs -f
+
+.PHONY: services_logs_rag
+services_logs_rag: ## Tail RAG service logs only
+	@docker-compose -f docker-compose.services.yml logs -f rag-service
+
+.PHONY: services_logs_frontend
+services_logs_frontend: ## Tail frontend service logs only
+	@docker-compose -f docker-compose.services.yml logs -f frontend-service
+
+.PHONY: services_ps
+services_ps: ## Show status of RAG and frontend service containers
+	@docker-compose -f docker-compose.services.yml ps
+
+.PHONY: services_rebuild
+services_rebuild: ## Rebuild images and restart services (no cache)
+	@echo "$(YELLOW)$(BOLD)Rebuilding services (no cache)...$(RESET)"
+	@docker-compose -f docker-compose.services.yml build --no-cache
+	@docker-compose -f docker-compose.services.yml up -d
+	@echo "$(GREEN)$(BOLD)Services rebuilt and started.$(RESET)"

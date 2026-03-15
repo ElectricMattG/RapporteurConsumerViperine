@@ -77,6 +77,9 @@ def query_rag():
         max_tokens = data.get('max_tokens', 16000)
         use_qa = data.get('use_qa', False)
         qa_top_k = data.get('qa_top_k', 5)
+        enrich = data.get('enrich', False)
+        enrich_types = data.get('enrich_types', ['all'])
+        get_linked = data.get('get_linked', False)
 
         logger.info(f"Received query: {user_query}")
 
@@ -96,7 +99,10 @@ def query_rag():
             "temperature": temperature,
             "max_tokens": max_tokens,
             "use_qa": bool(use_qa),
-            "qa_top_k": qa_top_k
+            "qa_top_k": qa_top_k,
+            "enrich": bool(enrich),
+            "enrich_types": enrich_types if isinstance(enrich_types, list) else ['all'],
+            "get_linked": bool(get_linked)
         }
 
         if start_date:
@@ -133,6 +139,7 @@ def query_rag():
             "assistant_response": rag_response.get('llm_response', '') or rag_response.get('answer', ''),
             "retrieved_docs": rag_response.get('retrieved_docs', []),
             "retrieved_qa": rag_response.get('retrieved_qa', []),
+            "enrichment_results": rag_response.get('enrichment_results', []),
             "metadata": {
                 "message_id": current_conversation_id,
                 "request_id": rag_response.get('request_id'),
@@ -220,6 +227,7 @@ def export_pdf():
             assistant_response = message.get('assistant_response', '')
             retrieved_docs = message.get('retrieved_docs', [])
             retrieved_qa = message.get('retrieved_qa', [])
+            enrichment_results = message.get('enrichment_results', [])
             citation_map = message.get('metadata', {}).get('citation_map', {})
 
         else:
@@ -228,6 +236,7 @@ def export_pdf():
             assistant_response = data.get('assistant_response', '')
             retrieved_docs = data.get('retrieved_docs', [])
             retrieved_qa = data.get('retrieved_qa', [])
+            enrichment_results = data.get('enrichment_results', [])
             citation_map = data.get('citation_map', {})
 
         # Extract client-side metadata from settings blade (if provided)
@@ -252,6 +261,7 @@ def export_pdf():
             assistant_response=assistant_response,
             retrieved_docs=retrieved_docs,
             retrieved_qa=retrieved_qa,
+            enrichment_results=enrichment_results,
             introduction=introduction,
             template_path=template_path,
             css_path=css_path,

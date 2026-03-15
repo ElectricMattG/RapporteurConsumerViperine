@@ -29,6 +29,11 @@ let settings = {
     },
     display: {
         citation_debug: false
+    },
+    enrichment: {
+        enabled: false,
+        types: ["all"],
+        get_linked: false
     }
 };
 
@@ -70,6 +75,8 @@ const summariesTopKInput = document.getElementById('summariesTopK');
 const includeQaCheckbox = document.getElementById('includeQa');
 const qaTopKInput = document.getElementById('qaTopK');
 const citationDebugCheckbox = document.getElementById('citationDebug');
+const enrichToggle = document.getElementById('enrichToggle');
+const enrichGetLinked = document.getElementById('enrichGetLinked');
 
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
@@ -175,7 +182,8 @@ function loadSettings() {
                 metadata: { ...settings.metadata, ...(parsed.metadata || {}) },
                 query: { ...settings.query, ...(parsed.query || {}) },
                 qa: { ...settings.qa, ...(parsed.qa || {}) },
-                display: { ...settings.display, ...(parsed.display || {}) }
+                display: { ...settings.display, ...(parsed.display || {}) },
+                enrichment: { ...settings.enrichment, ...(parsed.enrichment || {}) }
             };
             console.log('✅ Settings loaded from localStorage');
         }
@@ -199,6 +207,15 @@ function loadSettings() {
     if (citationDebugCheckbox) {
         citationDebugCheckbox.checked = settings.display.citation_debug === true;
     }
+    // Enrichment settings
+    if (enrichToggle) enrichToggle.checked = settings.enrichment.enabled === true;
+    if (enrichGetLinked) enrichGetLinked.checked = settings.enrichment.get_linked === true;
+    const _enrichTypes = settings.enrichment.types || ['all'];
+    const _allTypes = _enrichTypes.includes('all');
+    document.querySelectorAll('.enrich-pill').forEach(pill => {
+        const t = pill.dataset.type;
+        pill.classList.toggle('active', _allTypes || _enrichTypes.includes(t));
+    });
 }
 
 function saveSettings() {
@@ -216,6 +233,11 @@ function saveSettings() {
         settings.qa.include_qa = includeQaCheckbox.checked;
         settings.qa.qa_top_k = parseInt(qaTopKInput.value, 10) || 5;
         settings.display.citation_debug = citationDebugCheckbox ? citationDebugCheckbox.checked : false;
+        // Enrichment settings
+        settings.enrichment.enabled = enrichToggle ? enrichToggle.checked : false;
+        settings.enrichment.get_linked = enrichGetLinked ? enrichGetLinked.checked : false;
+        const _activePills = [...document.querySelectorAll('.enrich-pill.active')].map(p => p.dataset.type);
+        settings.enrichment.types = _activePills.length === 4 ? ['all'] : (_activePills.length > 0 ? _activePills : ['all']);
 
         // Save to localStorage
         localStorage.setItem('rag_settings', JSON.stringify(settings));
@@ -314,6 +336,15 @@ if (citationDebugCheckbox) {
         saveSettings();
     });
 }
+[enrichToggle, enrichGetLinked].forEach(el => {
+    if (el) el.addEventListener('change', () => { saveSettings(); });
+});
+document.querySelectorAll('.enrich-pill').forEach(pill => {
+    pill.addEventListener('click', () => {
+        pill.classList.toggle('active');
+        saveSettings();
+    });
+});
 
 // ============================================================================
 // Event Listeners
@@ -452,7 +483,10 @@ async function handleSendQuery() {
             temperature: 0.5,
             max_tokens: 16000,
             use_qa: useQa,
-            qa_top_k: qaTopK
+            qa_top_k: qaTopK,
+            enrich: settings.enrichment.enabled || false,
+            enrich_types: settings.enrichment.types || ['all'],
+            get_linked: settings.enrichment.get_linked || false
         };
 
         // Add date filters if set
@@ -503,6 +537,7 @@ async function handleSendQuery() {
             assistant_message_id: assistantMessageId,
             retrieved_docs: data.retrieved_docs,
             retrieved_qa: data.retrieved_qa || [],
+            enrichment_results: data.enrichment_results || [],
             metadata: data.metadata
         };
 
@@ -528,7 +563,7 @@ async function handleSendQuery() {
             docs_count: data.retrieved_docs?.length || 0,
             qa_count: (data.retrieved_qa || []).length
         });
-        updateDocumentList(data.retrieved_docs, data.retrieved_qa || []);
+        updateDocumentList(data.retrieved_docs, data.retrieved_qa || [], data.enrichment_results || []);
 
         // Set as current conversation
         currentConversationId = data.id;
@@ -1323,7 +1358,7 @@ function viewConversationEntry(conversationId) {
     }
 
     // Update document list with this conversation's retrieved docs
-    updateDocumentList(conversation.retrieved_docs, conversation.retrieved_qa || []);
+    updateDocumentList(conversation.retrieved_docs, conversation.retrieved_qa || [], conversation.enrichment_results || []);
 
     // Set as current and highlight in query list
     currentConversationId = conversationId;
@@ -1406,7 +1441,7 @@ async function loadConversations() {
         // Load most recent conversation's documents
         if (conversations.length > 0) {
             const mostRecent = conversations[conversations.length - 1];
-            updateDocumentList(mostRecent.retrieved_docs, mostRecent.retrieved_qa || []);
+            updateDocumentList(mostRecent.retrieved_docs, mostRecent.retrieved_qa || [], mostRecent.enrichment_results || []);
             currentConversationId = mostRecent.id;
             highlightCurrentQuery();
         }
@@ -1423,7 +1458,7 @@ async function loadConversations() {
 // Document List (Right Panel)
 // ============================================================================
 
-function updateDocumentList(documents, qaItems) {
+function updateDocumentList(documents, qaItems, enrichmentResults) {
     console.log('🔍 updateDocumentList called with:', {
         documents_type: typeof documents,
         documents_count: documents?.length || 0,
@@ -1443,7 +1478,165 @@ function updateDocumentList(documents, qaItems) {
         return;
     }
 
-    // Render summary documents first
+    // Render enrichment results FIRST so they are immediately visible
+    const hasEnrichment = enrichmentResults && enrichmentResults.length > 0;
+    if (hasEnrichment) {
+        const enrichHeader = document.createElement('div');
+        enrichHeader.className = 'section-header enrichment-header';
+        enrichHeader.textContent = `Enrichment Results (${enrichmentResults.length})`;
+        documentList.appendChild(enrichHeader);
+
+        enrichmentResults.forEach((item, index) => {
+            const card = document.createElement('div');
+            // Determine link type: linked records have a non-empty event_key
+            const isLinked = !!(item.event_key);
+            card.className = `document-item enrichment-card ${isLinked ? 'enrichment-linked' : 'enrichment-unlinked'}`;
+
+            // Badge: linked vs unlinked
+            const badge = document.createElement('div');
+            badge.className = `enrichment-badge ${isLinked ? 'badge-linked' : 'badge-unlinked'}`;
+            badge.textContent = isLinked ? 'Event-Linked' : 'Unlinked Media';
+            card.appendChild(badge);
+
+            // Event type badges derived from record content
+            const enrichTypes = [];
+            if (item.event_descriptor) enrichTypes.push('events');
+            if (item.eo_identifier) enrichTypes.push('executive order');
+            if (item.media_framing) enrichTypes.push('media');
+            const mfRisk = item.media_framing && (typeof item.media_framing === 'object') ? item.media_framing.risk : null;
+            if (mfRisk) enrichTypes.push('risk');
+
+            enrichTypes.forEach(t => {
+                const typeBadge = document.createElement('span');
+                typeBadge.className = 'enrichment-type-badge';
+                typeBadge.textContent = t;
+                card.appendChild(typeBadge);
+            });
+
+            // Publisher / source
+            const publisher = item.publisher || item.source_name || '';
+            if (publisher) {
+                const pubDiv = document.createElement('div');
+                pubDiv.className = 'doc-meta';
+                pubDiv.innerHTML = `<strong>Publisher:</strong> ${publisher}`;
+                card.appendChild(pubDiv);
+            }
+
+            // Time window
+            if (item.time_window) {
+                const twDiv = document.createElement('div');
+                twDiv.className = 'doc-meta';
+                twDiv.innerHTML = `<strong>Time Window:</strong> ${item.time_window}`;
+                card.appendChild(twDiv);
+            }
+
+            // Salience score
+            if (item.consumer_salience != null) {
+                const salDiv = document.createElement('div');
+                salDiv.className = 'doc-relevance';
+                salDiv.textContent = `Salience: ${(item.consumer_salience * 100).toFixed(1)}%`;
+                card.appendChild(salDiv);
+            }
+
+            // Event descriptor (more readable than event_key hash)
+            if (item.event_descriptor) {
+                const ekDiv = document.createElement('div');
+                ekDiv.className = 'doc-meta';
+                ekDiv.innerHTML = `<strong>Event:</strong> ${item.event_descriptor}`;
+                card.appendChild(ekDiv);
+            } else if (item.event_key) {
+                const ekDiv = document.createElement('div');
+                ekDiv.className = 'doc-meta';
+                ekDiv.innerHTML = `<strong>Event ID:</strong> ${item.event_key}`;
+                card.appendChild(ekDiv);
+            }
+
+            // EO identifier
+            if (item.eo_identifier) {
+                const eoDiv = document.createElement('div');
+                eoDiv.className = 'doc-meta';
+                eoDiv.innerHTML = `<strong>EO:</strong> ${item.eo_identifier}`;
+                card.appendChild(eoDiv);
+            }
+
+            // Media framing (collapsible) — object with sub-fields
+            const mf = item.media_framing;
+            if (mf && typeof mf === 'object') {
+                const framingToggle = document.createElement('button');
+                framingToggle.className = 'enrichment-framing-toggle';
+                framingToggle.textContent = 'Show Framing';
+                framingToggle.setAttribute('aria-expanded', 'false');
+
+                const framingContent = document.createElement('div');
+                framingContent.className = 'enrichment-framing-content hidden';
+
+                // Render framing sub-fields
+                const framingFields = Object.entries(mf).filter(([k, v]) => v != null && k !== 'risk');
+                if (framingFields.length > 0) {
+                    framingContent.innerHTML = framingFields.map(([k, v]) =>
+                        `<div><strong>${k.replace(/_/g,' ')}:</strong> ${typeof v === 'object' ? JSON.stringify(v) : v}</div>`
+                    ).join('');
+                } else {
+                    framingContent.textContent = JSON.stringify(mf);
+                }
+
+                framingToggle.addEventListener('click', () => {
+                    const expanded = framingToggle.getAttribute('aria-expanded') === 'true';
+                    framingToggle.setAttribute('aria-expanded', String(!expanded));
+                    framingToggle.textContent = expanded ? 'Show Framing' : 'Hide Framing';
+                    framingContent.classList.toggle('hidden', expanded);
+                });
+
+                card.appendChild(framingToggle);
+                card.appendChild(framingContent);
+            } else if (mf && typeof mf === 'string') {
+                const framingToggle = document.createElement('button');
+                framingToggle.className = 'enrichment-framing-toggle';
+                framingToggle.textContent = 'Show Framing';
+                framingToggle.setAttribute('aria-expanded', 'false');
+
+                const framingContent = document.createElement('div');
+                framingContent.className = 'enrichment-framing-content hidden';
+                framingContent.textContent = mf;
+
+                framingToggle.addEventListener('click', () => {
+                    const expanded = framingToggle.getAttribute('aria-expanded') === 'true';
+                    framingToggle.setAttribute('aria-expanded', String(!expanded));
+                    framingToggle.textContent = expanded ? 'Show Framing' : 'Hide Framing';
+                    framingContent.classList.toggle('hidden', expanded);
+                });
+
+                card.appendChild(framingToggle);
+                card.appendChild(framingContent);
+            }
+
+            // Risk badge — mf.risk is {rating, reasoning} or null
+            const riskData = mf && typeof mf === 'object' ? mf.risk : null;
+            if (riskData) {
+                const riskLevel = (riskData.rating || '').toLowerCase();
+                const riskBadge = document.createElement('span');
+                riskBadge.className = `enrichment-risk-badge risk-${riskLevel || 'medium'}`;
+                riskBadge.textContent = `Risk: ${riskData.rating || 'Unknown'}`;
+                riskBadge.title = riskData.reasoning || '';
+                card.appendChild(riskBadge);
+            }
+
+            // Source URL
+            if (item.link) {
+                const urlLink = document.createElement('a');
+                urlLink.className = 'doc-url';
+                urlLink.href = item.link;
+                urlLink.target = '_blank';
+                urlLink.rel = 'noopener noreferrer';
+                urlLink.textContent = item.link;
+                card.appendChild(urlLink);
+            }
+
+            documentList.appendChild(card);
+        });
+    }
+
+    // Render summary documents after enrichment
     if (hasDocuments) {
         const summaryHeader = document.createElement('div');
         summaryHeader.className = 'section-header';
@@ -1610,6 +1803,7 @@ function updateDocumentList(documents, qaItems) {
             documentList.appendChild(qaCard);
         });
     }
+
 }
 
 function getDocumentTitle(doc) {

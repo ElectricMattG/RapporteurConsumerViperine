@@ -216,6 +216,7 @@ defaults = {
         "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
         "cache_directory": "cache/summaries",  # Directory for summary index files
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
+        "combined_index_file": "x_indices_trump/research_summaries_filtered.jsonl",  # Live index for append
     },
     "index_aggregator": {
         # Index aggregator consumer configuration

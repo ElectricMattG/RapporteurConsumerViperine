@@ -78,6 +78,26 @@
                         <button id="clearDates" class="clear-btn">Clear</button>
                     </div>
                 </div>
+                <!-- Enrichment Controls Bar -->
+                <div class="header-row enrichment-bar" id="enrichmentBar">
+                    <div class="enrich-main">
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="enrichToggle">
+                            <label for="enrichToggle">Enrich Results</label>
+                        </div>
+                        <div class="checkbox-item">
+                            <input type="checkbox" id="enrichGetLinked">
+                            <label for="enrichGetLinked">Linked Events</label>
+                        </div>
+                    </div>
+                    <div class="enrich-types-bar" id="enrichTypesBar">
+                        <span class="enrich-types-label">Types:</span>
+                        <button type="button" class="enrich-pill active" data-type="events">Events</button>
+                        <button type="button" class="enrich-pill active" data-type="executive_orders">Exec. Orders</button>
+                        <button type="button" class="enrich-pill active" data-type="media">Media</button>
+                        <button type="button" class="enrich-pill active" data-type="risk">Risk</button>
+                    </div>
+                </div>
             </div>
 
             <div class="chat-container" id="chatContainer">

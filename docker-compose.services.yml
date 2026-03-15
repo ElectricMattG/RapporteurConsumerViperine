@@ -25,13 +25,16 @@ services:
       - ./research_summaries_filtered.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
       # Mount QA index file for enriched grounding (using filtered version)
       - ./research_qa_pairs_filtered.jsonl:/app/research_qa_pairs_with_embeddings_combined.jsonl
+      # Mount enrichment indices
+      - ./x_indices_trump/linked_media_bboa_trump_20260311_220355.jsonl:/app/linked_media_bboa_full_20260310_194954.jsonl:ro
+      - ./x_indices_trump/unlinked_media_bboa_trump_20260311_220355.jsonl:/app/unlinked_media_bboa_full_20260310_194954.jsonl:ro
       # Mount logs
       - ./src/services/logs:/app/src/services/logs
       # Mount GCP credentials
       - /home/electric/.config/gcp-keys/rapporteur-sa.json://home/electric/.config/gcp-keys/rapporteur-sa.json:ro
     networks:
       - services-network
-      - rapporteur_app_kafka-network
+      - rapporteurconsumers_kafka-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
@@ -59,7 +62,7 @@ services:
       - ./src/services/logs:/app/src/services/logs
     networks:
       - services-network
-      - rapporteur_app_kafka-network
+      - rapporteurconsumers_kafka-network
     depends_on:
       rag-service:
         condition: service_healthy
@@ -74,5 +77,5 @@ services:
 networks:
   services-network:
     driver: bridge
-  rapporteur_app_kafka-network:
+  rapporteurconsumers_kafka-network:
     external: true

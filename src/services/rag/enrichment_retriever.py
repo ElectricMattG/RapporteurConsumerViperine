@@ -147,8 +147,12 @@ class EnrichmentRetriever(Base):
         lines: List[str] = [
             "### Enrichment Context (BBOA Media Analysis)",
             "",
-            "The following additional context has been retrieved from the media "
-            "analysis pipeline and may be used to supplement the primary sources above.",
+            "The following media analysis records are directly linked to the articles retrieved above. "
+            "You MUST incorporate this context into your response: cite consumer salience scores when "
+            "discussing public attention, reference media framing (spin, factualness, stance) when "
+            "discussing how topics were covered, and flag any HIGH or MEDIUM risk ratings as a distinct "
+            "consideration for the researcher. Where an event descriptor or executive order is present, "
+            "connect it explicitly to the relevant article in your synthesis.",
             "",
         ]
 

@@ -671,7 +671,13 @@ async def generate_llm_response(query: str, top_summaries: List[Dict], temperatu
     """
     prompt = build_summary_prompt(query, top_summaries, clean_author_fn=_clean_author_name)
     if enrichment_text:
-        prompt = prompt + "\n\n" + enrichment_text
+        # Insert enrichment context BEFORE the generation trigger ("Overview:")
+        # so the LLM reads it as grounding input, not as content to complete.
+        generation_trigger = "Overview:"
+        if generation_trigger in prompt:
+            prompt = prompt.replace(generation_trigger, f"{enrichment_text}\n\n{generation_trigger}", 1)
+        else:
+            prompt = enrichment_text + "\n\n" + prompt
 
     logger.info(f"Generating LLM response with {len(top_summaries)} summaries as grounding")
 
@@ -1203,6 +1209,7 @@ async def query_llm(request: QueryLLMRequest):
                     "temperature": request.temperature,
                     "max_tokens": request.max_tokens
                 },
+                prompt=full_prompt,
                 grounding_metadata=grounding_metadata
             )
         else:

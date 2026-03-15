@@ -599,7 +599,8 @@ def build_pdf_html(
     template_path: str,
     css_path: str,
     citation_map: dict = None,
-    client_metadata: dict = None
+    client_metadata: dict = None,
+    enrichment_results: list = None
 ) -> str:
     """
     Build complete HTML for PDF from template.
@@ -716,6 +717,7 @@ def build_pdf_html(
         introduction=introduction,
         assistant_response=response_html,
         citations=formatted_citations,
+        enrichment_items=enrichment_results or [],
         styles=styles
     )
 

@@ -67,7 +67,7 @@
 
     <!-- Citations Section -->
     <div class="section">
-        <h1 class="section-title">Citations & References</h1>
+        <h1 class="section-title">Citations &amp; References</h1>
 
         {% if citations %}
         <div class="citation-list">
@@ -79,5 +79,25 @@
         </div>
         {% endif %}
     </div>
+
+    {% if enrichment_items %}
+    <!-- Enrichment Section -->
+    <div class="section">
+        <h1 class="section-title">Enrichment Results</h1>
+        <div class="citation-list">
+            {% for item in enrichment_items %}
+            <div class="citation-entry">
+                <strong>{{ 'Event-Linked' if item.event_key else 'Unlinked Media' }}</strong>
+                {% if item.event_descriptor %} &mdash; <em>{{ item.event_descriptor }}</em>{% elif item.event_key %} &mdash; Event: {{ item.event_key }}{% endif %}
+                {% if item.eo_identifier %} &mdash; EO: {{ item.eo_identifier }}{% endif %}
+                {% if item.publisher %} &mdash; {{ item.publisher }}{% endif %}
+                {% if item.time_window %} ({{ item.time_window }}){% endif %}
+                {% if item.consumer_salience != None %} &mdash; Salience: {{ "%.0f" | format(item.consumer_salience * 100) }}%{% endif %}
+                {% if item.link %}<br><a href="{{ item.link }}" target="_blank">{{ item.link }}</a>{% endif %}
+            </div>
+            {% endfor %}
+        </div>
+    </div>
+    {% endif %}
 </body>
 </html>
