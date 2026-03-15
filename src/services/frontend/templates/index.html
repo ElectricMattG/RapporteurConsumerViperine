@@ -140,6 +140,23 @@
                 <button id="closeSettings" class="close-settings-btn">✕</button>
             </div>
             <div class="settings-content">
+                <!-- Index Corpus Section -->
+                <div class="settings-section">
+                    <h4>Index Corpus</h4>
+                    <div class="setting-item">
+                        <label for="indexFolderSelect">Active Corpus:</label>
+                        <select id="indexFolderSelect" class="setting-input">
+                            <option value="">Loading...</option>
+                        </select>
+                    </div>
+                    <div class="setting-item">
+                        <button id="switchIndexBtn" class="switch-index-btn">
+                            &#128260; Switch Corpus
+                        </button>
+                        <span id="switchIndexStatus" class="switch-index-status"></span>
+                    </div>
+                </div>
+
                 <!-- Metadata Section -->
                 <div class="settings-section">
                     <h4>Document Metadata</h4>

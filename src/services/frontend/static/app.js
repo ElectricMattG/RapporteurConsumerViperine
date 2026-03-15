@@ -7,6 +7,9 @@ let currentConversationId = null;
 let currentConversationMessages = []; // Track all messages in current conversation
 let currentAbortController = null; // For canceling requests
 
+// Map: messageId → { rawContent, metadata } — used to restore/re-render during edit mode
+const messageEditState = new Map();
+
 // Global Settings State
 let settings = {
     metadata: {
@@ -77,6 +80,11 @@ const qaTopKInput = document.getElementById('qaTopK');
 const citationDebugCheckbox = document.getElementById('citationDebug');
 const enrichToggle = document.getElementById('enrichToggle');
 const enrichGetLinked = document.getElementById('enrichGetLinked');
+
+// Index Corpus DOM Elements
+const indexFolderSelect = document.getElementById('indexFolderSelect');
+const switchIndexBtn = document.getElementById('switchIndexBtn');
+const switchIndexStatus = document.getElementById('switchIndexStatus');
 
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
@@ -266,7 +274,7 @@ async function exportMostRecentMessage() {
 
         const payload = {
             query: lastConversation.user_query,
-            assistant_response: lastConversation.assistant_response,
+            assistant_response: lastConversation.edited_content || lastConversation.assistant_response,
             message_id: lastConversation.assistant_message_id,
             metadata: settings.metadata
         };
@@ -308,6 +316,17 @@ settingsButton.addEventListener('click', toggleSettingsPanel);
 closeSettingsBtn.addEventListener('click', closeSettingsPanel);
 settingsOverlay.addEventListener('click', closeSettingsPanel);
 publishRecentBtn.addEventListener('click', exportMostRecentMessage);
+
+if (switchIndexBtn) {
+    switchIndexBtn.addEventListener('click', switchIndex);
+}
+
+// Load index folders when settings panel is opened
+settingsButton.addEventListener('click', () => {
+    if (!settingsPanel.classList.contains('hidden')) {
+        loadIndexFolders();
+    }
+});
 
 // ESC key to close settings
 document.addEventListener('keydown', (e) => {
@@ -425,7 +444,66 @@ window.addEventListener('load', () => {
     clearConversation(); // Fresh context on page reload
     loadConversations();
     initializeNotifications();  // Start listening for index updates
+    loadIndexFolders();          // Populate index corpus dropdown
 });
+
+// ============================================================================
+// Index Corpus Switching
+// ============================================================================
+
+async function loadIndexFolders() {
+    if (!indexFolderSelect) return;
+    try {
+        const resp = await fetch('/api/index-folders');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        indexFolderSelect.innerHTML = '';
+        (data.folders || []).forEach(f => {
+            const opt = document.createElement('option');
+            opt.value = f.name;
+            opt.textContent = f.name.replace('x_indices_', '').toUpperCase() +
+                (f.has_enrichment ? ' ✦' : '') +
+                (f.has_qa ? '' : ' (no QA)');
+            if (f.active) opt.selected = true;
+            opt.title = `summaries: ${f.has_summaries ? 'yes' : 'no'} | QA: ${f.has_qa ? 'yes' : 'no'} | enrichment: ${f.has_enrichment ? 'yes' : 'no'}`;
+            indexFolderSelect.appendChild(opt);
+        });
+    } catch (e) {
+        console.warn('Could not load index folders:', e);
+    }
+}
+
+async function switchIndex() {
+    if (!indexFolderSelect || !switchIndexBtn) return;
+    const folder = indexFolderSelect.value;
+    if (!folder) return;
+
+    switchIndexBtn.disabled = true;
+    switchIndexStatus.textContent = '⏳ Switching...';
+
+    try {
+        const resp = await fetch('/api/switch-index', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ folder }),
+        });
+        const data = await resp.json();
+        if (resp.ok && data.switched) {
+            switchIndexStatus.textContent =
+                `✅ Switched to ${folder.replace('x_indices_', '').toUpperCase()} ` +
+                `(${data.summaries} summaries)`;
+            await loadIndexFolders(); // Refresh to reflect active flag
+        } else {
+            switchIndexStatus.textContent = `❌ ${data.error || data.detail || 'Switch failed'}`;
+        }
+    } catch (e) {
+        switchIndexStatus.textContent = `❌ ${e.message}`;
+    } finally {
+        switchIndexBtn.disabled = false;
+        // Clear status after 5s
+        setTimeout(() => { switchIndexStatus.textContent = ''; }, 5000);
+    }
+}
 
 // ============================================================================
 // Main Functions
@@ -538,7 +616,11 @@ async function handleSendQuery() {
             retrieved_docs: data.retrieved_docs,
             retrieved_qa: data.retrieved_qa || [],
             enrichment_results: data.enrichment_results || [],
-            metadata: data.metadata
+            metadata: data.metadata,
+            // Edit state (5.1)
+            edited_content: null,
+            edited: false,
+            edited_at: null
         };
 
         // Debug logging
@@ -1014,7 +1096,7 @@ function formatDisplayDate(isoDate) {
     }
 }
 
-function addMessage(role, content, metadata = null) {
+function addMessage(role, content, metadata = null, options = {}) {
     const messageId = `msg-${Date.now()}-${Math.random()}`;
     const messageDiv = document.createElement('div');
     messageDiv.className = `message ${role}`;
@@ -1050,6 +1132,11 @@ function addMessage(role, content, metadata = null) {
     }
 
     bubbleDiv.appendChild(contentDiv);
+
+    // Store raw content + metadata for edit mode (assistant only)
+    if (role === 'assistant') {
+        messageEditState.set(messageId, { rawContent: content, metadata: metadata });
+    }
 
     // Add metadata for assistant messages - ALWAYS create metadata div for assistant messages
     if (role === 'assistant') {
@@ -1101,6 +1188,23 @@ function addMessage(role, content, metadata = null) {
             exportBtn.title = 'Export as PDF';
             exportBtn.onclick = () => exportMessagePDF(metadata.message_id);
             metadataDiv.appendChild(exportBtn);
+        }
+
+        // Edit button (pencil icon) — revealed on hover via CSS
+        const editBtn = document.createElement('button');
+        editBtn.className = 'edit-response-btn';
+        editBtn.innerHTML = '✏';
+        editBtn.title = 'Edit response';
+        editBtn.setAttribute('aria-label', 'Edit response');
+        editBtn.addEventListener('click', () => startEditMessage(messageId));
+        bubbleDiv.appendChild(editBtn);
+
+        // Restore "Edited" badge when loading from history
+        if (options.editedAt) {
+            const editedBadge = document.createElement('span');
+            editedBadge.className = 'edited-badge';
+            editedBadge.textContent = `Edited ${new Date(options.editedAt).toLocaleTimeString()}`;
+            contentDiv.insertAdjacentElement('afterend', editedBadge);
         }
     }
 
@@ -1425,7 +1529,12 @@ async function loadConversations() {
                 conv.metadata.message_id = conv.id;
             }
 
-            const assistantMessageId = addMessage('assistant', conv.assistant_response, conv.metadata);
+            const assistantMessageId = addMessage(
+                'assistant',
+                conv.edited_content || conv.assistant_response,
+                conv.metadata,
+                conv.edited ? { editedAt: conv.edited_at } : {}
+            );
 
             // Update conversation with message IDs
             conv.user_message_id = userMessageId;
@@ -1905,6 +2014,163 @@ async function exportMessagePDF(messageId) {
     }
 }
 
+
+// ============================================================================
+// Edit Assistant Response (Phase 5)
+// ============================================================================
+
+/**
+ * Enter edit mode for an assistant message.
+ * Hides the rendered content and shows a textarea pre-filled with raw markdown.
+ */
+function startEditMessage(messageId) {
+    const messageDiv = document.getElementById(messageId);
+    if (!messageDiv) return;
+
+    const bubbleDiv = messageDiv.querySelector('.message-bubble');
+    if (!bubbleDiv) return;
+
+    const contentDiv = bubbleDiv.querySelector('.message-content');
+
+    // Use edited_content if already edited, otherwise use stored raw content
+    const conv = currentConversationMessages.find(c => c.assistant_message_id === messageId);
+    const editState = messageEditState.get(messageId);
+    const currentText = (conv && conv.edited_content) || (editState && editState.rawContent) || '';
+
+    // Hide rendered content and edit button
+    contentDiv.style.display = 'none';
+    const editBtn = bubbleDiv.querySelector('.edit-response-btn');
+    if (editBtn) editBtn.style.display = 'none';
+
+    // Hide any existing badge during edit
+    const existingBadge = bubbleDiv.querySelector('.edited-badge');
+    if (existingBadge) existingBadge.style.display = 'none';
+
+    // Build textarea
+    const textarea = document.createElement('textarea');
+    textarea.className = 'edit-textarea';
+    textarea.value = currentText;
+
+    // Build Save / Cancel buttons
+    const actionsDiv = document.createElement('div');
+    actionsDiv.className = 'edit-actions';
+
+    const saveBtn = document.createElement('button');
+    saveBtn.className = 'edit-save-btn';
+    saveBtn.textContent = 'Save';
+    saveBtn.addEventListener('click', () => saveEditMessage(messageId, textarea.value));
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.className = 'edit-cancel-btn';
+    cancelBtn.textContent = 'Cancel';
+    cancelBtn.addEventListener('click', () => cancelEditMessage(messageId));
+
+    actionsDiv.appendChild(saveBtn);
+    actionsDiv.appendChild(cancelBtn);
+
+    // Insert editor before the metadata row
+    const metadataDiv = bubbleDiv.querySelector('.message-metadata');
+    if (metadataDiv) {
+        bubbleDiv.insertBefore(textarea, metadataDiv);
+        bubbleDiv.insertBefore(actionsDiv, metadataDiv);
+    } else {
+        bubbleDiv.appendChild(textarea);
+        bubbleDiv.appendChild(actionsDiv);
+    }
+
+    textarea.focus();
+}
+
+/**
+ * Save an edit: re-render content with citation links, show "Edited" badge,
+ * update in-memory state, and PATCH the server.
+ */
+async function saveEditMessage(messageId, newText) {
+    const messageDiv = document.getElementById(messageId);
+    if (!messageDiv) return;
+
+    const bubbleDiv = messageDiv.querySelector('.message-bubble');
+    const contentDiv = bubbleDiv.querySelector('.message-content');
+    const editState = messageEditState.get(messageId);
+
+    // Re-render content with citations
+    let processedContent = newText;
+    if (editState && editState.metadata && editState.metadata.citation_map) {
+        const citDebug = settings.display && settings.display.citation_debug === true;
+        processedContent = renderCitationsAsLinks(newText, editState.metadata.citation_map, citDebug);
+    }
+    contentDiv.innerHTML = marked.parse(processedContent);
+    contentDiv.style.display = '';
+
+    // Remove editor elements
+    const textarea = bubbleDiv.querySelector('.edit-textarea');
+    const actionsDiv = bubbleDiv.querySelector('.edit-actions');
+    if (textarea) textarea.remove();
+    if (actionsDiv) actionsDiv.remove();
+
+    // Show edit button again
+    const editBtn = bubbleDiv.querySelector('.edit-response-btn');
+    if (editBtn) editBtn.style.display = '';
+
+    // Show or update "Edited" badge
+    let editedBadge = bubbleDiv.querySelector('.edited-badge');
+    if (!editedBadge) {
+        editedBadge = document.createElement('span');
+        editedBadge.className = 'edited-badge';
+        contentDiv.insertAdjacentElement('afterend', editedBadge);
+    }
+    const now = new Date();
+    editedBadge.textContent = `Edited ${now.toLocaleTimeString()}`;
+    editedBadge.style.display = '';
+
+    // Update in-memory conversation state (5.4)
+    const conv = currentConversationMessages.find(c => c.assistant_message_id === messageId);
+    const editedAt = now.toISOString();
+    if (conv) {
+        conv.edited_content = newText;
+        conv.edited = true;
+        conv.edited_at = editedAt;
+        // Keep messageEditState in sync so subsequent edits start from saved version
+        if (editState) editState.rawContent = newText;
+
+        // Sync to server (5.6 — server build_context uses edited_content)
+        try {
+            await fetch(`/api/conversations/${conv.id}`, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ edited_content: newText, edited_at: editedAt })
+            });
+        } catch (e) {
+            console.warn('Failed to sync edit to server:', e);
+        }
+    }
+}
+
+/**
+ * Cancel edit mode: restore previous rendered content without changing state.
+ */
+function cancelEditMessage(messageId) {
+    const messageDiv = document.getElementById(messageId);
+    if (!messageDiv) return;
+
+    const bubbleDiv = messageDiv.querySelector('.message-bubble');
+    const contentDiv = bubbleDiv.querySelector('.message-content');
+
+    // Restore content and edit button
+    contentDiv.style.display = '';
+    const editBtn = bubbleDiv.querySelector('.edit-response-btn');
+    if (editBtn) editBtn.style.display = '';
+
+    // Restore badge if it was hidden
+    const editedBadge = bubbleDiv.querySelector('.edited-badge');
+    if (editedBadge) editedBadge.style.display = '';
+
+    // Remove editor elements
+    const textarea = bubbleDiv.querySelector('.edit-textarea');
+    const actionsDiv = bubbleDiv.querySelector('.edit-actions');
+    if (textarea) textarea.remove();
+    if (actionsDiv) actionsDiv.remove();
+}
 
 // ============================================================================
 // Utility Functions

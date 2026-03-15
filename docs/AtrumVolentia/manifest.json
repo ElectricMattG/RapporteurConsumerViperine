@@ -1,0 +1,123 @@
+{
+  "collection": "Atrum Volentia — Hegseth, Iran & the Second Strike",
+  "author": "Matt Gerhold",
+  "output_dir": ".",
+  "raw_dir": "../..",
+  "render_options": {
+    "top_sources_n": 10,
+    "abstract_max_words": 220,
+    "postprocess": true
+  },
+  "documents": [
+    {
+      "id": "01",
+      "filename": "01_dod_actions_hegseth.md",
+      "title": "DoD Actions & Media Response — Hegseth",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 0
+      }
+    },
+    {
+      "id": "02",
+      "filename": "02_dod_actions_feinberg.md",
+      "title": "DoD Actions & Media Response — Feinberg",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 1
+      }
+    },
+    {
+      "id": "03",
+      "filename": "03_executive_orders_communication.md",
+      "title": "Presidential Executive Orders — Communication & Impact",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 2
+      }
+    },
+    {
+      "id": "04",
+      "filename": "04_hegseth_leadership_positive.md",
+      "title": "Hegseth Leadership Style — Positive Reporting",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 3
+      }
+    },
+    {
+      "id": "05",
+      "filename": "05_hegseth_iran_buildup.md",
+      "title": "Hegseth Traits & the Build-Up to the Iran Strikes",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 4
+      }
+    },
+    {
+      "id": "06",
+      "filename": "06_iran_strikes_idf.md",
+      "title": "Iran Strikes — Joint Operations with the IDF",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 5
+      }
+    },
+    {
+      "id": "07",
+      "filename": "07_hegseth_trump_frame.md",
+      "title": "Hegseth in the Frame of the Trump Administration",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 6
+      }
+    },
+    {
+      "id": "08",
+      "filename": "08_signal_leak_disconnect.md",
+      "title": "The Signal Leak — Disconnect Between Plans and Actions",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 7
+      }
+    },
+    {
+      "id": "09",
+      "filename": "09_operation_differentiation.md",
+      "title": "Operation Differentiation — June 2025 vs. February 2026",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 8
+      }
+    },
+    {
+      "id": "10",
+      "filename": "10_second_strike_timeline.md",
+      "title": "Second Strike — Timelines & Reports, February 2026",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 9
+      }
+    },
+    {
+      "id": "11",
+      "filename": "11_second_strike_dow_framing.md",
+      "title": "Second Strike — DoD Framing by Hegseth & Caine, March 2026",
+      "source": {
+        "type": "bundled",
+        "file": "conversations_export_20260304_063912.json",
+        "index": 10
+      }
+    }
+  ]
+}

@@ -192,6 +192,26 @@ def get_conversation(conversation_id):
     return jsonify({"error": "Conversation not found"}), 404
 
 
+@app.route('/api/conversations/<int:conversation_id>', methods=['PATCH'])
+def update_conversation(conversation_id):
+    """Update a conversation entry with an edited assistant response."""
+    try:
+        data = request.get_json()
+        edited_content = data.get('edited_content')
+        if edited_content is None:
+            return jsonify({"error": "edited_content required"}), 400
+        for conv in conversations:
+            if conv.get('id') == conversation_id:
+                conv['edited_content'] = edited_content
+                conv['edited'] = True
+                conv['edited_at'] = data.get('edited_at', datetime.now().isoformat())
+                return jsonify({"success": True})
+        return jsonify({"error": "Conversation not found"}), 404
+    except Exception as e:
+        logger.error(f"Update conversation error: {e}", exc_info=True)
+        return jsonify({"error": "Internal server error"}), 500
+
+
 @app.route('/api/export_pdf', methods=['POST'])
 def export_pdf():
     """
@@ -224,7 +244,8 @@ def export_pdf():
                 return jsonify({"error": "Message not found"}), 404
 
             query = message.get('user_query', '')
-            assistant_response = message.get('assistant_response', '')
+            # Use edited_content if the user revised the response before exporting
+            assistant_response = message.get('edited_content') or message.get('assistant_response', '')
             retrieved_docs = message.get('retrieved_docs', [])
             retrieved_qa = message.get('retrieved_qa', [])
             enrichment_results = message.get('enrichment_results', [])
@@ -308,9 +329,11 @@ def build_context(depth: int) -> str:
     context_parts = []
     for conv in recent:
         context_parts.append(f"user -> {conv['user_query']}")
+        # Use edited_content if the user revised the response; otherwise use original
+        effective_response = conv.get('edited_content') or conv['assistant_response']
         # Truncate assistant response to first 200 chars for context
-        response_snippet = conv['assistant_response'][:200]
-        if len(conv['assistant_response']) > 200:
+        response_snippet = effective_response[:200]
+        if len(effective_response) > 200:
             response_snippet += "..."
         context_parts.append(f"assistant -> {response_snippet}")
 
@@ -325,6 +348,37 @@ def health():
         "conversations_count": len(conversations),
         "rag_service": RAG_SERVICE_URL
     })
+
+
+@app.route('/api/index-folders', methods=['GET'])
+def index_folders():
+    """Proxy GET /index-folders from the RAG service."""
+    try:
+        resp = requests.get(f"{RAG_SERVICE_URL}/index-folders", timeout=5)
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error(f"❌ /api/index-folders proxy error: {e}")
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route('/api/switch-index', methods=['POST'])
+def switch_index():
+    """Proxy POST /switch-index to the RAG service."""
+    data = request.get_json(silent=True) or {}
+    folder = data.get("folder", "")
+    # Validate before forwarding (belt-and-suspenders alongside RAG-side validation)
+    if not folder.startswith("x_indices_") or "/" in folder or ".." in folder:
+        return jsonify({"error": "Invalid folder name"}), 400
+    try:
+        resp = requests.post(
+            f"{RAG_SERVICE_URL}/switch-index",
+            json={"folder": folder},
+            timeout=60,  # index loading may take time
+        )
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error(f"❌ /api/switch-index proxy error: {e}")
+        return jsonify({"error": str(e)}), 502
 
 
 @app.route('/api/notifications')

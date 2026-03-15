@@ -15,6 +15,7 @@ Usage:
 """
 
 import logging
+import os
 import sys
 from typing import Optional
 
@@ -216,7 +217,9 @@ defaults = {
         "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
         "cache_directory": "cache/summaries",  # Directory for summary index files
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
-        "combined_index_file": "x_indices_trump/research_summaries_filtered.jsonl",  # Live index for append
+        # Derived from ACTIVE_INDEX_FOLDER env var so config stays in sync with the active index.
+        # Default: x_indices_trump.  Override at runtime: ACTIVE_INDEX_FOLDER=x_indices_eo
+        "combined_index_file": f"{os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_trump')}/research_summaries_filtered.jsonl",
     },
     "index_aggregator": {
         # Index aggregator consumer configuration

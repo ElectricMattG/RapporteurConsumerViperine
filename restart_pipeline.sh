@@ -71,8 +71,12 @@ export SUMMARIZER_INPUT_TOPIC
 python3 src/consumers/run_kafka_summarizer.py > logs/summarizer.log 2>&1 &
 echo "   ✅ Summarizer (PID: $!) - input_topic=${SUMMARIZER_INPUT_TOPIC}"
 
+EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-http://localhost:8080}
+ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_trump}
+export EMBEDDING_SERVICE_URL
+export ACTIVE_INDEX_FOLDER
 python3 src/consumers/run_kafka_summary_indexer.py > logs/summary_indexer.log 2>&1 &
-echo "   ✅ Summary Indexer (PID: $!)"
+echo "   ✅ Summary Indexer (PID: $!) - embedding_url=${EMBEDDING_SERVICE_URL}, folder=${ACTIVE_INDEX_FOLDER}"
 
 # Optionally start the index aggregator if environment variable ENABLE_AGGREGATOR is true (default: false)
 if [ "${ENABLE_AGGREGATOR:-false}" = "true" ]; then

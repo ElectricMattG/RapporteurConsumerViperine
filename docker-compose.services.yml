@@ -18,16 +18,13 @@ services:
       - LOCATION=${GCP_LOCATION:-us-central1}
       - GOOGLE_APPLICATION_CREDENTIALS=/home/electric/.config/gcp-keys/rapporteur-sa.json
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
+      - INDICES_ROOT=/app/indices_root
+      - ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_trump}
     volumes:
       # Mount src for development
       - ./src:/app/src
-      # Mount index file from project root (using filtered version)
-      - ./research_summaries_filtered.jsonl:/app/research_summaries_with_embeddings_combined.jsonl
-      # Mount QA index file for enriched grounding (using filtered version)
-      - ./research_qa_pairs_filtered.jsonl:/app/research_qa_pairs_with_embeddings_combined.jsonl
-      # Mount enrichment indices
-      - ./x_indices_trump/linked_media_bboa_trump_20260311_220355.jsonl:/app/linked_media_bboa_full_20260310_194954.jsonl:ro
-      - ./x_indices_trump/unlinked_media_bboa_trump_20260311_220355.jsonl:/app/unlinked_media_bboa_full_20260310_194954.jsonl:ro
+      # Mount all index folders (read-only) for runtime switching
+      - ./:/app/indices_root:ro
       # Mount logs
       - ./src/services/logs:/app/src/services/logs
       # Mount GCP credentials

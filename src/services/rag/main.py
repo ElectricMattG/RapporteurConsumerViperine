@@ -70,6 +70,9 @@ class ServiceState:
         self.linked_index_path: Optional[str] = None
         self.unlinked_index_path: Optional[str] = None
         self.enrichment_retriever = None  # EnrichmentRetriever, instantiated at startup
+        # Index folder switching
+        self.indices_root: Optional[str] = None
+        self.active_folder: Optional[str] = None
 
 state = ServiceState()
 
@@ -361,10 +364,15 @@ def normalise_url(url: str) -> str:
     return normalised
 
 
-def _clean_author_name(name: str) -> str:
+def _clean_author_name(name) -> str:
     """Clean author name: truncate long names, title-case ALL CAPS, preserve acronyms."""
-    if not name or not name.strip():
+    # Coerce lists (e.g. doc_metadata['author'] stored as array) to first non-empty string
+    if isinstance(name, list):
+        valid = [v for v in name if v and str(v).strip().lower() not in ('null', 'nan', 'none')]
+        name = valid[0] if valid else None
+    if not name or not str(name).strip():
         return 'Unknown'
+    name = str(name)
     # Decode URL-encoded characters (e.g. %D8%A7 → Arabic)
     author = unquote(name.strip()).rstrip(',')
     words = author.split()
@@ -824,6 +832,41 @@ def publish_webscraper_messages(request_id: str, session_id: str, query: str, re
 
 
 # ============================================================================
+# Index Folder Discovery Helpers
+# ============================================================================
+
+def _find_summaries_file(folder: Path) -> Optional[Path]:
+    """Return the summaries JSONL in *folder*, preferring the 'filtered' variant."""
+    for name in ("research_summaries_filtered.jsonl",
+                 "research_summaries_with_embeddings_combined.jsonl"):
+        p = folder / name
+        if p.exists():
+            return p
+    return None
+
+
+def _find_qa_file(folder: Path) -> Optional[Path]:
+    """Return the QA JSONL in *folder*, preferring the 'filtered' variant."""
+    for name in ("research_qa_pairs_filtered.jsonl",
+                 "research_qa_pairs_with_embeddings_combined.jsonl"):
+        p = folder / name
+        if p.exists():
+            return p
+    return None
+
+
+def _find_enrichment_file(folder: Path, prefix: str) -> Optional[Path]:
+    """Glob for the most-recent *prefix*_*.jsonl inside *folder*.
+
+    Handles both naming conventions used across topic folders:
+    ``linked_media_bboa_full_*.jsonl`` (hegseth) and
+    ``linked_media_bboa_trump_*.jsonl`` (trump).
+    """
+    candidates = sorted(folder.glob(f"{prefix}_*.jsonl"), reverse=True)
+    return candidates[0] if candidates else None
+
+
+# ============================================================================
 # Startup & Shutdown
 # ============================================================================
 
@@ -832,25 +875,47 @@ async def startup_event():
     """Load index and initialize clients on startup."""
     logger.info("🚀 Starting Summary Query Service...")
 
-    # Index path - env var override for dev/demo; falls back to project root combined file
+    # Folder-based index resolution
+    # INDICES_ROOT points to the directory containing all x_indices_* folders.
+    # ACTIVE_INDEX_FOLDER names the active subfolder (e.g. x_indices_trump).
+    # Explicit INDEX_PATH / QA_INDEX_PATH / LINKED_INDEX_PATH / UNLINKED_INDEX_PATH overrides
+    # still work for dev/demo compatibility.
     project_root = Path(__file__).parent.parent.parent.parent
-    index_env = os.environ.get('INDEX_PATH')
-    index_path = Path(index_env) if index_env else project_root / "research_summaries_with_embeddings_combined.jsonl"
+    indices_root = Path(os.environ.get("INDICES_ROOT", str(project_root)))
+    active_folder = os.environ.get("ACTIVE_INDEX_FOLDER", "x_indices_trump")
+    folder_path = indices_root / active_folder
 
-    # Check if index exists
+    state.indices_root = str(indices_root)
+    state.active_folder = active_folder
+    logger.info(f"📂 Indices root : {indices_root}")
+    logger.info(f"📂 Active folder: {active_folder} → {folder_path}")
+
+    # Summaries — explicit env var > folder discovery > project root fallback
+    index_env = os.environ.get('INDEX_PATH')
+    if index_env:
+        index_path = Path(index_env)
+    else:
+        index_path = _find_summaries_file(folder_path) or (
+            project_root / "research_summaries_with_embeddings_combined.jsonl"
+        )
+
     if not index_path.exists():
         logger.error(f"❌ Index file not found: {index_path}")
         raise RuntimeError(f"Index file not found: {index_path}")
 
-    # Load index
-    logger.info(f"📚 Loading index from: {index_path}")
+    logger.info(f"📚 Loading summaries from: {index_path}")
     state.summaries = load_summaries_index(str(index_path))
     state.index_path = str(index_path)
     logger.info(f"✅ Loaded {len(state.summaries)} summaries")
 
-    # Load QA index (optional; keeps legacy summary-only when missing)
+    # QA — explicit env var > folder discovery > project root fallback
     qa_index_env = os.environ.get('QA_INDEX_PATH')
-    qa_index_path = Path(qa_index_env) if qa_index_env else project_root / "research_qa_pairs_with_embeddings_combined.jsonl"
+    if qa_index_env:
+        qa_index_path = Path(qa_index_env)
+    else:
+        qa_index_path = _find_qa_file(folder_path) or (
+            project_root / "research_qa_pairs_with_embeddings_combined.jsonl"
+        )
 
     if qa_index_path.exists():
         state.qa_items = load_qa_index(str(qa_index_path))
@@ -862,17 +927,12 @@ async def startup_event():
         state.qa_index_path = str(qa_index_path)
         logger.warning(f"⚠️  QA index not found at {qa_index_path}; continuing with summaries only")
 
-    # Load enrichment indices (linked and unlinked BBOA media)
+    # Enrichment indices — explicit env var > folder glob discovery
     linked_env = os.environ.get('LINKED_INDEX_PATH')
     unlinked_env = os.environ.get('UNLINKED_INDEX_PATH')
 
-    # Default: find the most-recent timestamped linked/unlinked file in project root
-    def _find_enrichment_file(prefix: str) -> Optional[Path]:
-        candidates = sorted(project_root.glob(f"{prefix}_*.jsonl"), reverse=True)
-        return candidates[0] if candidates else None
-
-    linked_path = Path(linked_env) if linked_env else _find_enrichment_file("linked_media_bboa_full")
-    unlinked_path = Path(unlinked_env) if unlinked_env else _find_enrichment_file("unlinked_media_bboa_full")
+    linked_path = Path(linked_env) if linked_env else _find_enrichment_file(folder_path, "linked_media_bboa")
+    unlinked_path = Path(unlinked_env) if unlinked_env else _find_enrichment_file(folder_path, "unlinked_media_bboa")
 
     state.linked_index_path = str(linked_path) if linked_path else None
     state.unlinked_index_path = str(unlinked_path) if unlinked_path else None
@@ -921,16 +981,49 @@ async def startup_event():
         from src.services.rag.index_reload_consumer import IndexReloadConsumer
 
         async def reload_index_callback():
-            """Callback to reload index when message received"""
+            """Reload all indices (summaries + QA + enrichment) when a reload-index message arrives."""
             try:
-                logger.info("🔄 Reloading index...")
+                logger.info("🔄 Reloading all indices...")
+
+                # --- Summaries ---
+                old_sum = len(state.summaries)
                 new_summaries = load_summaries_index(state.index_path)
-                old_count = len(state.summaries)
-                new_count = len(new_summaries)
                 state.summaries = new_summaries
-                logger.info(f"✅ Index reloaded: {old_count} -> {new_count} summaries (+{new_count - old_count})")
+                new_sum = len(state.summaries)
+
+                # --- QA ---
+                old_qa = len(state.qa_items)
+                if state.qa_index_path and Path(state.qa_index_path).exists():
+                    state.qa_items = load_qa_index(state.qa_index_path)
+                    state.qa_index_loaded = True
+                new_qa = len(state.qa_items)
+
+                # --- Enrichment ---
+                old_linked = len(state.linked_enrichments)
+                old_unlinked = len(state.unlinked_enrichments)
+                if state.linked_index_path and Path(state.linked_index_path).exists():
+                    state.linked_enrichments = load_enrichment_index(state.linked_index_path)
+                if state.unlinked_index_path and Path(state.unlinked_index_path).exists():
+                    state.unlinked_enrichments = load_enrichment_index(state.unlinked_index_path)
+                new_linked = len(state.linked_enrichments)
+                new_unlinked = len(state.unlinked_enrichments)
+
+                # Re-instantiate retriever with refreshed maps
+                from src.services.rag.enrichment_retriever import \
+                    EnrichmentRetriever
+                state.enrichment_retriever = EnrichmentRetriever(
+                    linked_map=state.linked_enrichments,
+                    unlinked_map=state.unlinked_enrichments,
+                )
+
+                logger.info(
+                    f"✅ Full reload: {old_sum}→{new_sum} summaries, "
+                    f"{old_qa}→{new_qa} QA, "
+                    f"{old_linked}→{new_linked} linked, "
+                    f"{old_unlinked}→{new_unlinked} unlinked"
+                )
             except Exception as e:
-                logger.error(f"❌ Error reloading index: {e}")
+                logger.error(f"❌ Error reloading indices: {e}", exc_info=True)
 
         reload_consumer = IndexReloadConsumer(reload_index_callback, kafka_bootstrap)
         reload_consumer.start()
@@ -969,7 +1062,10 @@ async def readiness():
     return {
         "status": "ready",
         "index_loaded": state.index_loaded,
+        "active_folder": state.active_folder,
+        "indices_root": state.indices_root,
         "total_summaries": len(state.summaries),
+        "total_qa_pairs": len(state.qa_items),
         "index_path": state.index_path,
         "enrichment": {
             "linked_urls": len(state.linked_enrichments),
@@ -978,6 +1074,118 @@ async def readiness():
             "unlinked_index_path": state.unlinked_index_path,
         },
         "timestamp": datetime.now().isoformat()
+    }
+
+
+@app.get("/index-folders")
+async def list_index_folders():
+    """List all available x_indices_* folders in INDICES_ROOT with content flags."""
+    if not state.indices_root:
+        return {"folders": [], "active": state.active_folder}
+
+    root = Path(state.indices_root)
+    if not root.exists():
+        return {"folders": [], "active": state.active_folder}
+
+    folders = []
+    for d in sorted(root.iterdir()):
+        if d.is_dir() and d.name.startswith("x_indices_"):
+            folders.append({
+                "name": d.name,
+                "has_summaries": _find_summaries_file(d) is not None,
+                "has_qa": _find_qa_file(d) is not None,
+                "has_enrichment": _find_enrichment_file(d, "linked_media_bboa") is not None,
+                "active": d.name == state.active_folder,
+            })
+
+    return {"folders": folders, "active": state.active_folder}
+
+
+class SwitchIndexRequest(BaseModel):
+    folder: str = Field(..., description="Name of the x_indices_* folder to activate")
+
+
+@app.post("/switch-index")
+async def switch_index(request: SwitchIndexRequest):
+    """Reload all indices from a different x_indices_* folder without losing session state."""
+    if not state.indices_root:
+        raise HTTPException(status_code=503, detail="INDICES_ROOT not configured")
+
+    # Validate folder name to prevent path traversal
+    if not request.folder.startswith("x_indices_") or "/" in request.folder or ".." in request.folder:
+        raise HTTPException(status_code=400, detail="folder must be a plain x_indices_* name")
+
+    folder_path = Path(state.indices_root) / request.folder
+    if not folder_path.is_dir():
+        raise HTTPException(status_code=404, detail=f"Folder not found: {request.folder}")
+
+    summaries_path = _find_summaries_file(folder_path)
+    if not summaries_path:
+        raise HTTPException(status_code=404, detail=f"No summaries file in {request.folder}")
+
+    old_folder = state.active_folder
+    logger.info(f"🔀 Switching index: {old_folder} → {request.folder}")
+
+    # Load all indices from new folder
+    new_summaries = load_summaries_index(str(summaries_path))
+
+    qa_path = _find_qa_file(folder_path)
+    if qa_path:
+        new_qa = load_qa_index(str(qa_path))
+        state.qa_items = new_qa
+        state.qa_index_path = str(qa_path)
+        state.qa_index_loaded = True
+    else:
+        state.qa_items = []
+        state.qa_index_path = None
+        state.qa_index_loaded = False
+
+    linked_path = _find_enrichment_file(folder_path, "linked_media_bboa")
+    unlinked_path = _find_enrichment_file(folder_path, "unlinked_media_bboa")
+
+    state.linked_enrichments = load_enrichment_index(str(linked_path)) if linked_path else {}
+    state.linked_index_path = str(linked_path) if linked_path else None
+    state.unlinked_enrichments = load_enrichment_index(str(unlinked_path)) if unlinked_path else {}
+    state.unlinked_index_path = str(unlinked_path) if unlinked_path else None
+
+    from src.services.rag.enrichment_retriever import EnrichmentRetriever
+    state.enrichment_retriever = EnrichmentRetriever(
+        linked_map=state.linked_enrichments,
+        unlinked_map=state.unlinked_enrichments,
+    )
+
+    # Atomic-ish commit: update summaries + folder name last
+    state.summaries = new_summaries
+    state.index_path = str(summaries_path)
+    state.active_folder = request.folder
+
+    # Notify consumers to re-route their output to the new folder
+    try:
+        if state.kafka_producer:
+            state.kafka_producer.produce(
+                "index-folder-switch",
+                key=b"rag-service",
+                value=json.dumps({"folder": request.folder}).encode("utf-8"),
+            )
+            state.kafka_producer.flush()
+            logger.info(f"📤 Published index-folder-switch: {request.folder}")
+    except Exception as e:
+        logger.warning(f"⚠️ Could not publish folder-switch notification: {e}")
+
+    logger.info(
+        f"✅ Index switched: {old_folder} → {request.folder} | "
+        f"{len(state.summaries)} summaries, {len(state.qa_items)} QA, "
+        f"{len(state.linked_enrichments)} linked URLs, {len(state.unlinked_enrichments)} unlinked URLs"
+    )
+
+    return {
+        "switched": True,
+        "old_folder": old_folder,
+        "new_folder": request.folder,
+        "summaries": len(state.summaries),
+        "qa_pairs": len(state.qa_items),
+        "linked_urls": len(state.linked_enrichments),
+        "unlinked_urls": len(state.unlinked_enrichments),
     }
 
 @app.post("/search", response_model=SearchResponse)
