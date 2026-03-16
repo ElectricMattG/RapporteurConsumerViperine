@@ -534,7 +534,7 @@ def build_references(
 
     lines = ["## References\n"]
     lines.append(
-        "*All sources cited during this section. "
+        "*All sources cited in this chapter. "
         "Deduplicated and sorted alphabetically by author.*\n"
     )
 
