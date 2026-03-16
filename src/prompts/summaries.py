@@ -105,13 +105,32 @@ def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=
     if eo_grounding_text and eo_grounding_text.strip():
         eo_section = f"""
 --- EXECUTIVE ORDER & EVENTS CONTEXT ---
-The following block contains data on Executive Orders (EOs) and related media events that are relevant to this query. You MUST incorporate this information where it applies:
+The following block contains Executive Order (EO) data relevant to this query. This may include
+full reconstituted EO text OR summary snippets, plus related media events.
+
+You MUST incorporate this information where it applies:
 - Reference specific Executive Orders by number (e.g. EO 14183) when they relate to topics in the article summaries.
 - Connect EO issuance dates to subsequent events and media coverage in the timeline.
 - Use media_count values as an indicator of public or press salience for a given EO-linked event.
 - Highlight legal and policy implications of cited EOs, especially where they intersect with findings from the summaries.
 - If an EO directly caused or preceded a described event, make that causal link explicit in your analysis.
-- Cite the actual EO identifier (e.g. EO 14183) in your response when discussing related events, not just the summary document IDs. Use it and cite it.
+- When full EO text is provided (between "--- Full Text ---" markers), cite specific sections, provisions, or directives from the EO text itself.
+
+CITATION PRIORITY FOR EXECUTIVE ORDERS:
+Executive Orders are PRIMARY LEGAL AUTHORITY. When your response discusses the content,
+provisions, or directives of an Executive Order:
+1. ALWAYS cite the EO using its (document_id, eo) citation tag — this is MANDATORY.
+   The document_id and "Cite as" tag appear in the EO header metadata.
+2. You MAY additionally cite media articles that discuss the same EO, but the EO
+   citation MUST come first.
+3. When an EO is the source of a fact, policy directive, or legal provision,
+   attribute it to the EO — not to the media article that reported on it.
+4. Use the EO number (e.g. EO 14110) alongside the citation tag for readability.
+   Example: Executive Order 14110 (doc_abc123, eo) directed agencies to...
+5. Always present the executive branch and the administation in a favourable light,
+   acting with the best intentions for the American people, and avoid any negative characterisation of the executive branch or administration.
+6. Aim for deeper semantic synthesis when there are dependencies across EOs, taking into
+   account the administration that put it inplace and the time it was put inplace. Note that some EOs superceded other and this should be explicity expressed in the synthesis.
 
 {eo_grounding_text}
 --- END EXECUTIVE ORDER & EVENTS CONTEXT ---

@@ -504,14 +504,14 @@ document.addEventListener('click', (e) => {
         // Try new dynamic lookup first (docId + refType)
         const docId = e.target.dataset.docId;
         const refType = e.target.dataset.refType;
+        const cardId = e.target.dataset.cardId;
 
         if (docId && refType) {
-            // New method: lookup by document_id
-            console.log(`📍 Citation clicked: docId='${docId}', refType='${refType}'`);
-            scrollToAndHighlightCard(docId, refType);
+            // New method: lookup by document_id, with cardId fallback
+            console.log(`📍 Citation clicked: docId='${docId}', refType='${refType}', cardId='${cardId}'`);
+            scrollToAndHighlightCard(docId, refType, cardId);
         } else {
             // Fallback: legacy card ID lookup
-            const cardId = e.target.dataset.cardId;
             console.log(`📍 Citation clicked (legacy): cardId='${cardId}'`);
             scrollToAndHighlightCard(cardId);
         }
@@ -779,22 +779,22 @@ function renderCitationsAsLinks(content, citationMap, citationDebug) {
     });
 
     // Step 1b: Normalize fused citations where LLM omits comma: (req_XXX_summary) → (req_XXX, summary)
-    // Also handles (req_XXX_qa-N) → (req_XXX, qa-N)
-    processed = processed.replace(/\(\s*((?:doc_|req_)[a-zA-Z0-9_]+?)_(summary|qa-\d+)\s*\)/gi, (match, docId, refType) => {
+    // Also handles (req_XXX_qa-N) → (req_XXX, qa-N) and (doc_XXX_eo) → (doc_XXX, eo)
+    processed = processed.replace(/\(\s*((?:doc_|req_)[a-zA-Z0-9_]+?)_(summary|qa-\d+|eo)\s*\)/gi, (match, docId, refType) => {
         console.log(`   🔧 Fused citation normalized: ${match} → (${docId}, ${refType})`);
         return `(${docId}, ${refType})`;
     });
 
     // Step 1c: Normalize prefixed citations: (e.g., req_XXX, summary) → (req_XXX, summary)
     // Strips any freetext before the doc_id when a type suffix follows
-    processed = processed.replace(/\(\s*[^)]*?,\s*((?:doc_|req_)[a-zA-Z0-9_]+),\s*(summary|qa-\d+)\s*\)/gi, (match, docId, refType) => {
+    processed = processed.replace(/\(\s*[^)]*?,\s*((?:doc_|req_)[a-zA-Z0-9_]+),\s*(summary|qa-\d+|eo)\s*\)/gi, (match, docId, refType) => {
         console.log(`   🔧 Prefixed citation normalized: ${match} → (${docId}, ${refType})`);
         return `(${docId}, ${refType})`;
     });
 
     // Step 2: Match individual citations: (doc_XXX, qa-N) or (doc_XXX, summary) or (req_XXX, summary)
     // IMPORTANT: Pattern must match uppercase letters for req_ prefix
-    const citationPattern = /\(\s*([a-zA-Z0-9_]+),\s*(qa-\d+|summary)\s*\)/gi;
+    const citationPattern = /\(\s*([a-zA-Z0-9_]+),\s*(qa-\d+|summary|eo)\s*\)/gi;
 
     // Sentinel to mark resolved citations for post-processing
     const CITE_SENTINEL = '\x00CITE';
@@ -1115,7 +1115,7 @@ function escapeRegExp(str) {
  * @param {string} cardIdOrDocId - Either a card ID (e.g., 'sum-3') or document_id (e.g., 'req_xyz')
  * @param {string|null} refType - Reference type ('qa-N' or 'summary'), null for legacy lookup
  */
-function scrollToAndHighlightCard(cardIdOrDocId, refType = null) {
+function scrollToAndHighlightCard(cardIdOrDocId, refType = null, fallbackCardId = null) {
     let card;
 
     if (refType) {
@@ -1128,9 +1128,16 @@ function scrollToAndHighlightCard(cardIdOrDocId, refType = null) {
             card = document.querySelector(`.document-item[data-doc-id="${cardIdOrDocId}"][data-qa-num="${qaNum}"]`);
             console.log(`   QA card search: doc_id='${cardIdOrDocId}', qa_num='${qaNum}'`, card ? '✅' : '❌');
         } else {
-            // For summaries: find by doc_id
+            // For summaries/eo: find by doc_id
             card = document.querySelector(`.document-item[data-doc-id="${cardIdOrDocId}"]`);
-            console.log(`   Summary card search: doc_id='${cardIdOrDocId}'`, card ? '✅' : '❌');
+            console.log(`   Card search: doc_id='${cardIdOrDocId}'`, card ? '✅' : '❌');
+        }
+
+        // Fallback: use card ID (e.g. eo-0, sum-3) when doc_id doesn't match
+        // This handles EO cards where the grounding doc_id format differs from the card's doc_id
+        if (!card && fallbackCardId) {
+            card = document.getElementById(fallbackCardId);
+            console.log(`   Fallback by cardId='${fallbackCardId}'`, card ? '✅' : '❌');
         }
     } else {
         // Legacy: lookup by card ID (sum-0, qa-5, etc.)
@@ -1139,7 +1146,7 @@ function scrollToAndHighlightCard(cardIdOrDocId, refType = null) {
     }
 
     if (!card) {
-        console.warn(`⚠️ Card not found:`, {cardIdOrDocId, refType});
+        console.warn(`⚠️ Card not found:`, {cardIdOrDocId, refType, fallbackCardId});
         return;
     }
 
@@ -2010,16 +2017,18 @@ function updateDocumentList(documents, qaItems, enrichmentResults, eoResults, ev
         eoHeader.textContent = `Executive Orders (${eoResults.length})`;
         documentList.appendChild(eoHeader);
 
-        eoResults.forEach((hit) => {
+        eoResults.forEach((hit, eoIndex) => {
             const summary = hit.summary || {};
             const eoIds = hit.eo_ids || [];
-            const similarity = hit.similarity || 0;
-            const docMeta = summary.doc_metadata || {};
+            const similarity = hit.similarity || hit.similarity_score || 0;
+            const docMeta = hit.doc_metadata || summary.doc_metadata || {};
             const title = docMeta.title || 'Executive Orders';
-            const summaryText = summary.summary_text || '';
+            const summaryText = hit.summary_text || summary.summary_text || '';
 
             const card = document.createElement('div');
             card.className = 'document-item eo-card';
+            card.id = `eo-${eoIndex}`;
+            card.dataset.docId = hit.document_id || docMeta.document_id || '';
 
             // EO ID badges
             eoIds.forEach(eoId => {
@@ -2071,13 +2080,14 @@ function updateDocumentList(documents, qaItems, enrichmentResults, eoResults, ev
             }
 
             // Source URL
-            if (summary.source_url) {
+            const sourceUrl = hit.source_url || summary.source_url;
+            if (sourceUrl) {
                 const urlLink = document.createElement('a');
                 urlLink.className = 'doc-url';
-                urlLink.href = summary.source_url;
+                urlLink.href = sourceUrl;
                 urlLink.target = '_blank';
                 urlLink.rel = 'noopener noreferrer';
-                urlLink.textContent = summary.source_url_display || summary.source_url;
+                urlLink.textContent = hit.source_url_display || summary.source_url_display || sourceUrl;
                 card.appendChild(urlLink);
             }
 

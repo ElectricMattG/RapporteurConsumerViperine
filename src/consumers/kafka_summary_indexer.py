@@ -207,7 +207,7 @@ class KafkaSummaryIndexerConsumer(Base):
             self.cache_dir = Path(self._app_config.get('summary_indexer.cache_directory') or 'cache/summaries')
             self.cache_dir.mkdir(parents=True, exist_ok=True)
 
-            # Combined index file path - use project root for the main index
+            # Combined index file path - prefer active index folder, fallback to root
             try:
                 combined_index_filename = self._app_config.get('summary_indexer.combined_index_file')
             except (KeyError, AttributeError):
@@ -216,9 +216,25 @@ class KafkaSummaryIndexerConsumer(Base):
             if not combined_index_filename:
                 combined_index_filename = 'research_summaries_with_embeddings_combined.jsonl'
 
-            # Use root index as the primary combined index (mounted by RAG service)
             project_root = Path(__file__).resolve().parent.parent.parent
-            self.combined_index_file = project_root / combined_index_filename
+
+            # Use ACTIVE_INDEX_FOLDER env var to write into the correct index folder
+            active_folder = os.getenv('ACTIVE_INDEX_FOLDER', '').strip()
+            if active_folder and active_folder.startswith('x_indices_'):
+                folder_path = project_root / active_folder
+                candidates = [
+                    folder_path / "research_summaries_filtered.jsonl",
+                    folder_path / "research_summaries_with_embeddings_combined.jsonl",
+                ]
+                active_path = next((p for p in candidates if p.exists()), None)
+                if active_path:
+                    self.combined_index_file = active_path
+                else:
+                    # Folder may exist but file not yet created; default to filtered file
+                    self.combined_index_file = folder_path / "research_summaries_filtered.jsonl"
+            else:
+                # No active folder set — fall back to root combined index
+                self.combined_index_file = project_root / combined_index_filename
 
             # For backward compatibility, also reference it as root_index_file
             self.root_index_file = self.combined_index_file
@@ -233,6 +249,8 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info(f"   Output topic: {self.output_topic}")
             self._logger.info(f"   Cache directory: {self.cache_dir}")
             self._logger.info(f"   Combined index: {self.combined_index_file}")
+            self._logger.info(f"   Combined index exists: {self.combined_index_file.exists()}")
+            self._logger.info(f"   ACTIVE_INDEX_FOLDER: {os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_trump (default)')}")
             self._logger.info(f"   Model: {self.model_name}")
 
         except Exception as e:
@@ -255,6 +273,65 @@ class KafkaSummaryIndexerConsumer(Base):
         except Exception as e:
             self._logger.error(f"❌ Error creating Kafka producer: {e}")
             raise
+
+    def _watch_folder_switch(self):
+        """Background thread: listen on index-folder-switch Kafka topic and re-route output."""
+        import threading
+
+        from confluent_kafka import Consumer as _FolderWatchConsumer
+
+        cfg = {
+            "bootstrap.servers": self.kafka_config["bootstrap.servers"],
+            "group.id": f"{self.kafka_config['group.id']}-folder-watch",
+            "auto.offset.reset": "latest",
+        }
+        watcher = None
+        try:
+            watcher = _FolderWatchConsumer(cfg)
+            watcher.subscribe(["index-folder-switch"])
+            self._logger.info("✅ Folder-switch watcher subscribed to index-folder-switch")
+            while self.running:
+                msg = watcher.poll(timeout=2.0)
+                if msg is None:
+                    continue
+                if msg.error():
+                    if msg.error().code() != KafkaError._PARTITION_EOF:
+                        self._logger.warning(f"⚠️ Folder-switch watcher error: {msg.error()}")
+                    continue
+                try:
+                    data = json.loads(msg.value().decode("utf-8"))
+                    new_folder = data.get("folder", "").strip()
+                    if not new_folder or not new_folder.startswith("x_indices_"):
+                        continue
+                    project_root = Path(__file__).resolve().parent.parent.parent
+                    folder_path = project_root / new_folder
+                    candidates = [
+                        folder_path / "research_summaries_filtered.jsonl",
+                        folder_path / "research_summaries_with_embeddings_combined.jsonl",
+                    ]
+                    new_path = next((p for p in candidates if p.exists()), None)
+                    if new_path:
+                        old_name = self.combined_index_file.parent.name
+                        self.combined_index_file = new_path
+                        self.root_index_file = new_path
+                        self._logger.info(
+                            f"🔀 Folder-switch: consumer output re-routed "
+                            f"{old_name} → {new_folder}"
+                        )
+                    else:
+                        self._logger.warning(
+                            f"⚠️ Folder-switch: no summaries file in {new_folder}; ignoring"
+                        )
+                except Exception as parse_err:
+                    self._logger.warning(f"⚠️ Folder-switch parse error: {parse_err}")
+        except Exception as e:
+            self._logger.warning(f"⚠️ Folder-switch watcher startup failed: {e}")
+        finally:
+            if watcher:
+                try:
+                    watcher.close()
+                except Exception:
+                    pass
 
     def _get_session_dir(self, session_id: str) -> Path:
         """Get directory for session files"""
@@ -674,6 +751,16 @@ class KafkaSummaryIndexerConsumer(Base):
                 raise RuntimeError(f"Topic {self.input_topic} not found")
 
             self._logger.info("🚀 Starting to consume summary-completed messages...")
+
+            # Start folder-switch watcher in background thread
+            import threading
+            _switch_watcher = threading.Thread(
+                target=self._watch_folder_switch,
+                daemon=True,
+                name="folder-switch-watcher",
+            )
+            _switch_watcher.start()
+            self._logger.info("✅ Folder-switch watcher thread started")
 
             # Start telemetry services if available
             if self.telemetry_enabled:

@@ -439,7 +439,7 @@ def _format_citation_date(pub_date: Optional[str]) -> str:
     return pub_date
 
 
-def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None) -> Dict[str, Dict]:
+def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None, eo_docs: Optional[List] = None, eo_qa_hits: Optional[List] = None) -> Dict[str, Dict]:
     """
     Build a citation map for converting (doc_id, qa-N) placeholders to (Author, Date) format.
 
@@ -447,9 +447,11 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
         - Summaries: keyed by document_id  (e.g. "req_20260108_025143_005")
         - QA items:  keyed by "doc_id__qa-N" composite  (e.g. "doc_2432eb5092b5__qa-3")
           where N is 1-indexed matching the grounding text numbering.
+        - EO docs:   keyed by document_id + "doc_id__eo" (e.g. "doc_abc123__eo")
+        - EO QA aliases: keyed by QA-index doc_id (maps to same eo_info via source_url match)
 
     Returns:
-        { key: { author, date, card_type, card_index } }
+        { key: { author, date, card_type, card_index, url } }
     """
     logger.info(f"🗺️ build_citation_map called with {len(retrieved_docs)} docs, {len(retrieved_qa) if retrieved_qa else 0} QA items")
     citation_map = {}
@@ -533,6 +535,62 @@ def build_citation_map(retrieved_docs: List, retrieved_qa: Optional[List] = None
                     "url": qa_source_url
                 }
                 logger.info(f"      ➕ Added QA fallback citation_map['{doc_id}'] (no summary entry)")
+
+    # --- EO documents ---
+    if eo_docs:
+        logger.info(f"📜 Processing {len(eo_docs)} EO documents for citation map...")
+        for index, eo in enumerate(eo_docs):
+            doc_meta = eo.get('doc_metadata', {})
+            doc_id = eo.get('document_id') or doc_meta.get('document_id', '')
+            if not doc_id:
+                continue
+            author = 'Executive Office of the President'
+            formatted_date = _format_citation_date(
+                doc_meta.get('publication_date') or doc_meta.get('creation_date')
+            ).strip()
+            source_url = eo.get('source_url', '')
+            eo_info = {
+                "author": author,
+                "date": formatted_date,
+                "card_type": "eo",
+                "card_index": index,
+                "url": source_url
+            }
+            citation_map[doc_id] = eo_info
+            citation_map[f"{doc_id}__eo"] = eo_info
+            logger.info(f"      ✅ Added EO citation_map['{doc_id}'] and ['{doc_id}__eo'] = {author}, {formatted_date}")
+
+    # --- EO QA aliases: map QA-index doc_ids to eo_info via source_url ---
+    if eo_qa_hits and eo_docs:
+        # Build URL → eo_info lookup from eo_docs
+        url_to_eo_info: Dict[str, Dict] = {}
+        for index, eo in enumerate(eo_docs):
+            url = eo.get('source_url', '')
+            if url:
+                doc_meta = eo.get('doc_metadata', {})
+                eo_doc_id = eo.get('document_id') or doc_meta.get('document_id', '')
+                eo_info = citation_map.get(f"{eo_doc_id}__eo")
+                if eo_info:
+                    url_to_eo_info[url] = eo_info
+        # Collect unique QA doc_ids and their source_urls
+        qa_doc_urls: Dict[str, str] = {}
+        for hit in eo_qa_hits:
+            dm = hit.get('doc_metadata', {})
+            qa_doc_id = dm.get('document_id', '')
+            qa_url = dm.get('source_url') or hit.get('source_url', '')
+            if qa_doc_id and qa_url and qa_doc_id not in citation_map:
+                qa_doc_urls[qa_doc_id] = qa_url
+        # Create alias entries
+        alias_count = 0
+        for qa_doc_id, qa_url in qa_doc_urls.items():
+            eo_info = url_to_eo_info.get(qa_url)
+            if eo_info:
+                citation_map[qa_doc_id] = eo_info
+                citation_map[f"{qa_doc_id}__eo"] = eo_info
+                alias_count += 1
+                logger.info(f"      🔗 EO QA alias: citation_map['{qa_doc_id}'] → same EO entry")
+        if alias_count:
+            logger.info(f"   📎 Created {alias_count} EO QA aliases (QA doc_ids → EO entries)")
 
     logger.info(f"✅ Citation map built with {len(citation_map)} total keys")
     logger.info(f"   Sample keys: {list(citation_map.keys())[:10]}")
@@ -1158,7 +1216,11 @@ def build_eo_qa_grounding_text(
         key = _normalise_eo_id(ev.get('eo_identifier', ''))
         events_by_eo.setdefault(key, []).append(ev)
 
-    lines = ["--- Executive Order Context (Full Document Reconstitution) ---"]
+    lines = [
+        "--- Executive Order Context (Full Document Reconstitution) ---",
+        "CITATION: Each EO document below has a 'Cite as' tag. Use that exact tag",
+        "when citing this EO in your response. Format: (document_id, eo)",
+    ]
 
     for doc_id, doc in docs.items():
         meta = doc['doc_metadata']
@@ -1180,6 +1242,7 @@ def build_eo_qa_grounding_text(
         lines.append(f"  Chunks reconstituted: {len(ordered_parts)}")
         if eo_ids:
             lines.append(f"  EO identifiers: {', '.join(f'EO {eid}' for eid in eo_ids)}")
+        lines.append(f"  Cite as: ({doc_id}, eo)")
 
         # Append related events
         for eo_id in eo_ids[:5]:
@@ -1214,6 +1277,7 @@ def build_eo_grounding_text(eo_hits: List[Dict], event_results: List[Dict], max_
         summary = hit.get('summary', {})
         eo_ids = hit.get('eo_ids', [])
         doc_meta = summary.get('doc_metadata', {})
+        doc_id = summary.get('document_id') or doc_meta.get('document_id', '')
         title = doc_meta.get('title', 'Executive Orders')
         pub_date = doc_meta.get('publication_date', '')
         snippet = (summary.get('summary_text', '')[:300] + '…') if summary.get('summary_text') else ''
@@ -1225,6 +1289,7 @@ def build_eo_grounding_text(eo_hits: List[Dict], event_results: List[Dict], max_
             )
             lines.append(
                 f"\n[EO {eo_id}] {title} ({pub_date})"
+                + (f"\n  Cite as: ({doc_id}, eo)" if doc_id else "")
                 + (f"\n  Summary: {snippet}" if snippet else "")
                 + (f"\n  Related events ({len(eo_events)}): {event_snippets}" if event_snippets else "")
             )
@@ -1859,6 +1924,7 @@ async def query_llm(request: QueryLLMRequest):
         eo_results = None
         event_results = None
         eo_grounding_text = ""
+        eo_qa_hits = None
         if state.eo_overlay_enabled:
             eo_hits = await search_eo_index(request.query, top_k=state.eo_top_k)
             eo_results = [
@@ -1962,7 +2028,7 @@ async def query_llm(request: QueryLLMRequest):
         logger.info(f"[{request_id}]   Retrieved docs: {len(retrieved_docs)}")
         logger.info(f"[{request_id}]   QA items: {len(qa_grounding.get('qa_items', []))}")
 
-        citation_map = build_citation_map(retrieved_docs, qa_grounding.get("qa_items"))
+        citation_map = build_citation_map(retrieved_docs, qa_grounding.get("qa_items"), eo_results, eo_qa_hits)
 
         logger.info(f"[{request_id}] Citation map built with {len(citation_map)} entries")
         logger.info(f"[{request_id}] Citation map keys: {list(citation_map.keys())[:5]}...")  # Show first 5

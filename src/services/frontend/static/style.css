@@ -780,6 +780,14 @@ body {
     text-decoration: underline;
 }
 
+/* EO citation links — purple tint to match EO card theme */
+.citation-link[data-ref-type="eo"] {
+    color: #a78bfa;
+}
+.citation-link[data-ref-type="eo"]:hover {
+    color: #c4b5fd;
+}
+
 /* Card highlight animation when citation is clicked */
 .card-highlighted {
     animation: highlightPulse 3s ease-in-out;
