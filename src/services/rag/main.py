@@ -80,6 +80,10 @@ class ServiceState:
         self.eo_event_index: Dict[str, List[Dict]] = {}  # keyed by normalised EO number
         self.eo_events_flat: List[Dict] = []  # flat list with embeddings for semantic search
         self.eo_events_path: Optional[str] = None
+        self.eo_qa_items: List[Dict] = []  # normalized EO QA pairs
+        self.eo_qa_loaded: bool = False
+        self.eo_qa_path: Optional[str] = None
+        self.eo_grounding_mode: str = "full_doc"  # "summary" or "full_doc"
         self.eo_overlay_enabled: bool = False
         self.events_overlay_enabled: bool = False
         self.eo_top_k: int = 10
@@ -244,6 +248,9 @@ def _extract_qa_fields(qa_obj: Dict) -> Optional[Dict]:
 
     embedding = qa_obj.get('embedding_enrichment', {}).get('embedding_vector')
 
+    chunk_metadata = qa_obj.get('chunk_metadata') or {}
+    chunk_index = chunk_metadata.get('chunk_index')
+
     if not (question and answer and context and doc_metadata):
         return None
 
@@ -253,7 +260,8 @@ def _extract_qa_fields(qa_obj: Dict) -> Optional[Dict]:
         'context': context.strip(),
         'source_url': source_url or 'N/A',
         'doc_metadata': doc_metadata,
-        'embedding': embedding
+        'embedding': embedding,
+        'chunk_index': chunk_index,
     }
 
 
@@ -1049,9 +1057,151 @@ async def search_eo_index(query: str, top_k: int = 10) -> List[Dict]:
     return scored[:top_k]
 
 
+async def search_eo_qa_index(query: str, top_k: int = 20, max_docs: int = 5) -> List[Dict]:
+    """Search EO QA pairs by similarity, then gather ALL QA pairs from
+    the matched documents for full reconstitution.
+
+    1. Similarity search → top_k QA pairs (identifies relevant documents)
+    2. Extract unique document_ids from those hits (up to max_docs)
+    3. Collect EVERY QA pair belonging to those documents
+    4. Return the complete set so build_eo_qa_grounding_text can reconstitute
+       the full document text from their SOURCE CONTEXT blocks.
+    """
+    if not state.eo_qa_loaded or not state.eo_qa_items:
+        return []
+    query_embedding = await state.embedding_client.embed(query)
+    if isinstance(query_embedding, np.ndarray) and query_embedding.ndim > 1:
+        query_embedding = query_embedding[0]
+
+    # Stage 1: score all QA pairs by similarity
+    scored = []
+    for qa in state.eo_qa_items:
+        embedding = qa.get('embedding')
+        if embedding is None:
+            continue
+        similarity = dot_product_similarity(query_embedding, embedding)
+        scored.append((similarity, qa))
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    # Stage 2: from top_k hits, identify unique document_ids (rank order)
+    seen_doc_ids = {}  # doc_id → best similarity score
+    for sim, qa in scored[:top_k]:
+        doc_id = qa.get('doc_metadata', {}).get('document_id')
+        if doc_id and doc_id not in seen_doc_ids:
+            seen_doc_ids[doc_id] = sim
+
+    target_doc_ids = set(list(seen_doc_ids.keys())[:max_docs])
+    logger.info(
+        f"EO QA search: top_{top_k} hits → {len(seen_doc_ids)} unique docs, "
+        f"gathering ALL QA pairs from top {len(target_doc_ids)} docs"
+    )
+
+    # Stage 3: collect ALL QA pairs from target documents (file order preserved)
+    full_results = []
+    for qa in state.eo_qa_items:
+        doc_id = qa.get('doc_metadata', {}).get('document_id')
+        if doc_id in target_doc_ids:
+            full_results.append({
+                'question': qa.get('question'),
+                'answer': qa.get('answer'),
+                'context': qa.get('context'),
+                'source_url': qa.get('source_url'),
+                'doc_metadata': qa.get('doc_metadata'),
+                'chunk_index': qa.get('chunk_index'),
+                'similarity': seen_doc_ids.get(doc_id, 0.0),
+            })
+
+    logger.info(
+        f"EO QA full-doc gather: {len(full_results)} total QA pairs "
+        f"from {len(target_doc_ids)} docs"
+    )
+    return full_results
+
+
+def build_eo_qa_grounding_text(
+    eo_qa_hits: List[Dict],
+    event_results: List[Dict],
+    max_chars: int = 50_000,
+) -> str:
+    """Build EO grounding from retrieved QA pairs by extracting and deduplicating SOURCE CONTEXT.
+
+    1. Groups retrieved QA pairs by source_url (i.e. by EO document)
+    2. Deduplicates SOURCE CONTEXT blocks within each document
+    3. Concatenates to form reconstituted document text
+    4. Formats with EO metadata + events for LLM grounding
+    """
+    if not eo_qa_hits:
+        return ""
+
+    # Group QA hits by document_id (reliable key)
+    docs: Dict[str, Dict] = {}  # document_id → {metadata, chunks dict}
+    for hit in eo_qa_hits:
+        doc_id = hit.get('doc_metadata', {}).get('document_id') or hit.get('source_url', 'unknown')
+        if doc_id not in docs:
+            docs[doc_id] = {
+                'doc_metadata': hit.get('doc_metadata', {}),
+                'source_url': hit.get('source_url', 'unknown'),
+                'chunks': {},         # chunk_index → context text (deduped, ordered)
+                'context_set': set(), # for dedup across the whole doc
+            }
+        doc = docs[doc_id]
+        ctx = _strip_hierarchy_prefix((hit.get('context') or '').strip())
+        chunk_idx = hit.get('chunk_index') or 0
+        if ctx and ctx not in doc['context_set']:
+            doc['context_set'].add(ctx)
+            # Store under chunk_index for ordering; multiple unique contexts per chunk
+            doc['chunks'].setdefault(chunk_idx, []).append(ctx)
+
+    # Build events lookup
+    events_by_eo: Dict[str, List[Dict]] = {}
+    for ev in event_results:
+        key = _normalise_eo_id(ev.get('eo_identifier', ''))
+        events_by_eo.setdefault(key, []).append(ev)
+
+    lines = ["--- Executive Order Context (Full Document Reconstitution) ---"]
+
+    for doc_id, doc in docs.items():
+        meta = doc['doc_metadata']
+        title = meta.get('title', 'Executive Order')
+        pub_date = meta.get('publication_date', meta.get('creation_date', ''))
+        if hasattr(pub_date, 'split'):
+            pub_date = pub_date.split('T')[0] if 'T' in pub_date else pub_date
+
+        # Reconstitute by concatenating contexts in chunk_index order
+        ordered_parts = []
+        for chunk_idx in sorted(doc['chunks'].keys()):
+            ordered_parts.extend(doc['chunks'][chunk_idx])
+        reconstituted = "\n\n".join(ordered_parts)
+        eo_ids = _extract_eo_ids_from_text(reconstituted) or _extract_eo_ids_from_text(title)
+
+        lines.append(f"\n[EO Document] {title}")
+        lines.append(f"  Source: {doc.get('source_url', 'unknown')}")
+        lines.append(f"  Date: {pub_date}")
+        lines.append(f"  Chunks reconstituted: {len(ordered_parts)}")
+        if eo_ids:
+            lines.append(f"  EO identifiers: {', '.join(f'EO {eid}' for eid in eo_ids)}")
+
+        # Append related events
+        for eo_id in eo_ids[:5]:
+            eo_events = events_by_eo.get(eo_id, [])
+            if eo_events:
+                event_snippets = '; '.join(
+                    f"[{e.get('window_start', '?')}] {e.get('descriptor', '')[:80]}"
+                    for e in eo_events[:3]
+                )
+                lines.append(f"  Related events for EO {eo_id} ({len(eo_events)}): {event_snippets}")
+
+        lines.append(f"\n  --- Full Text ---\n{reconstituted}\n  --- End Full Text ---")
+
+    full = "\n".join(lines)
+    if len(full) > max_chars:
+        full = full[:max_chars].rsplit('\n', 1)[0] + "\n[EO context truncated]"
+    return full
+
+
 def build_eo_grounding_text(eo_hits: List[Dict], event_results: List[Dict], max_chars: int = 3000) -> str:
-    """Format EO hits and cascaded events as a grounding context block for the LLM prompt.
-    Truncates the total output to max_chars to protect prompt budget.
+    """Format EO summary hits and cascaded events as a grounding context block.
+    Used in 'summary' mode (original behaviour). Truncates to max_chars.
     """
     if not eo_hits:
         return ""
@@ -1188,6 +1338,20 @@ async def startup_event():
     else:
         logger.warning(f"\u26a0\ufe0f  No EO summaries file found in {eo_folder_path}")
 
+    eo_qa_path = _find_qa_file(eo_folder_path)
+    if eo_qa_path:
+        state.eo_qa_items = load_qa_index(str(eo_qa_path))
+        state.eo_qa_path = str(eo_qa_path)
+        state.eo_qa_loaded = True
+        # Count unique docs by document_id
+        eo_doc_ids = set(q.get('doc_metadata', {}).get('document_id') for q in state.eo_qa_items)
+        logger.info(
+            f"✅ EO QA loaded: {len(state.eo_qa_items)} pairs across "
+            f"{len(eo_doc_ids)} documents (full_doc reconstitution at query time)"
+        )
+    else:
+        logger.warning(f"⚠️  No EO QA file found in {eo_folder_path}")
+
     eo_events_file = _find_eo_events_file(eo_folder_path)
     if eo_events_file:
         state.eo_event_index = load_eo_events(str(eo_events_file))
@@ -1262,11 +1426,19 @@ async def startup_event():
                     unlinked_map=state.unlinked_enrichments,
                 )
 
+                # --- EO QA reload ---
+                old_eo_qa = len(state.eo_qa_items)
+                if state.eo_qa_path and Path(state.eo_qa_path).exists():
+                    state.eo_qa_items = load_qa_index(state.eo_qa_path)
+                    state.eo_qa_loaded = True
+                new_eo_qa = len(state.eo_qa_items)
+
                 logger.info(
                     f"✅ Full reload: {old_sum}→{new_sum} summaries, "
                     f"{old_qa}→{new_qa} QA, "
                     f"{old_linked}→{new_linked} linked, "
-                    f"{old_unlinked}→{new_unlinked} unlinked"
+                    f"{old_unlinked}→{new_unlinked} unlinked, "
+                    f"{old_eo_qa}→{new_eo_qa} EO QA"
                 )
             except Exception as e:
                 logger.error(f"❌ Error reloading indices: {e}", exc_info=True)
@@ -1323,9 +1495,12 @@ async def readiness():
             "eo_overlay_enabled": state.eo_overlay_enabled,
             "events_overlay_enabled": state.events_overlay_enabled,
             "eo_top_k": state.eo_top_k,
+            "eo_grounding_mode": state.eo_grounding_mode,
             "eo_summaries": len(state.eo_summaries),
+            "eo_qa_pairs": len(state.eo_qa_items),
             "eo_events": sum(len(v) for v in state.eo_event_index.values()),
             "eo_index_path": state.eo_index_path,
+            "eo_qa_path": state.eo_qa_path,
             "eo_events_path": state.eo_events_path,
         },
         "timestamp": datetime.now().isoformat()
@@ -1448,14 +1623,17 @@ class EoEventsToggleRequest(BaseModel):
     eo_overlay_enabled: Optional[bool] = Field(None, description="Enable/disable EO semantic overlay (None = no change)")
     events_overlay_enabled: Optional[bool] = Field(None, description="Enable/disable Events cascade (None = no change)")
     eo_top_k: Optional[int] = Field(None, description="Top-K EO summaries per query", ge=1, le=50)
+    eo_grounding_mode: Optional[str] = Field(None, description="'summary' (300-char snippets) or 'full_doc' (reconstituted EO text)")
 
 
 class EoEventsToggleResponse(BaseModel):
     eo_overlay_enabled: bool
     events_overlay_enabled: bool
     eo_top_k: int
+    eo_grounding_mode: str
     eo_summaries_loaded: int
     eo_events_loaded: int
+    eo_qa_pairs_loaded: int
 
 
 @app.post("/toggle-eo-events", response_model=EoEventsToggleResponse)
@@ -1477,17 +1655,24 @@ async def toggle_eo_events(request: EoEventsToggleRequest):
         state.events_overlay_enabled = request.events_overlay_enabled
     if request.eo_top_k is not None:
         state.eo_top_k = request.eo_top_k
+    if request.eo_grounding_mode is not None:
+        if request.eo_grounding_mode not in ("summary", "full_doc"):
+            raise HTTPException(status_code=400, detail="eo_grounding_mode must be 'summary' or 'full_doc'")
+        state.eo_grounding_mode = request.eo_grounding_mode
 
     logger.info(
         f"\U0001f501 EO overlay: eo={state.eo_overlay_enabled}, "
-        f"events={state.events_overlay_enabled}, top_k={state.eo_top_k}"
+        f"events={state.events_overlay_enabled}, top_k={state.eo_top_k}, "
+        f"mode={state.eo_grounding_mode}"
     )
     return EoEventsToggleResponse(
         eo_overlay_enabled=state.eo_overlay_enabled,
         events_overlay_enabled=state.events_overlay_enabled,
         eo_top_k=state.eo_top_k,
+        eo_grounding_mode=state.eo_grounding_mode,
         eo_summaries_loaded=len(state.eo_summaries),
         eo_events_loaded=sum(len(v) for v in state.eo_event_index.values()),
+        eo_qa_pairs_loaded=len(state.eo_qa_items),
     )
 
 
@@ -1694,8 +1879,29 @@ async def query_llm(request: QueryLLMRequest):
                     start_date=request.start_date,
                     end_date=request.end_date,
                 )
-            eo_grounding_text = build_eo_grounding_text(eo_hits, event_results or [])
-            logger.info(f"[{request_id}] EO overlay: {len(eo_results)} EO hits, {len(event_results or [])} events")
+
+            if state.eo_grounding_mode == "full_doc" and state.eo_qa_loaded:
+                # Full-doc mode: similarity search identifies relevant EOs,
+                # then gathers ALL QA pairs from those docs for full reconstitution
+                eo_qa_hits = await search_eo_qa_index(
+                    request.query, top_k=state.eo_top_k * 5, max_docs=3
+                )
+                eo_grounding_text = build_eo_qa_grounding_text(
+                    eo_qa_hits, event_results or [], max_chars=200_000
+                )
+                logger.info(
+                    f"[{request_id}] EO overlay (full_doc): {len(eo_results)} summary hits, "
+                    f"{len(eo_qa_hits)} QA hits, {len(event_results or [])} events, "
+                    f"grounding_chars={len(eo_grounding_text)}"
+                )
+            else:
+                # Summary mode: use summary snippets (original behaviour)
+                eo_grounding_text = build_eo_grounding_text(eo_hits, event_results or [])
+                logger.info(
+                    f"[{request_id}] EO overlay (summary): {len(eo_results)} EO hits, "
+                    f"{len(event_results or [])} events, "
+                    f"grounding_chars={len(eo_grounding_text)}"
+                )
 
         # Step 2: Generate LLM response based on mode
         logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")

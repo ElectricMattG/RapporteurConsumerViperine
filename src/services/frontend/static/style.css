@@ -1509,6 +1509,22 @@ body {
     color: var(--text-primary);
 }
 
+.eo-mode-select {
+    padding: 2px 6px;
+    font-size: 12px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    color: var(--text-primary);
+    cursor: pointer;
+}
+
+.eo-mode-select:disabled,
+.eo-topk-input:disabled {
+    opacity: 0.4;
+    cursor: not-allowed;
+}
+
 .eo-toggle-status {
     font-size: 11px;
     color: #a78bfa;

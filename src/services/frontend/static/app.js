@@ -90,6 +90,7 @@ const switchIndexStatus = document.getElementById('switchIndexStatus');
 const eoIndexToggle = document.getElementById('eoIndexToggle');
 const eventsOverlayToggle = document.getElementById('eventsOverlayToggle');
 const eoTopKInput = document.getElementById('eoTopKInput');
+const eoGroundingModeSelect = document.getElementById('eoGroundingMode');
 const eoToggleStatus = document.getElementById('eoToggleStatus');
 
 // ============================================================================
@@ -331,6 +332,13 @@ if (switchIndexBtn) {
 // EO / Events Overlay
 // ============================================================================
 
+function updateEoControlsState() {
+    const enabled = eoIndexToggle && eoIndexToggle.checked;
+    if (eoGroundingModeSelect) eoGroundingModeSelect.disabled = !enabled;
+    if (eoTopKInput) eoTopKInput.disabled = !enabled;
+    if (eventsOverlayToggle) eventsOverlayToggle.disabled = !enabled;
+}
+
 async function syncEoStatus() {
     try {
         const resp = await fetch('/api/eo-status');
@@ -339,6 +347,8 @@ async function syncEoStatus() {
         if (eoIndexToggle) eoIndexToggle.checked = data.eo_overlay_enabled === true;
         if (eventsOverlayToggle) eventsOverlayToggle.checked = data.events_overlay_enabled === true;
         if (eoTopKInput && data.eo_top_k != null) eoTopKInput.value = data.eo_top_k;
+        if (eoGroundingModeSelect && data.eo_grounding_mode) eoGroundingModeSelect.value = data.eo_grounding_mode;
+        updateEoControlsState();
     } catch (e) {
         console.warn('Could not sync EO status:', e);
     }
@@ -349,7 +359,8 @@ async function applyEoToggle() {
     const payload = {
         eo_overlay_enabled: eoIndexToggle.checked,
         events_overlay_enabled: eventsOverlayToggle.checked,
-        eo_top_k: parseInt(eoTopKInput ? eoTopKInput.value : '10', 10) || 10
+        eo_top_k: parseInt(eoTopKInput ? eoTopKInput.value : '10', 10) || 10,
+        eo_grounding_mode: eoGroundingModeSelect ? eoGroundingModeSelect.value : 'full_doc'
     };
     if (eoToggleStatus) eoToggleStatus.textContent = '⏳';
     try {
@@ -360,9 +371,14 @@ async function applyEoToggle() {
         });
         const data = await resp.json();
         if (resp.ok) {
+            updateEoControlsState();
             if (eoToggleStatus) {
-                eoToggleStatus.textContent = '✅';
-                setTimeout(() => { if (eoToggleStatus) eoToggleStatus.textContent = ''; }, 2000);
+                const mode = data.eo_grounding_mode || '';
+                const qa = data.eo_qa_pairs_loaded || 0;
+                const statusParts = [];
+                if (data.eo_overlay_enabled) statusParts.push(mode === 'full_doc' ? `Full Doc (${qa} QA)` : 'Summary');
+                eoToggleStatus.textContent = statusParts.length ? `✅ ${statusParts.join(', ')}` : '✅ Off';
+                setTimeout(() => { if (eoToggleStatus) eoToggleStatus.textContent = ''; }, 3000);
             }
         } else {
             if (eoToggleStatus) eoToggleStatus.textContent = `❌ ${data.detail || data.error || ''}`;
@@ -376,6 +392,7 @@ async function applyEoToggle() {
 
 if (eoIndexToggle) eoIndexToggle.addEventListener('change', applyEoToggle);
 if (eventsOverlayToggle) eventsOverlayToggle.addEventListener('change', applyEoToggle);
+if (eoGroundingModeSelect) eoGroundingModeSelect.addEventListener('change', applyEoToggle);
 let eoTopKDebounceTimer = null;
 if (eoTopKInput) {
     eoTopKInput.addEventListener('input', () => {
