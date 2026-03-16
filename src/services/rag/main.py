@@ -73,6 +73,16 @@ class ServiceState:
         # Index folder switching
         self.indices_root: Optional[str] = None
         self.active_folder: Optional[str] = None
+        # EO / Events overlay (independent of active_folder)
+        self.eo_summaries: List[Dict] = []
+        self.eo_index_path: Optional[str] = None
+        self.eo_index_loaded: bool = False
+        self.eo_event_index: Dict[str, List[Dict]] = {}  # keyed by normalised EO number
+        self.eo_events_flat: List[Dict] = []  # flat list with embeddings for semantic search
+        self.eo_events_path: Optional[str] = None
+        self.eo_overlay_enabled: bool = False
+        self.events_overlay_enabled: bool = False
+        self.eo_top_k: int = 10
 
 state = ServiceState()
 
@@ -111,6 +121,7 @@ class QueryLLMRequest(SearchRequest):
     max_tokens: int = Field(default=24000, description="Maximum tokens for LLM response", ge=100, le=32768)
     use_qa: bool = Field(default=False, description="Enable QA grounding in addition to summaries")
     qa_top_k: int = Field(default=5, description="Top-K QA pairs to retrieve", ge=1, le=150)
+    context_prefix: Optional[str] = Field(None, description="Conversation context to prepend to the LLM prompt only (not used for embeddings)")
 
 class DocumentResult(BaseModel):
     """Single document result with metadata."""
@@ -134,6 +145,8 @@ class SearchResponse(BaseModel):
     total_retrieved: int
     execution_time_ms: float
     enrichment_results: Optional[List[Dict]] = None
+    eo_results: Optional[List[Dict]] = None
+    event_results: Optional[List[Dict]] = None
 
 class QueryLLMResponse(SearchResponse):
     """Response model for query_llm endpoint (extends SearchResponse)."""
@@ -188,6 +201,8 @@ class GroundingPreviewResponse(BaseModel):
     execution_time_ms: float
     enrichment_results: Optional[List[Dict]] = None
     enrichment_preview: Optional[str] = None
+    eo_results: Optional[List[Dict]] = None
+    event_results: Optional[List[Dict]] = None
 
 
 # ============================================================================
@@ -667,19 +682,20 @@ async def search_qa_index(
     }
 
 
-async def generate_llm_response(query: str, top_summaries: List[Dict], temperature: float, max_tokens: int, enrichment_text: str = "") -> tuple[str, str]:
+async def generate_llm_response(query: str, top_summaries: List[Dict], temperature: float, max_tokens: int, enrichment_text: str = "", eo_grounding_text: str = "") -> tuple[str, str]:
     """
     Generate LLM response using retrieved summaries as grounding.
 
     Args:
-        enrichment_text: Optional BBOA enrichment context block appended after
-            primary grounding to give the LLM additional event/media/risk context.
+        enrichment_text: Optional BBOA enrichment context block (media/risk/events).
+        eo_grounding_text: Optional EO + events context block; passed directly to
+            build_summary_prompt so it is embedded with targeted LLM instructions.
 
     Returns: (llm_response, full_prompt)
     """
-    prompt = build_summary_prompt(query, top_summaries, clean_author_fn=_clean_author_name)
+    prompt = build_summary_prompt(query, top_summaries, clean_author_fn=_clean_author_name, eo_grounding_text=eo_grounding_text)
     if enrichment_text:
-        # Insert enrichment context BEFORE the generation trigger ("Overview:")
+        # Insert BBOA enrichment context BEFORE the generation trigger ("Overview:")
         # so the LLM reads it as grounding input, not as content to complete.
         generation_trigger = "Overview:"
         if generation_trigger in prompt:
@@ -688,6 +704,7 @@ async def generate_llm_response(query: str, top_summaries: List[Dict], temperatu
             prompt = enrichment_text + "\n\n" + prompt
 
     logger.info(f"Generating LLM response with {len(top_summaries)} summaries as grounding")
+    logger.info(f"--- FULL GROUNDING PROMPT ({len(prompt)} chars) ---\n{prompt}\n--- END GROUNDING PROMPT ---")
 
     # Generate response with specified parameters
     llm_response = await state.llm_client.generate_content(
@@ -866,6 +883,207 @@ def _find_enrichment_file(folder: Path, prefix: str) -> Optional[Path]:
     return candidates[0] if candidates else None
 
 
+def _find_eo_events_file(folder: Path) -> Optional[Path]:
+    """Return the most-recent eo_events_bboa_full_*.jsonl in *folder*."""
+    candidates = sorted(folder.glob("eo_events_bboa_full_*.jsonl"), reverse=True)
+    return candidates[0] if candidates else None
+
+
+# ============================================================================
+# EO / Events Overlay Helpers
+# ============================================================================
+
+_EO_ID_RE = re.compile(r'(?:Executive Order|EO)\s+(\d+)', re.IGNORECASE)
+
+
+def _normalise_eo_id(raw: str) -> str:
+    """Return just the numeric part of an EO identifier ('EO 14183' → '14183')."""
+    if not raw:
+        return ""
+    m = _EO_ID_RE.search(raw)
+    return m.group(1).strip() if m else re.sub(r'^(?:executive order|eo)\s*', '', raw.strip(), flags=re.IGNORECASE).strip()
+
+
+def _extract_eo_ids_from_text(text: str) -> List[str]:
+    """Extract deduplicated normalised EO numbers from free text (e.g. summary_text)."""
+    return list(dict.fromkeys(_EO_ID_RE.findall(text)))
+
+
+def load_eo_events(path: str) -> Dict[str, List[Dict]]:
+    """
+    Load the EO events JSONL into a dict keyed by normalised EO number.
+    Multiple events sharing the same EO are collected into a list.
+    """
+    index: Dict[str, List[Dict]] = {}
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"⚠️  EO events file not found: {path}; skipping")
+        return index
+    malformed = loaded = 0
+    with open(p, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                record = json.loads(line)
+            except json.JSONDecodeError as e:
+                malformed += 1
+                logger.debug(f"Skipping malformed EO event line: {e}")
+                continue
+            key = _normalise_eo_id(record.get('eo_identifier', ''))
+            if key:
+                index.setdefault(key, []).append(record)
+                loaded += 1
+    if malformed:
+        logger.warning(f"EO events: skipped {malformed} malformed lines")
+    logger.info(f"✅ Loaded EO events: {loaded} records → {len(index)} unique EO identifiers")
+    return index
+
+
+def lookup_events_for_eos(
+    eo_ids: List[str],
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    max_per_eo: int = 10,
+    max_total: int = 50,
+) -> List[Dict]:
+    """
+    Structural (dict-lookup) fallback: return events matching the given EO numbers.
+    Used only when embeddings are unavailable. Prefer search_events_semantic().
+    """
+    if not state.events_overlay_enabled or not state.eo_event_index:
+        return []
+    seen: set = set()
+    results: List[Dict] = []
+    for eo_id in eo_ids:
+        # IDs from search_eo_index are already numeric strings — look up directly
+        # then fall back to _normalise_eo_id for any raw strings passed directly
+        events = state.eo_event_index.get(eo_id) or state.eo_event_index.get(_normalise_eo_id(eo_id), [])
+        per_eo = 0
+        for event in events:
+            if per_eo >= max_per_eo or len(results) >= max_total:
+                break
+            ek = event.get('event_key', '')
+            if ek in seen:
+                continue
+            # Date filter on window_start
+            if start_date or end_date:
+                ws = event.get('window_start', '')
+                if ws:
+                    if start_date and ws < start_date:
+                        continue
+                    if end_date and ws > end_date:
+                        continue
+            seen.add(ek)
+            results.append(event)
+            per_eo += 1
+    results.sort(key=lambda e: e.get('window_start', ''))
+    return results
+
+
+async def search_events_semantic(
+    query: str,
+    top_k: int = 50,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+) -> List[Dict]:
+    """
+    Semantic search over EO events using event_embedding field.
+    Returns up to top_k events ranked by similarity to the query.
+    """
+    if not state.events_overlay_enabled or not state.eo_events_flat:
+        return []
+    # Fall back to structural lookup if no embeddings are present
+    if not any(e.get('event_embedding') is not None for e in state.eo_events_flat):
+        logger.warning("⚠️  No event embeddings found; falling back to full flat list")
+        return state.eo_events_flat[:top_k]
+    query_embedding = await state.embedding_client.embed(query)
+    if isinstance(query_embedding, np.ndarray) and query_embedding.ndim > 1:
+        query_embedding = query_embedding[0]
+    seen: set = set()
+    scored = []
+    for event in state.eo_events_flat:
+        doc_embedding = event.get('event_embedding')
+        if doc_embedding is None:
+            continue
+        ek = event.get('event_key', '')
+        if ek in seen:
+            continue
+        ws = event.get('window_start', '')
+        if start_date and ws and ws < start_date:
+            continue
+        if end_date and ws and ws > end_date:
+            continue
+        similarity = dot_product_similarity(query_embedding, doc_embedding)
+        scored.append((similarity, event))
+        seen.add(ek)
+    scored.sort(key=lambda x: x[0], reverse=True)
+    return [e for _, e in scored[:top_k]]
+
+
+async def search_eo_index(query: str, top_k: int = 10) -> List[Dict]:
+    """
+    Semantic search over the EO summaries index.
+    Returns hit dicts: {summary, similarity, eo_ids} where eo_ids are pre-cached
+    numeric strings extracted from summary_text at load time.
+    """
+    if not state.eo_index_loaded or not state.eo_summaries:
+        return []
+    query_embedding = await state.embedding_client.embed(query)
+    if isinstance(query_embedding, np.ndarray) and query_embedding.ndim > 1:
+        query_embedding = query_embedding[0]
+    scored = []
+    for summary in state.eo_summaries:
+        doc_embedding = summary.get('summary_embedding')
+        if doc_embedding is None:
+            continue
+        similarity = dot_product_similarity(query_embedding, doc_embedding)
+        scored.append({
+            'summary': summary,
+            'similarity': similarity,
+            # eo_ids pre-extracted at load time; fall back to live extraction if missing
+            'eo_ids': summary.get('_eo_ids') or _extract_eo_ids_from_text(summary.get('summary_text', '')),
+        })
+    scored.sort(key=lambda x: x['similarity'], reverse=True)
+    return scored[:top_k]
+
+
+def build_eo_grounding_text(eo_hits: List[Dict], event_results: List[Dict], max_chars: int = 3000) -> str:
+    """Format EO hits and cascaded events as a grounding context block for the LLM prompt.
+    Truncates the total output to max_chars to protect prompt budget.
+    """
+    if not eo_hits:
+        return ""
+    lines = ["--- Executive Order Context ---"]
+    events_by_eo: Dict[str, List[Dict]] = {}
+    for ev in event_results:
+        key = _normalise_eo_id(ev.get('eo_identifier', ''))
+        events_by_eo.setdefault(key, []).append(ev)
+    for hit in eo_hits:
+        summary = hit.get('summary', {})
+        eo_ids = hit.get('eo_ids', [])
+        doc_meta = summary.get('doc_metadata', {})
+        title = doc_meta.get('title', 'Executive Orders')
+        pub_date = doc_meta.get('publication_date', '')
+        snippet = (summary.get('summary_text', '')[:300] + '…') if summary.get('summary_text') else ''
+        for eo_id in eo_ids[:5]:
+            eo_events = events_by_eo.get(eo_id, [])
+            event_snippets = '; '.join(
+                f"[{e.get('window_start', '?')}] {e.get('descriptor', '')[:80]}"
+                for e in eo_events[:3]
+            )
+            lines.append(
+                f"\n[EO {eo_id}] {title} ({pub_date})"
+                + (f"\n  Summary: {snippet}" if snippet else "")
+                + (f"\n  Related events ({len(eo_events)}): {event_snippets}" if event_snippets else "")
+            )
+    full = "\n".join(lines)
+    if len(full) > max_chars:
+        full = full[:max_chars].rsplit('\n', 1)[0] + "\n[EO context truncated]"
+    return full
+
+
 # ============================================================================
 # Startup & Shutdown
 # ============================================================================
@@ -951,7 +1169,35 @@ async def startup_event():
         linked_map=state.linked_enrichments,
         unlinked_map=state.unlinked_enrichments,
     )
-    logger.info("✅ EnrichmentRetriever ready")
+    logger.info("\u2705 EnrichmentRetriever ready")
+
+    # EO / Events overlay — loaded from a fixed folder (EO_INDEX_FOLDER env, default x_indices_eo)
+    eo_folder_name = os.environ.get("EO_INDEX_FOLDER", "x_indices_eo")
+    eo_folder_path = indices_root / eo_folder_name
+    logger.info(f"📂 EO overlay folder: {eo_folder_path}")
+
+    eo_summaries_path = _find_summaries_file(eo_folder_path)
+    if eo_summaries_path:
+        state.eo_summaries = load_summaries_index(str(eo_summaries_path))
+        # Pre-cache EO IDs extracted from summary_text to avoid per-query regex work
+        for _s in state.eo_summaries:
+            _s['_eo_ids'] = _extract_eo_ids_from_text(_s.get('summary_text', ''))
+        state.eo_index_path = str(eo_summaries_path)
+        state.eo_index_loaded = True
+        logger.info(f"\u2705 EO summaries loaded: {len(state.eo_summaries)} records from {eo_summaries_path.name}")
+    else:
+        logger.warning(f"\u26a0\ufe0f  No EO summaries file found in {eo_folder_path}")
+
+    eo_events_file = _find_eo_events_file(eo_folder_path)
+    if eo_events_file:
+        state.eo_event_index = load_eo_events(str(eo_events_file))
+        state.eo_events_path = str(eo_events_file)
+        # Build flat list for semantic search (includes event_embedding if present)
+        state.eo_events_flat = [e for evts in state.eo_event_index.values() for e in evts]
+        with_emb = sum(1 for e in state.eo_events_flat if e.get('event_embedding') is not None)
+        logger.info(f"✅ EO events flat list: {len(state.eo_events_flat)} records, {with_emb} with embeddings")
+    else:
+        logger.warning(f"\u26a0\ufe0f  No EO events file found in {eo_folder_path}")
 
     # Initialize clients
     logger.info("🔧 Initializing embedding client...")
@@ -1073,6 +1319,15 @@ async def readiness():
             "unlinked_urls": len(state.unlinked_enrichments),
             "unlinked_index_path": state.unlinked_index_path,
         },
+        "eo_overlay": {
+            "eo_overlay_enabled": state.eo_overlay_enabled,
+            "events_overlay_enabled": state.events_overlay_enabled,
+            "eo_top_k": state.eo_top_k,
+            "eo_summaries": len(state.eo_summaries),
+            "eo_events": sum(len(v) for v in state.eo_event_index.values()),
+            "eo_index_path": state.eo_index_path,
+            "eo_events_path": state.eo_events_path,
+        },
         "timestamp": datetime.now().isoformat()
     }
 
@@ -1188,6 +1443,54 @@ async def switch_index(request: SwitchIndexRequest):
         "unlinked_urls": len(state.unlinked_enrichments),
     }
 
+
+class EoEventsToggleRequest(BaseModel):
+    eo_overlay_enabled: Optional[bool] = Field(None, description="Enable/disable EO semantic overlay (None = no change)")
+    events_overlay_enabled: Optional[bool] = Field(None, description="Enable/disable Events cascade (None = no change)")
+    eo_top_k: Optional[int] = Field(None, description="Top-K EO summaries per query", ge=1, le=50)
+
+
+class EoEventsToggleResponse(BaseModel):
+    eo_overlay_enabled: bool
+    events_overlay_enabled: bool
+    eo_top_k: int
+    eo_summaries_loaded: int
+    eo_events_loaded: int
+
+
+@app.post("/toggle-eo-events", response_model=EoEventsToggleResponse)
+async def toggle_eo_events(request: EoEventsToggleRequest):
+    """
+    Toggle the EO and/or Events overlays on or off at runtime.
+    Operates independently of the active index folder — switching the primary
+    index does NOT reset these flags.
+    Accepts partial updates: omitted fields leave current state unchanged.
+    """
+    if request.eo_overlay_enabled is True and not state.eo_index_loaded:
+        raise HTTPException(status_code=409, detail="EO summaries index is not loaded; cannot enable eo_overlay")
+    if request.events_overlay_enabled is True and not state.eo_event_index:
+        raise HTTPException(status_code=409, detail="EO events index is not loaded; cannot enable events_overlay")
+
+    if request.eo_overlay_enabled is not None:
+        state.eo_overlay_enabled = request.eo_overlay_enabled
+    if request.events_overlay_enabled is not None:
+        state.events_overlay_enabled = request.events_overlay_enabled
+    if request.eo_top_k is not None:
+        state.eo_top_k = request.eo_top_k
+
+    logger.info(
+        f"\U0001f501 EO overlay: eo={state.eo_overlay_enabled}, "
+        f"events={state.events_overlay_enabled}, top_k={state.eo_top_k}"
+    )
+    return EoEventsToggleResponse(
+        eo_overlay_enabled=state.eo_overlay_enabled,
+        events_overlay_enabled=state.events_overlay_enabled,
+        eo_top_k=state.eo_top_k,
+        eo_summaries_loaded=len(state.eo_summaries),
+        eo_events_loaded=sum(len(v) for v in state.eo_event_index.values()),
+    )
+
+
 @app.post("/search", response_model=SearchResponse)
 async def search(request: SearchRequest):
     """
@@ -1236,6 +1539,31 @@ async def search(request: SearchRequest):
             )
             logger.info(f"[{request_id}] Enrichment: {len(enrichment_results)} records")
 
+        # EO / Events overlay
+        eo_results = None
+        event_results = None
+        if state.eo_overlay_enabled:
+            eo_hits = await search_eo_index(request.query, top_k=state.eo_top_k)
+            eo_results = [
+                {
+                    "document_id": h["summary"].get("document_id"),
+                    "source_url": h["summary"].get("source_url"),
+                    "summary_text": h["summary"].get("summary_text", ""),
+                    "similarity_score": h["similarity"],
+                    "eo_ids": h["eo_ids"],
+                    "doc_metadata": h["summary"].get("doc_metadata", {}),
+                }
+                for h in eo_hits
+            ]
+            if state.events_overlay_enabled:
+                event_results = await search_events_semantic(
+                    request.query,
+                    top_k=50,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                )
+            logger.info(f"[{request_id}] EO overlay: {len(eo_results)} EO hits, {len(event_results or [])} events")
+
         execution_time_ms = (time.time() - start_time) * 1000
 
         logger.info(f"[{request_id}] Search completed: {len(retrieved_docs)} docs, {execution_time_ms:.2f}ms")
@@ -1254,6 +1582,8 @@ async def search(request: SearchRequest):
             total_retrieved=len(retrieved_docs),
             execution_time_ms=execution_time_ms,
             enrichment_results=enrichment_results,
+            eo_results=eo_results,
+            event_results=event_results,
         )
 
     except Exception as e:
@@ -1340,8 +1670,43 @@ async def query_llm(request: QueryLLMRequest):
                     f"for {len(urls)} primary docs"
                 )
 
+        # EO / Events overlay
+        eo_results = None
+        event_results = None
+        eo_grounding_text = ""
+        if state.eo_overlay_enabled:
+            eo_hits = await search_eo_index(request.query, top_k=state.eo_top_k)
+            eo_results = [
+                {
+                    "document_id": h["summary"].get("document_id"),
+                    "source_url": h["summary"].get("source_url"),
+                    "summary_text": h["summary"].get("summary_text", ""),
+                    "similarity_score": h["similarity"],
+                    "eo_ids": h["eo_ids"],
+                    "doc_metadata": h["summary"].get("doc_metadata", {}),
+                }
+                for h in eo_hits
+            ]
+            if state.events_overlay_enabled:
+                event_results = await search_events_semantic(
+                    request.query,
+                    top_k=50,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                )
+            eo_grounding_text = build_eo_grounding_text(eo_hits, event_results or [])
+            logger.info(f"[{request_id}] EO overlay: {len(eo_results)} EO hits, {len(event_results or [])} events")
+
         # Step 2: Generate LLM response based on mode
         logger.info(f"[{request_id}] Step 2: Generating LLM response (mode={request.mode})...")
+
+        # Build the query string for the LLM prompt (include conversation context if provided).
+        # Embedding searches always use the bare request.query to stay within token limits.
+        llm_query = (
+            f"CONTEXT:\n{request.context_prefix}\n\nCurrent Query: {request.query}"
+            if request.context_prefix
+            else request.query
+        )
 
         grounding_metadata = None
 
@@ -1349,7 +1714,7 @@ async def query_llm(request: QueryLLMRequest):
             # Use web search grounding
             logger.info(f"[{request_id}] Using web search mode")
             response_data, full_prompt = await generate_web_search_response(
-                query=request.query,
+                query=llm_query,
                 temperature=request.temperature,
                 max_tokens=request.max_tokens
             )
@@ -1362,11 +1727,12 @@ async def query_llm(request: QueryLLMRequest):
             # Use index-only mode
             logger.info(f"[{request_id}] Using ask mode (index-only)")
             llm_response, full_prompt = await generate_llm_response(
-                query=request.query,
+                query=llm_query,
                 top_summaries=results,
                 temperature=request.temperature,
                 max_tokens=request.max_tokens,
                 enrichment_text=enrichment_text,
+                eo_grounding_text=eo_grounding_text,
             )
 
             # Optional QA refinement (second-stage prompt)
@@ -1376,7 +1742,7 @@ async def query_llm(request: QueryLLMRequest):
                 llm_response, full_prompt = await refine_with_qa(
                     draft_response=llm_response,
                     qa_items=qa_grounding.get("qa_items", []),
-                    query=request.query,
+                    query=llm_query,
                     temperature=request.temperature,
                     max_tokens=request.max_tokens  # Use user's requested max_tokens for large grounding
                 )
@@ -1418,7 +1784,9 @@ async def query_llm(request: QueryLLMRequest):
                     "max_tokens": request.max_tokens
                 },
                 prompt=full_prompt,
-                grounding_metadata=grounding_metadata
+                grounding_metadata=grounding_metadata,
+                eo_results=eo_results,
+                event_results=event_results,
             )
         else:
             return QueryLLMResponse(
@@ -1445,6 +1813,8 @@ async def query_llm(request: QueryLLMRequest):
                 retrieved_qa=qa_grounding.get("qa_items"),
                 citation_map=citation_map,
                 enrichment_results=enrichment_results,
+                eo_results=eo_results,
+                event_results=event_results,
             )
 
     except HTTPException:
@@ -1504,6 +1874,31 @@ async def grounding_preview(request: GroundingPreviewRequest):
                 enrichment_preview = state.enrichment_retriever.format_for_grounding(enrichment_results)
                 logger.info(f"[{request_id}] Enrichment preview: {len(enrichment_results)} records")
 
+        # EO / Events overlay
+        eo_results = None
+        event_results = None
+        if state.eo_overlay_enabled:
+            eo_hits = await search_eo_index(request.query, top_k=state.eo_top_k)
+            eo_results = [
+                {
+                    "document_id": h["summary"].get("document_id"),
+                    "source_url": h["summary"].get("source_url"),
+                    "summary_text": h["summary"].get("summary_text", ""),
+                    "similarity_score": h["similarity"],
+                    "eo_ids": h["eo_ids"],
+                    "doc_metadata": h["summary"].get("doc_metadata", {}),
+                }
+                for h in eo_hits
+            ]
+            if state.events_overlay_enabled:
+                event_results = await search_events_semantic(
+                    request.query,
+                    top_k=50,
+                    start_date=request.start_date,
+                    end_date=request.end_date,
+                )
+            logger.info(f"[{request_id}] EO overlay: {len(eo_results)} EO hits, {len(event_results or [])} events")
+
         execution_time_ms = (time.time() - start_time) * 1000
 
         return GroundingPreviewResponse(
@@ -1517,6 +1912,8 @@ async def grounding_preview(request: GroundingPreviewRequest):
             execution_time_ms=execution_time_ms,
             enrichment_results=enrichment_results,
             enrichment_preview=enrichment_preview,
+            eo_results=eo_results,
+            event_results=event_results,
         )
 
     except Exception as e:

@@ -86,14 +86,9 @@ def query_rag():
         # Build context from previous conversations
         context = build_context(context_depth)
 
-        # Prepend context to query
-        full_query = user_query
-        if context:
-            full_query = f"CONTEXT:\n{context}\n\nCurrent Query: {user_query}"
-
         # Call RAG service
         rag_payload = {
-            "query": full_query,
+            "query": user_query,
             "mode": mode,
             "top_k": top_k,
             "temperature": temperature,
@@ -109,6 +104,8 @@ def query_rag():
             rag_payload["start_date"] = start_date
         if end_date:
             rag_payload["end_date"] = end_date
+        if context:
+            rag_payload["context_prefix"] = context
 
         logger.info(f"Calling RAG service: {RAG_SERVICE_URL}/query_llm")
         logger.info(f"RAG Request Payload: {json.dumps(rag_payload, indent=2)}")
@@ -140,6 +137,8 @@ def query_rag():
             "retrieved_docs": rag_response.get('retrieved_docs', []),
             "retrieved_qa": rag_response.get('retrieved_qa', []),
             "enrichment_results": rag_response.get('enrichment_results', []),
+            "eo_results": rag_response.get('eo_results') or [],
+            "event_results": rag_response.get('event_results') or [],
             "metadata": {
                 "message_id": current_conversation_id,
                 "request_id": rag_response.get('request_id'),
@@ -331,11 +330,7 @@ def build_context(depth: int) -> str:
         context_parts.append(f"user -> {conv['user_query']}")
         # Use edited_content if the user revised the response; otherwise use original
         effective_response = conv.get('edited_content') or conv['assistant_response']
-        # Truncate assistant response to first 200 chars for context
-        response_snippet = effective_response[:200]
-        if len(effective_response) > 200:
-            response_snippet += "..."
-        context_parts.append(f"assistant -> {response_snippet}")
+        context_parts.append(f"assistant -> {effective_response}")
 
     return "\n".join(context_parts)
 
@@ -378,6 +373,34 @@ def switch_index():
         return jsonify(resp.json()), resp.status_code
     except Exception as e:
         logger.error(f"❌ /api/switch-index proxy error: {e}")
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route('/api/toggle-eo-events', methods=['POST'])
+def toggle_eo_events():
+    """Proxy POST /toggle-eo-events to the RAG service."""
+    data = request.get_json(silent=True) or {}
+    try:
+        resp = requests.post(
+            f"{RAG_SERVICE_URL}/toggle-eo-events",
+            json=data,
+            timeout=10
+        )
+        return jsonify(resp.json()), resp.status_code
+    except Exception as e:
+        logger.error(f"❌ /api/toggle-eo-events proxy error: {e}")
+        return jsonify({"error": str(e)}), 502
+
+
+@app.route('/api/eo-status', methods=['GET'])
+def eo_status():
+    """Proxy GET RAG /ready and return the eo_overlay stanza."""
+    try:
+        resp = requests.get(f"{RAG_SERVICE_URL}/ready", timeout=5)
+        data = resp.json()
+        return jsonify(data.get('eo_overlay', {})), resp.status_code
+    except Exception as e:
+        logger.error(f"❌ /api/eo-status proxy error: {e}")
         return jsonify({"error": str(e)}), 502
 
 

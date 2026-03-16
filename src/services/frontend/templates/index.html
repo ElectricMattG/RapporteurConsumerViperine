@@ -98,6 +98,21 @@
                         <button type="button" class="enrich-pill active" data-type="risk">Risk</button>
                     </div>
                 </div>
+                <!-- EO / Events Overlay Controls -->
+                <div class="header-row eo-overlay-bar" id="eoOverlayBar">
+                    <span class="eo-overlay-label">EO Overlay:</span>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="eoIndexToggle">
+                        <label for="eoIndexToggle">EO Index</label>
+                    </div>
+                    <div class="checkbox-item">
+                        <input type="checkbox" id="eventsOverlayToggle">
+                        <label for="eventsOverlayToggle">Events</label>
+                    </div>
+                    <label for="eoTopKInput" class="eo-topk-label">Top K:</label>
+                    <input type="number" id="eoTopKInput" min="1" max="20" value="10" class="eo-topk-input">
+                    <span id="eoToggleStatus" class="eo-toggle-status"></span>
+                </div>
             </div>
 
             <div class="chat-container" id="chatContainer">

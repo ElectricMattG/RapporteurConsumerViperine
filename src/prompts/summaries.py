@@ -82,7 +82,7 @@ def format_summary_grounding(top_summaries: List[Dict], clean_author_fn=None) ->
     return "\n\n".join(summaries_text)
 
 
-def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=None) -> str:
+def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=None, eo_grounding_text: str = "") -> str:
     """
     Build the first-stage LLM prompt grounded on retrieved summaries.
 
@@ -90,6 +90,9 @@ def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=
         query: the user's original query string.
         top_summaries: ranked summary results.
         clean_author_fn: optional author-name cleaner from main.py.
+        eo_grounding_text: optional pre-formatted EO + events context block
+                           produced by build_eo_grounding_text(). When present
+                           an explicit instruction section is added to the prompt.
 
     Returns:
         Complete prompt string ready for LLM generation.
@@ -98,12 +101,29 @@ def build_summary_prompt(query: str, top_summaries: List[Dict], clean_author_fn=
     num_summaries = len(top_summaries)
     today = datetime.now().strftime('%Y-%m-%d')
 
+    eo_section = ""
+    if eo_grounding_text and eo_grounding_text.strip():
+        eo_section = f"""
+--- EXECUTIVE ORDER & EVENTS CONTEXT ---
+The following block contains data on Executive Orders (EOs) and related media events that are relevant to this query. You MUST incorporate this information where it applies:
+- Reference specific Executive Orders by number (e.g. EO 14183) when they relate to topics in the article summaries.
+- Connect EO issuance dates to subsequent events and media coverage in the timeline.
+- Use media_count values as an indicator of public or press salience for a given EO-linked event.
+- Highlight legal and policy implications of cited EOs, especially where they intersect with findings from the summaries.
+- If an EO directly caused or preceded a described event, make that causal link explicit in your analysis.
+- Cite the actual EO identifier (e.g. EO 14183) in your response when discussing related events, not just the summary document IDs. Use it and cite it.
+
+{eo_grounding_text}
+--- END EXECUTIVE ORDER & EVENTS CONTEXT ---
+"""
+
     return f"""Given these summaries, that contain key information from reputable news sources and sometimes international agencies, synthesise the information to communicate the key facts, events and outcomes, with reference to dates if available. All events are real events they are not hypothetical scenarios so treat them as such.
 
     The synthesis of should incorporate the available context to provide a new document that yeilds insights and understanding, not just repeating facts from the different documents. The document should speak to legal and policy researchers highlight policy and legal aspects of the documents. Cite the documents as below. When you cite summaries, don't refer to them as 'summaries', rather refer to them as 'artilces' and/or 'documents.'
 
 IMPORTANT: When citing sources, use the "Cite as" field provided for each summary. The format is: (document_id, summary) - for example: (req_20260107_221154_000, summary). Always include the exact document_id and the word "summary" separated by a comma. Do not use the actual source meta-data for in-line citations. Do not hyperlink the in-line citation; just render it according to the format provided above. Never add hyperlinks to the in-line citations under any circumstances. IMPORTANT: Never render with doc_1 or doc_3, never use incremental numbering for the document ID. Always use the actual document_id from the grounding data for the in-line citation.
 
+{eo_section}
 Original Query: {query}
 
 Top {num_summaries} Summaries:

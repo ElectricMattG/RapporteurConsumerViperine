@@ -86,6 +86,12 @@ const indexFolderSelect = document.getElementById('indexFolderSelect');
 const switchIndexBtn = document.getElementById('switchIndexBtn');
 const switchIndexStatus = document.getElementById('switchIndexStatus');
 
+// EO / Events Overlay DOM Elements
+const eoIndexToggle = document.getElementById('eoIndexToggle');
+const eventsOverlayToggle = document.getElementById('eventsOverlayToggle');
+const eoTopKInput = document.getElementById('eoTopKInput');
+const eoToggleStatus = document.getElementById('eoToggleStatus');
+
 // ============================================================================
 // Server-Sent Events for Index Update Notifications
 // ============================================================================
@@ -321,6 +327,63 @@ if (switchIndexBtn) {
     switchIndexBtn.addEventListener('click', switchIndex);
 }
 
+// ============================================================================
+// EO / Events Overlay
+// ============================================================================
+
+async function syncEoStatus() {
+    try {
+        const resp = await fetch('/api/eo-status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (eoIndexToggle) eoIndexToggle.checked = data.eo_overlay_enabled === true;
+        if (eventsOverlayToggle) eventsOverlayToggle.checked = data.events_overlay_enabled === true;
+        if (eoTopKInput && data.eo_top_k != null) eoTopKInput.value = data.eo_top_k;
+    } catch (e) {
+        console.warn('Could not sync EO status:', e);
+    }
+}
+
+async function applyEoToggle() {
+    if (!eoIndexToggle || !eventsOverlayToggle) return;
+    const payload = {
+        eo_overlay_enabled: eoIndexToggle.checked,
+        events_overlay_enabled: eventsOverlayToggle.checked,
+        eo_top_k: parseInt(eoTopKInput ? eoTopKInput.value : '10', 10) || 10
+    };
+    if (eoToggleStatus) eoToggleStatus.textContent = '⏳';
+    try {
+        const resp = await fetch('/api/toggle-eo-events', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await resp.json();
+        if (resp.ok) {
+            if (eoToggleStatus) {
+                eoToggleStatus.textContent = '✅';
+                setTimeout(() => { if (eoToggleStatus) eoToggleStatus.textContent = ''; }, 2000);
+            }
+        } else {
+            if (eoToggleStatus) eoToggleStatus.textContent = `❌ ${data.detail || data.error || ''}`;
+            // Revert to actual server state on error
+            await syncEoStatus();
+        }
+    } catch (e) {
+        if (eoToggleStatus) eoToggleStatus.textContent = `❌ ${e.message}`;
+    }
+}
+
+if (eoIndexToggle) eoIndexToggle.addEventListener('change', applyEoToggle);
+if (eventsOverlayToggle) eventsOverlayToggle.addEventListener('change', applyEoToggle);
+let eoTopKDebounceTimer = null;
+if (eoTopKInput) {
+    eoTopKInput.addEventListener('input', () => {
+        clearTimeout(eoTopKDebounceTimer);
+        eoTopKDebounceTimer = setTimeout(applyEoToggle, 600);
+    });
+}
+
 // Load index folders when settings panel is opened
 settingsButton.addEventListener('click', () => {
     if (!settingsPanel.classList.contains('hidden')) {
@@ -445,6 +508,7 @@ window.addEventListener('load', () => {
     loadConversations();
     initializeNotifications();  // Start listening for index updates
     loadIndexFolders();          // Populate index corpus dropdown
+    syncEoStatus();              // Sync EO overlay toggle state from server
 });
 
 // ============================================================================
@@ -616,6 +680,8 @@ async function handleSendQuery() {
             retrieved_docs: data.retrieved_docs,
             retrieved_qa: data.retrieved_qa || [],
             enrichment_results: data.enrichment_results || [],
+            eo_results: data.eo_results || [],
+            event_results: data.event_results || [],
             metadata: data.metadata,
             // Edit state (5.1)
             edited_content: null,
@@ -645,7 +711,7 @@ async function handleSendQuery() {
             docs_count: data.retrieved_docs?.length || 0,
             qa_count: (data.retrieved_qa || []).length
         });
-        updateDocumentList(data.retrieved_docs, data.retrieved_qa || [], data.enrichment_results || []);
+        updateDocumentList(data.retrieved_docs, data.retrieved_qa || [], data.enrichment_results || [], data.eo_results || [], data.event_results || []);
 
         // Set as current conversation
         currentConversationId = data.id;
@@ -1462,7 +1528,7 @@ function viewConversationEntry(conversationId) {
     }
 
     // Update document list with this conversation's retrieved docs
-    updateDocumentList(conversation.retrieved_docs, conversation.retrieved_qa || [], conversation.enrichment_results || []);
+    updateDocumentList(conversation.retrieved_docs, conversation.retrieved_qa || [], conversation.enrichment_results || [], conversation.eo_results || [], conversation.event_results || []);
 
     // Set as current and highlight in query list
     currentConversationId = conversationId;
@@ -1550,7 +1616,7 @@ async function loadConversations() {
         // Load most recent conversation's documents
         if (conversations.length > 0) {
             const mostRecent = conversations[conversations.length - 1];
-            updateDocumentList(mostRecent.retrieved_docs, mostRecent.retrieved_qa || [], mostRecent.enrichment_results || []);
+            updateDocumentList(mostRecent.retrieved_docs, mostRecent.retrieved_qa || [], mostRecent.enrichment_results || [], mostRecent.eo_results || [], mostRecent.event_results || []);
             currentConversationId = mostRecent.id;
             highlightCurrentQuery();
         }
@@ -1567,7 +1633,7 @@ async function loadConversations() {
 // Document List (Right Panel)
 // ============================================================================
 
-function updateDocumentList(documents, qaItems, enrichmentResults) {
+function updateDocumentList(documents, qaItems, enrichmentResults, eoResults, eventResults) {
     console.log('🔍 updateDocumentList called with:', {
         documents_type: typeof documents,
         documents_count: documents?.length || 0,
@@ -1577,12 +1643,17 @@ function updateDocumentList(documents, qaItems, enrichmentResults) {
         qaItems_sample: qaItems?.[0]
     });
 
+    eoResults = eoResults || [];
+    eventResults = eventResults || [];
+
     documentList.innerHTML = '';
 
     const hasDocuments = documents && documents.length > 0;
     const hasQA = qaItems && qaItems.length > 0;
+    const hasEo = eoResults.length > 0;
+    const hasEoEvents = eventResults.length > 0;
 
-    if (!hasDocuments && !hasQA) {
+    if (!hasDocuments && !hasQA && !hasEo && !hasEoEvents) {
         documentList.innerHTML = '<div class="empty-state">No index documents retrieved.<br><small>Search mode uses web grounding instead of the index.</small></div>';
         return;
     }
@@ -1910,6 +1981,166 @@ function updateDocumentList(documents, qaItems, enrichmentResults) {
             }
 
             documentList.appendChild(qaCard);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Render EO Index hits (violet theme)
+    // -----------------------------------------------------------------------
+    if (hasEo) {
+        const eoHeader = document.createElement('div');
+        eoHeader.className = 'section-header eo-header';
+        eoHeader.textContent = `Executive Orders (${eoResults.length})`;
+        documentList.appendChild(eoHeader);
+
+        eoResults.forEach((hit) => {
+            const summary = hit.summary || {};
+            const eoIds = hit.eo_ids || [];
+            const similarity = hit.similarity || 0;
+            const docMeta = summary.doc_metadata || {};
+            const title = docMeta.title || 'Executive Orders';
+            const summaryText = summary.summary_text || '';
+
+            const card = document.createElement('div');
+            card.className = 'document-item eo-card';
+
+            // EO ID badges
+            eoIds.forEach(eoId => {
+                const badge = document.createElement('span');
+                badge.className = 'eo-id-badge';
+                badge.textContent = `EO ${eoId}`;
+                card.appendChild(badge);
+            });
+
+            // Title
+            const titleDiv = document.createElement('div');
+            titleDiv.className = 'doc-title';
+            titleDiv.textContent = title;
+            card.appendChild(titleDiv);
+
+            // Date
+            const pubDate = formatDisplayDate(docMeta.publication_date || '');
+            const dateDiv = document.createElement('div');
+            dateDiv.className = 'doc-meta';
+            dateDiv.innerHTML = `<strong>Date:</strong> ${pubDate}`;
+            card.appendChild(dateDiv);
+
+            // Similarity
+            const simDiv = document.createElement('div');
+            simDiv.className = 'doc-relevance';
+            simDiv.textContent = `Relevance: ${(similarity * 100).toFixed(1)}%`;
+            card.appendChild(simDiv);
+
+            // Summary (collapsible)
+            if (summaryText) {
+                const toggleBtn = document.createElement('button');
+                toggleBtn.className = 'eo-summary-toggle';
+                toggleBtn.textContent = 'Show Summary';
+                toggleBtn.setAttribute('aria-expanded', 'false');
+
+                const summaryContent = document.createElement('div');
+                summaryContent.className = 'eo-summary-content hidden';
+                summaryContent.textContent = summaryText;
+
+                toggleBtn.addEventListener('click', () => {
+                    const expanded = toggleBtn.getAttribute('aria-expanded') === 'true';
+                    toggleBtn.setAttribute('aria-expanded', String(!expanded));
+                    toggleBtn.textContent = expanded ? 'Show Summary' : 'Hide Summary';
+                    summaryContent.classList.toggle('hidden', expanded);
+                });
+
+                card.appendChild(toggleBtn);
+                card.appendChild(summaryContent);
+            }
+
+            // Source URL
+            if (summary.source_url) {
+                const urlLink = document.createElement('a');
+                urlLink.className = 'doc-url';
+                urlLink.href = summary.source_url;
+                urlLink.target = '_blank';
+                urlLink.rel = 'noopener noreferrer';
+                urlLink.textContent = summary.source_url_display || summary.source_url;
+                card.appendChild(urlLink);
+            }
+
+            documentList.appendChild(card);
+        });
+    }
+
+    // -----------------------------------------------------------------------
+    // Render EO Events (lighter violet theme)
+    // -----------------------------------------------------------------------
+    if (hasEoEvents) {
+        const evHeader = document.createElement('div');
+        evHeader.className = 'section-header eo-events-header';
+        evHeader.textContent = `EO Events (${eventResults.length})`;
+        documentList.appendChild(evHeader);
+
+        eventResults.forEach((ev) => {
+            const card = document.createElement('div');
+            card.className = 'document-item eo-event-card';
+
+            // EO identifier badge
+            if (ev.eo_identifier) {
+                const badge = document.createElement('span');
+                badge.className = 'eo-id-badge';
+                badge.textContent = ev.eo_identifier;
+                card.appendChild(badge);
+            }
+
+            // Descriptor
+            if (ev.descriptor) {
+                const descDiv = document.createElement('div');
+                descDiv.className = 'doc-title';
+                descDiv.textContent = ev.descriptor;
+                card.appendChild(descDiv);
+            }
+
+            // EO title
+            if (ev.eo_title) {
+                const eoTitleDiv = document.createElement('div');
+                eoTitleDiv.className = 'doc-meta';
+                eoTitleDiv.innerHTML = `<strong>EO:</strong> ${ev.eo_title}`;
+                card.appendChild(eoTitleDiv);
+            }
+
+            // Time window
+            if (ev.window_start || ev.window_end) {
+                const winDiv = document.createElement('div');
+                winDiv.className = 'doc-meta';
+                winDiv.innerHTML = `<strong>Window:</strong> ${ev.window_start || '?'} → ${ev.window_end || '?'}`;
+                card.appendChild(winDiv);
+            }
+
+            // Executive official
+            if (ev.exec_official) {
+                const offDiv = document.createElement('div');
+                offDiv.className = 'doc-meta';
+                offDiv.innerHTML = `<strong>Official:</strong> ${ev.exec_official}`;
+                card.appendChild(offDiv);
+            }
+
+            // Media count
+            if (ev.media_count != null) {
+                const mcDiv = document.createElement('div');
+                mcDiv.className = 'doc-relevance';
+                mcDiv.textContent = `Media Coverage: ${ev.media_count}`;
+                card.appendChild(mcDiv);
+            }
+
+            // Source URL
+            if (ev.source_url) {
+                const urlLink = document.createElement('a');
+                urlLink.className = 'doc-url';
+                urlLink.href = ev.source_url;
+                urlLink.target = '_blank';
+                urlLink.rel = 'noopener noreferrer';
+                urlLink.textContent = ev.source_url;
+                card.appendChild(urlLink);
+            }
+
+            documentList.appendChild(card);
         });
     }
 
