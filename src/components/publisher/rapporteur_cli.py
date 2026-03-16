@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import requests
+from PIL import Image
 
 # Re-use rendering helpers from the original document builder.
 from src.components.publisher.rapporteur_docs import (build_enrichment_section,
@@ -797,15 +798,633 @@ class ChapterStage(Base):
 
 
 class KaliyaStage(Base):
-    """Phase 4 — Detect threat clusters, send to Kaliya, collect results."""
+    """Phase 4 — Match threat clusters to cached Kaliya analyses,
+    convert/copy images, and inject narrative sections into chapters."""
+
+    # Max image width for PDF output — larger images are downscaled.
+    _MAX_WIDTH = 1200
+    _JPEG_QUALITY = 85
+
+    # Regex for [Figure N] inline references in Kaliya narratives.
+    _FIGURE_REF_RE = re.compile(r'\[Figure\s+(\d+)\]')
+
+    # Regex for (req_YYYYMMDD_HHMMSS_NNN, summary) inline citations.
+    _KALIYA_CITE_RE = re.compile(
+        r'\((req_\d{8}_\d{6}_\d{3}),\s*summary\)',
+    )
+
+    # Cluster table end: next bold heading or horizontal rule or section heading.
+    _CLUSTER_TABLE_END_RE = re.compile(
+        r'^\*\*(?:Threat Cluster \d|[IVX]+\.)|^---\s*$|^#{1,3}\s',
+    )
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
         super().__init__()
         self.cfg = cfg
         self.dry_run = dry_run
 
+    # ------------------------------------------------------------------
+    # public
+    # ------------------------------------------------------------------
+
     def run(self) -> None:
-        self._logger.warning("KaliyaStage not yet implemented (Phase 4)")
+        """Execute the Kaliya stage: match, convert images, inject sections."""
+        parsed_dir = self.cfg.build_dir / "parsed"
+        chapters_dir = self.cfg.build_dir / "chapters"
+        images_dir = self.cfg.build_dir / "kaliya" / "images"
+        kaliya_cache = Path(self.cfg.paths.kaliya_cache)
+
+        tc_path = parsed_dir / "threat_clusters.json"
+        if not tc_path.exists():
+            self._logger.warning(
+                "No threat_clusters.json found — nothing for Kaliya to do.",
+            )
+            return
+
+        with open(tc_path, "r", encoding="utf-8") as fh:
+            clusters: list[dict] = json.load(fh)
+        self._logger.info("Loaded %d threat clusters", len(clusters))
+
+        if not kaliya_cache.is_dir():
+            self._logger.error(
+                "Kaliya cache not found at %s — cannot match clusters.",
+                kaliya_cache,
+            )
+            return
+
+        # --- 4.1  Match clusters → cached analyses ---
+        cache_index = self._index_cache(kaliya_cache)
+        matches = self._match_clusters(clusters, cache_index)
+        if not matches:
+            self._logger.warning("No cached Kaliya analyses matched any cluster.")
+            return
+
+        # Log matches
+        for key, req_id in matches.items():
+            self._logger.info("  Matched %s → %s", key, req_id)
+
+        # --- 4.4  Image conversion & copy ---
+        unique_analyses = set(matches.values())
+        figure_map = self._process_images(
+            unique_analyses, kaliya_cache, images_dir,
+        )
+
+        # --- 4.5  Build and inject Kaliya sections ---
+        self._inject_sections(
+            matches, clusters, kaliya_cache,
+            chapters_dir, images_dir, figure_map,
+        )
+
+        # --- Update manifest ---
+        self._update_manifest(chapters_dir, matches, figure_map)
+
+    # ------------------------------------------------------------------
+    # 4.1 — Cache indexing & cluster matching
+    # ------------------------------------------------------------------
+
+    def _index_cache(self, cache_dir: Path) -> dict[str, set[str]]:
+        """Build {request_id: set_of_normalised_urls} from cached analyses."""
+        index: dict[str, set[str]] = {}
+        for entry in sorted(cache_dir.iterdir()):
+            report_path = entry / "report.json"
+            if not report_path.exists():
+                continue
+            try:
+                with open(report_path, "r", encoding="utf-8") as fh:
+                    report = json.load(fh)
+                urls = {
+                    _normalise_url(u)
+                    for u in report.get("source_urls", [])
+                    if u
+                }
+                if urls:
+                    index[entry.name] = urls
+            except (json.JSONDecodeError, OSError) as exc:
+                self._logger.warning("Skipping %s: %s", entry.name, exc)
+        self._logger.info("  Indexed %d cached Kaliya analyses", len(index))
+        return index
+
+    def _match_clusters(
+        self,
+        clusters: list[dict],
+        cache_index: dict[str, set[str]],
+    ) -> dict[str, str]:
+        """Match clusters to cached analyses by URL overlap.
+
+        Returns {cluster_key: request_id} where cluster_key is
+        "tc{cluster_number}_{cluster_name_slug}".  Deduplicates across
+        sessions (s7 and s8 share the same 3 cluster names).
+        """
+        matches: dict[str, str] = {}
+
+        for cluster in clusters:
+            cluster_key = self._cluster_key(cluster)
+            if cluster_key in matches:
+                continue  # Already matched from another session
+
+            cluster_urls = {
+                _normalise_url(r.get("url", ""))
+                for r in cluster.get("rows", [])
+                if r.get("url")
+            }
+            if not cluster_urls:
+                self._logger.warning(
+                    "  Cluster %s has no URLs — skipping.", cluster_key,
+                )
+                continue
+
+            # Find best overlap
+            best_id: str | None = None
+            best_overlap = 0
+            for req_id, cached_urls in cache_index.items():
+                overlap = len(cluster_urls & cached_urls)
+                if overlap > best_overlap:
+                    best_overlap = overlap
+                    best_id = req_id
+
+            if best_id and best_overlap > 0:
+                matches[cluster_key] = best_id
+            else:
+                self._logger.warning(
+                    "  No cached match for cluster %s (%d URLs)",
+                    cluster_key, len(cluster_urls),
+                )
+
+        return matches
+
+    @staticmethod
+    def _cluster_key(cluster: dict) -> str:
+        slug = re.sub(
+            r'[^a-z0-9]+', '_',
+            cluster.get("cluster_name", "").lower(),
+        ).strip('_')
+        return f"tc{cluster['cluster_number']}_{slug}"
+
+    # ------------------------------------------------------------------
+    # 4.4 — Image conversion & copy
+    # ------------------------------------------------------------------
+
+    def _process_images(
+        self,
+        request_ids: set[str],
+        cache_dir: Path,
+        images_dir: Path,
+    ) -> dict[str, dict]:
+        """Convert and copy images for all matched analyses.
+
+        Returns {request_id: {image_id: {path, label, caption}}} mapping
+        for use in section rendering.
+        """
+        figure_map: dict[str, dict] = {}
+        total_processed = 0
+        total_skipped = 0
+
+        for req_id in sorted(request_ids):
+            figs_path = cache_dir / req_id / "figures.json"
+            if not figs_path.exists():
+                self._logger.warning("No figures.json for %s", req_id)
+                figure_map[req_id] = {}
+                continue
+
+            with open(figs_path, "r", encoding="utf-8") as fh:
+                figures: list[dict] = json.load(fh)
+
+            req_figures: dict[str, dict] = {}
+            for fig in figures:
+                image_id = fig.get("image_id", "")
+                local_path = fig.get("local_path", "")
+                label = fig.get("label", "")
+                caption = fig.get("caption", "")
+
+                if not local_path or not Path(local_path).exists():
+                    self._logger.warning(
+                        "  Image missing: %s (%s) — skipping",
+                        image_id, local_path,
+                    )
+                    continue
+
+                out_name = f"{req_id}_{image_id}.jpeg"
+                out_path = images_dir / out_name
+                rel_path = f"kaliya/images/{out_name}"
+
+                req_figures[image_id] = {
+                    "path": rel_path,
+                    "label": label,
+                    "caption": caption,
+                }
+
+                if self.dry_run:
+                    total_processed += 1
+                    continue
+
+                if out_path.exists():
+                    total_skipped += 1
+                    continue
+
+                try:
+                    self._convert_image(local_path, out_path)
+                    total_processed += 1
+                except Exception as exc:
+                    self._logger.warning(
+                        "  Failed to convert %s: %s — skipping",
+                        image_id, exc,
+                    )
+
+            figure_map[req_id] = req_figures
+
+        if self.dry_run:
+            self._logger.info(
+                "  [dry-run] Would process %d images to %s/",
+                total_processed, images_dir,
+            )
+        else:
+            self._logger.info(
+                "  Images: %d processed, %d already present",
+                total_processed, total_skipped,
+            )
+        return figure_map
+
+    def _convert_image(self, src_path: str, dst_path: Path) -> None:
+        """Open an image, resize if needed, save as JPEG."""
+        dst_path.parent.mkdir(parents=True, exist_ok=True)
+        with Image.open(src_path) as img:
+            # Ensure RGB for JPEG output
+            if img.mode not in ("RGB", "L"):
+                img = img.convert("RGB")
+
+            # Downscale if too wide
+            if img.width > self._MAX_WIDTH:
+                ratio = self._MAX_WIDTH / img.width
+                new_size = (self._MAX_WIDTH, int(img.height * ratio))
+                img = img.resize(new_size, Image.LANCZOS)
+
+            img.save(dst_path, format="JPEG", quality=self._JPEG_QUALITY)
+
+    # ------------------------------------------------------------------
+    # 4.5 — Section rendering & chapter injection
+    # ------------------------------------------------------------------
+
+    def _inject_sections(
+        self,
+        matches: dict[str, str],
+        clusters: list[dict],
+        cache_dir: Path,
+        chapters_dir: Path,
+        images_dir: Path,
+        figure_map: dict[str, dict],
+    ) -> None:
+        """Render Kaliya narrative sections and inject into chapter files."""
+        # Group clusters by session_index
+        session_clusters: dict[int, list[dict]] = {}
+        for cluster in clusters:
+            sid = cluster["session_index"]
+            session_clusters.setdefault(sid, []).append(cluster)
+
+        # Build rendered sections per cluster_key (render once, reuse)
+        rendered_sections: dict[str, str] = {}
+        for cluster in clusters:
+            cluster_key = self._cluster_key(cluster)
+            if cluster_key in rendered_sections:
+                continue
+
+            req_id = matches.get(cluster_key)
+            if not req_id:
+                continue
+
+            section_md = self._render_kaliya_section(
+                cluster, req_id, cache_dir, figure_map.get(req_id, {}),
+            )
+            rendered_sections[cluster_key] = section_md
+
+        if not rendered_sections:
+            self._logger.warning("No Kaliya sections rendered.")
+            return
+
+        self._logger.info(
+            "  Rendered %d unique Kaliya sections", len(rendered_sections),
+        )
+
+        # Find chapter files that contain threat clusters and inject
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.error("No manifest.json in chapters/ — cannot inject.")
+            return
+
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+
+        chapters_modified = 0
+        for entry in manifest.get("chapters", []):
+            if not entry.get("has_threat_clusters"):
+                continue
+
+            chapter_file = chapters_dir / entry["filename"]
+            if not chapter_file.exists():
+                continue
+
+            # Determine which session IDs are in this chapter
+            session_ids = entry.get("sessions", [])
+            # Collect cluster_keys for these sessions
+            chapter_cluster_keys: list[str] = []
+            for cluster in clusters:
+                if cluster["session_index"] in session_ids:
+                    ck = self._cluster_key(cluster)
+                    if ck not in chapter_cluster_keys:
+                        chapter_cluster_keys.append(ck)
+
+            if not any(ck in rendered_sections for ck in chapter_cluster_keys):
+                continue
+
+            with open(chapter_file, "r", encoding="utf-8") as fh:
+                content = fh.read()
+
+            new_content = self._inject_into_chapter(
+                content, chapter_cluster_keys, rendered_sections, clusters,
+            )
+
+            if new_content != content:
+                if self.dry_run:
+                    self._logger.info(
+                        "  [dry-run] Would inject Kaliya sections into %s",
+                        entry["filename"],
+                    )
+                else:
+                    with open(chapter_file, "w", encoding="utf-8") as fh:
+                        fh.write(new_content)
+                    self._logger.info(
+                        "  Injected Kaliya sections into %s",
+                        entry["filename"],
+                    )
+                chapters_modified += 1
+
+        self._logger.info(
+            "  %s %d chapter files with Kaliya sections",
+            "[dry-run] Would modify" if self.dry_run else "Modified",
+            chapters_modified,
+        )
+
+    def _render_kaliya_section(
+        self,
+        cluster: dict,
+        req_id: str,
+        cache_dir: Path,
+        req_figures: dict[str, dict],
+    ) -> str:
+        """Render a single Kaliya analysis section as Markdown."""
+        report_path = cache_dir / req_id / "report.json"
+        narrative_path = cache_dir / req_id / "narrative.md"
+
+        # Load report metadata
+        report: dict = {}
+        if report_path.exists():
+            with open(report_path, "r", encoding="utf-8") as fh:
+                report = json.load(fh)
+
+        # Load narrative
+        narrative = ""
+        if narrative_path.exists():
+            with open(narrative_path, "r", encoding="utf-8") as fh:
+                narrative = fh.read().strip()
+
+        cluster_name = cluster.get("cluster_name", "Unknown")
+        confidence = report.get("confidence", "UNKNOWN")
+        agenda = report.get("agenda_detected", False)
+        surface = report.get("surface_evidence_count", 0)
+        deep = report.get("deep_evidence_count", 0)
+        publishers = report.get("publishers_analysed", [])
+
+        # Build section
+        parts: list[str] = []
+        parts.append(f"\n#### Kaliya Agenda Analysis: {cluster_name}\n")
+
+        # Metadata block
+        agenda_str = "**Detected**" if agenda else "Not detected"
+        parts.append(
+            f"> **Confidence:** {confidence} | "
+            f"**Agenda:** {agenda_str} | "
+            f"**Evidence:** {surface} surface, {deep} deep | "
+            f"**Publishers:** {', '.join(publishers)}\n",
+        )
+
+        # Resolve inline citations in narrative
+        source_urls = report.get("source_urls", [])
+        narrative = self._resolve_kaliya_citations(narrative, source_urls)
+
+        # Build figure lookup: figure_number → figure info
+        fig_lookup: dict[int, dict] = {}
+        for info in req_figures.values():
+            label = info.get("label", "")
+            m = re.match(r'Figure\s+(\d+)', label)
+            if m:
+                fig_lookup[int(m.group(1))] = info
+
+        # Replace [Figure N] inline references
+        referenced_nums: set[int] = set()
+
+        def _replace_fig(m: re.Match) -> str:
+            num = int(m.group(1))
+            fig = fig_lookup.get(num)
+            if not fig:
+                return m.group(0)  # Keep original if not found
+            referenced_nums.add(num)
+            caption = fig["caption"]
+            path = fig["path"]
+            return f'\n\n![{caption}]({path})\n*{fig["label"]}*\n'
+
+        narrative = self._FIGURE_REF_RE.sub(_replace_fig, narrative)
+        parts.append(narrative)
+        parts.append("")
+
+        # Figure plate for unreferenced figures
+        unreferenced = [
+            info for info in req_figures.values()
+            if info.get("label")
+            and re.match(r'Figure\s+(\d+)', info["label"])
+            and int(re.match(r'Figure\s+(\d+)', info["label"]).group(1))
+               not in referenced_nums
+        ]
+        if unreferenced:
+            parts.append(self._render_figure_plate(unreferenced))
+
+        # If no figures were referenced inline and some exist, render all as a plate
+        if not referenced_nums and req_figures:
+            all_figs = list(req_figures.values())
+            parts.append(self._render_figure_plate(all_figs))
+
+        return "\n".join(parts)
+
+    def _resolve_kaliya_citations(
+        self, narrative: str, source_urls: list[str],
+    ) -> str:
+        """Replace (req_YYYYMMDD_HHMMSS_NNN, summary) with markdown links."""
+        # Build lookup: req_id prefix → URL
+        url_lookup: dict[str, str] = {}
+        for url in source_urls:
+            # Extract request-like prefix from URL (if it maps)
+            # The req IDs in narratives reference the grounding requests
+            url_lookup[url] = url
+
+        def _replace_cite(m: re.Match) -> str:
+            req_token = m.group(1)
+            # Try matching against source URLs indirectly: find any URL
+            # that was part of the grounding for this req_token.
+            # For now, replace with a generic source reference since
+            # the req→URL mapping is in grounding.jsonl
+            return f"(source)"
+
+        return self._KALIYA_CITE_RE.sub(_replace_cite, narrative)
+
+    def _render_figure_plate(self, figures: list[dict]) -> str:
+        """Render a grid of figures as Markdown."""
+        n = len(figures)
+        if n == 0:
+            return ""
+
+        parts = ["\n**Figures:**\n"]
+
+        # Determine grid columns
+        if n <= 2:
+            cols = 1  # Full width
+        elif n <= 6:
+            cols = 2
+        else:
+            cols = 3
+
+        # Render as a simple image list (Markdown — grid via CSS/LaTeX later)
+        for fig in figures:
+            caption = fig.get("caption", "")
+            # Truncate caption for grid display
+            if len(caption) > 80:
+                caption = caption[:77] + "..."
+            parts.append(
+                f'![{caption}]({fig["path"]})\n'
+                f'*{fig.get("label", "")}*\n',
+            )
+
+        return "\n".join(parts)
+
+    def _inject_into_chapter(
+        self,
+        content: str,
+        cluster_keys: list[str],
+        rendered_sections: dict[str, str],
+        clusters: list[dict],
+    ) -> str:
+        """Inject rendered Kaliya sections after each threat cluster table.
+
+        Previously injected sections (marked by ``#### Kaliya Agenda Analysis:``)
+        are stripped first so re-runs are idempotent.
+        """
+        # Strip any previously injected Kaliya sections
+        content = self._strip_kaliya_sections(content)
+
+        lines = content.split("\n")
+        result_lines: list[str] = []
+        i = 0
+
+        while i < len(lines):
+            result_lines.append(lines[i])
+
+            # Check if this line starts a threat cluster heading
+            m = re.match(
+                r'^\*\*Threat Cluster\s+(\d+):\s+(.+?)\*\*',
+                lines[i],
+            )
+            if m:
+                cluster_num = int(m.group(1))
+                cluster_name = m.group(2).strip()
+
+                # Find the matching cluster_key
+                slug = re.sub(
+                    r'[^a-z0-9]+', '_', cluster_name.lower(),
+                ).strip('_')
+                cluster_key = f"tc{cluster_num}_{slug}"
+
+                if cluster_key in rendered_sections:
+                    # Advance past the description + table
+                    i += 1
+                    while i < len(lines):
+                        result_lines.append(lines[i])
+                        # Check if next line starts a new section
+                        if (i + 1 < len(lines)
+                            and self._CLUSTER_TABLE_END_RE.match(lines[i + 1])):
+                            break
+                        # End of table: non-table line after table lines
+                        if (i + 1 < len(lines)
+                            and not lines[i + 1].startswith("|")
+                            and lines[i].startswith("|")):
+                            break
+                        i += 1
+
+                    # Inject the Kaliya section
+                    result_lines.append("")
+                    result_lines.append(rendered_sections[cluster_key])
+                    result_lines.append("")
+
+            i += 1
+
+        return "\n".join(result_lines)
+
+    @staticmethod
+    def _strip_kaliya_sections(content: str) -> str:
+        """Remove previously injected Kaliya sections for idempotent re-runs.
+
+        Kaliya sections start with ``#### Kaliya Agenda Analysis:`` and end
+        before the next ``**Threat Cluster``, ``---``, or ``##``/``###`` heading.
+        """
+        lines = content.split("\n")
+        result: list[str] = []
+        i = 0
+        while i < len(lines):
+            if lines[i].startswith("#### Kaliya Agenda Analysis:"):
+                # Skip until next structural element
+                i += 1
+                while i < len(lines):
+                    line = lines[i]
+                    if (line.startswith("**Threat Cluster ")
+                            or line.startswith("---")
+                            or re.match(r'^#{1,3}\s', line)):
+                        break
+                    i += 1
+                # Remove trailing blank lines left by the removed section
+                while result and result[-1].strip() == "":
+                    result.pop()
+            else:
+                result.append(lines[i])
+                i += 1
+        return "\n".join(result)
+
+    # ------------------------------------------------------------------
+    # Manifest update
+    # ------------------------------------------------------------------
+
+    def _update_manifest(
+        self,
+        chapters_dir: Path,
+        matches: dict[str, str],
+        figure_map: dict[str, dict],
+    ) -> None:
+        """Update manifest.json with Kaliya metadata."""
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            return
+
+        with open(manifest_path, "r", encoding="utf-8") as fh:
+            manifest = json.load(fh)
+
+        total_figs = sum(len(figs) for figs in figure_map.values())
+        manifest["kaliya"] = {
+            "matched_analyses": len(matches),
+            "matched_clusters": list(matches.keys()),
+            "analysis_ids": list(set(matches.values())),
+            "total_figures": total_figs,
+            "injected": not self.dry_run,
+        }
+
+        if not self.dry_run:
+            with open(manifest_path, "w", encoding="utf-8") as fh:
+                json.dump(manifest, fh, indent=2, ensure_ascii=False)
+            self._logger.info("  Updated manifest.json with Kaliya metadata")
 
 
 class PublishStage(Base):

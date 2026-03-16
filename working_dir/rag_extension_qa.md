@@ -1140,3 +1140,12 @@ Published by *Wikimedia Foundation* on ND.
 January 2025).  here are different citation but the hyperlink is the same
 
 Here is the prompt we can use, store it in:
+
+
+We can now bring EO into the prompt and events which can be used for grounding but aren't necessairly cited. This retrieval is prooven and working. However, we want to be able to retrieve full doc and reconstituethe whole executive order, not just summary and q and a. We already have this functionality on the rag service, when and index is selected. But for q and a do the full doc retrieval for grouning by reusing logic. REQ 1
+
+Make this a choice so we can fall lback to the current working functionality which are summaroes and q and a pairs or we can get the full doc through reconstitution. REQ 2
+
+We also want to ensure that these are primary authority for citations. ALWAYS CITE the orginal EO. REQ 3
+
+Come up with a phased plan and add to the markdown. P
