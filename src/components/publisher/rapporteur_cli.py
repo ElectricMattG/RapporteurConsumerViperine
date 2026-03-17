@@ -2142,6 +2142,7 @@ class ConcludeStage(Base):
                     )
                 )
             finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
                 loop.close()
 
             text = response.output_text if hasattr(response, "output_text") else ""
@@ -2533,6 +2534,511 @@ class ConcludeStage(Base):
 # Phase 6 — Publish
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Phase 9 — Editorial Review
+# ---------------------------------------------------------------------------
+
+class EditStage(Base):
+    """Phase 9 — Editorial review via two-call LLM pattern.
+
+    Uses a review → apply pattern: the first call assesses the full document
+    holistically, producing a structured edit log with scores, executive
+    summaries, and specific edit recommendations. The second call applies
+    the recommended edits per chapter while preserving content integrity.
+
+    Supports OpenAI (GPT-5.x, default) and Gemini providers via
+    ``EditConfig.provider``.
+    """
+
+    # Pricing per 1M tokens — same table as ConcludeStage
+    _PRICING: dict[str, dict[str, float]] = {
+        "gpt-5.4":               {"input": 2.50,  "output": 10.00},
+        "gpt-5.1":               {"input": 2.50,  "output": 10.00},
+        "gpt-5":                 {"input": 2.00,  "output":  8.00},
+        "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
+        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+    }
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    # -- public -------------------------------------------------------------
+
+    def run(self) -> None:
+        ec = self.cfg.edit
+        if not ec.enabled:
+            self._logger.info("  Editorial review disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to review.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Idempotent — skip if already reviewed
+        if manifest.get("edit", {}).get("reviewed"):
+            self._logger.info("  Editorial review already done — skipping.")
+            return
+
+        # Load style rules and editorial principles
+        style_rules = self._load_style_rules(Path(ec.style_guide))
+        editorial_principles = self._load_editorial_principles(Path(ec.style_guide))
+
+        # Build full document context (all chapters incl. conclusion)
+        document_context = self._build_document_context(
+            chapters_dir, chapter_entries,
+        )
+
+        self._logger.info(
+            "  Editorial review with %s (%s, reasoning: %s)",
+            ec.model, ec.provider, ec.reasoning_effort,
+        )
+
+        if self.dry_run:
+            self._logger.info("  (dry-run) would perform editorial review")
+            return
+
+        # Cost tracking
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+
+        # ── Call 1: Review ──
+        self._logger.info("  Call 1: REVIEW (full document)")
+        review_prompt = self._build_review_prompt(
+            document_context, editorial_principles, style_rules,
+            chapter_entries,
+        )
+        review_response, usage_1 = self._generate_with_usage(ec, review_prompt)
+        total_input_tokens += usage_1.get("input", 0)
+        total_output_tokens += usage_1.get("output", 0)
+        total_thinking_tokens += usage_1.get("thinking", 0)
+        self._log_usage("review", usage_1, ec.model)
+
+        if not review_response or not review_response.strip():
+            self._logger.warning("  Empty review response — aborting.")
+            return
+
+        # Parse edit log JSON
+        edit_log = self._parse_edit_log(review_response)
+        if not edit_log:
+            self._logger.warning("  Could not parse edit log — aborting.")
+            return
+
+        self._logger.info(
+            "  Review complete — scores: consistency=%s, cohesiveness=%s, "
+            "bias_risk=%s, coherence=%s",
+            edit_log.get("document_score", {}).get("stylistic_consistency", "?"),
+            edit_log.get("document_score", {}).get("argument_cohesiveness", "?"),
+            edit_log.get("document_score", {}).get("bias_risk", "?"),
+            edit_log.get("document_score", {}).get("logical_coherence", "?"),
+        )
+        self._logger.info(
+            "  Edits recommended: %d", len(edit_log.get("edits", [])),
+        )
+
+        # Write edit log to build dir
+        if ec.edit_log:
+            log_path = self.cfg.build_dir / "editorial_edit_log.json"
+            log_data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": ec.model,
+                "provider": ec.provider,
+                **edit_log,
+            }
+            log_path.write_text(
+                json.dumps(log_data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self._logger.info("  Wrote editorial_edit_log.json")
+
+        # Build executive summary lookup
+        exec_summaries = {}
+        for es in edit_log.get("executive_summaries", []):
+            ch_num = es.get("chapter")
+            if ch_num is not None:
+                exec_summaries[ch_num] = es.get("summary", "")
+
+        # Build per-chapter edit lookup
+        edits_by_chapter: dict[int, list[dict]] = {}
+        for edit in edit_log.get("edits", []):
+            ch_num = edit.get("chapter")
+            if ch_num is not None:
+                edits_by_chapter.setdefault(ch_num, []).append(edit)
+
+        # ── Call 2+: Apply (per chapter with edits) ──
+        chapters_with_edits = set(edits_by_chapter.keys())
+        if ec.executive_summary:
+            chapters_with_edits |= set(exec_summaries.keys())
+
+        if not chapters_with_edits:
+            self._logger.info("  No edits or summaries to apply.")
+        else:
+            self._logger.info(
+                "  Call 2: APPLY edits to %d chapter(s)", len(chapters_with_edits),
+            )
+
+        chapters_revised = 0
+        for idx, entry in enumerate(chapter_entries, 1):
+            if idx not in chapters_with_edits:
+                continue
+
+            chapter_path = chapters_dir / entry["filename"]
+            if not chapter_path.exists():
+                continue
+
+            chapter_text = chapter_path.read_text(encoding="utf-8")
+            chapter_edits = edits_by_chapter.get(idx, [])
+            chapter_summary = exec_summaries.get(idx, "")
+
+            self._logger.info(
+                "    Chapter %d (%s): %d edits%s",
+                idx, entry["filename"],
+                len(chapter_edits),
+                " + exec summary" if chapter_summary else "",
+            )
+
+            apply_prompt = self._build_apply_prompt(
+                chapter_text, chapter_edits, chapter_summary,
+                ec.executive_summary,
+            )
+            revised_text, usage_n = self._generate_with_usage(ec, apply_prompt)
+            total_input_tokens += usage_n.get("input", 0)
+            total_output_tokens += usage_n.get("output", 0)
+            total_thinking_tokens += usage_n.get("thinking", 0)
+            self._log_usage(f"apply-ch{idx}", usage_n, ec.model)
+
+            if revised_text and revised_text.strip():
+                revised_text = self._strip_code_fencing(revised_text)
+                chapter_path.write_text(revised_text, encoding="utf-8")
+                chapters_revised += 1
+                entry["edit_status"] = "done"
+            else:
+                self._logger.warning(
+                    "    Empty response for chapter %d — keeping original.", idx,
+                )
+
+        # Update manifest
+        cost = self._calculate_cost(
+            ec.model, total_input_tokens, total_output_tokens,
+        )
+        manifest["edit"] = {
+            "reviewed": True,
+            "model": ec.model,
+            "provider": ec.provider,
+            "chapters_revised": chapters_revised,
+            "edits_recommended": len(edit_log.get("edits", [])),
+            "document_score": edit_log.get("document_score", {}),
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        self._logger.info("  ─── Cost Summary ───")
+        self._logger.info("    Model:            %s", ec.model)
+        self._logger.info("    Provider:         %s", ec.provider)
+        self._logger.info("    Chapters revised: %d", chapters_revised)
+        self._logger.info("    Input tokens:     %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:    %s", f"{total_output_tokens:,}")
+        self._logger.info("    Thinking tokens:  %s", f"{total_thinking_tokens:,}")
+        self._logger.info("    Estimated cost:   $%.4f", cost)
+        self._logger.info("  Updated manifest.json with edit metadata.")
+
+    # -- LLM generation -----------------------------------------------------
+
+    def _generate_with_usage(
+        self, ec: "EditConfig", prompt: str,
+    ) -> tuple[str, dict]:
+        """Call the configured LLM provider and return (text, usage_dict).
+
+        Supports dual-provider: OpenAI (Responses API) or Gemini.
+        """
+        import asyncio
+
+        from src.models.publisher import EditConfig as _EC  # noqa: F811
+
+        usage: dict = {"input": 0, "output": 0, "thinking": 0}
+
+        if ec.provider == "openai":
+            from src.clients.llm_openai_client import OpenAILLMClient
+
+            client = OpenAILLMClient(model_name=ec.model)
+            max_tokens = 16_000
+
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(
+                    client.client.responses.create(
+                        model=ec.model,
+                        input=prompt,
+                        reasoning={"effort": ec.reasoning_effort},
+                        max_output_tokens=max_tokens,
+                    )
+                )
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+            text = response.output_text if hasattr(response, "output_text") else ""
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+
+            return text, usage
+
+        else:
+            # Gemini provider
+            from google.genai import types as genai_types
+
+            from src.clients.llm_gcp_client import GeminiLLMClient
+
+            client = GeminiLLMClient(model_name=ec.model)
+            max_tokens = 16_000
+
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2,
+                top_p=client.top_p,
+                max_output_tokens=max_tokens,
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name,
+                contents=prompt,
+                config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+
+            return text, usage
+
+    # -- prompt builders ----------------------------------------------------
+
+    def _build_review_prompt(
+        self,
+        document_context: str,
+        editorial_principles: str,
+        style_rules: str,
+        chapter_entries: list[dict],
+    ) -> str:
+        """Build the REVIEW prompt for full-document editorial assessment."""
+        chapter_list = "\n".join(
+            f"  Chapter {i}: {e.get('title', e['filename'])}"
+            for i, e in enumerate(chapter_entries, 1)
+        )
+
+        return (
+            "You are performing a final editorial review of a published analysis document.\n\n"
+            f"EDITORIAL PRINCIPLES:\n{editorial_principles}\n\n"
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n"
+            f"CHAPTERS:\n{chapter_list}\n\n"
+            f"FULL DOCUMENT:\n{document_context}\n\n"
+            "Perform a thorough editorial review. For each chapter, assess:\n"
+            "1. Stylistic consistency with the rest of the document\n"
+            "2. Whether facts are logically connected to conclusions\n"
+            "3. Whether there is confirmation bias in the arguments\n"
+            "4. Whether alternative hypotheses have been considered\n"
+            "5. Whether the protective-function framing is consistent and respectful\n"
+            "6. Whether the argument flows logically from chapter to chapter\n"
+            "7. Whether clear principles and facts are established from sources\n\n"
+            "Return a JSON object with exactly this structure:\n"
+            "{\n"
+            '  "document_score": {\n'
+            '    "stylistic_consistency": <1-10>,\n'
+            '    "argument_cohesiveness": <1-10>,\n'
+            '    "bias_risk": <1-10, where 1=low risk, 10=high risk>,\n'
+            '    "logical_coherence": <1-10>\n'
+            "  },\n"
+            '  "executive_summaries": [\n'
+            '    {"chapter": 1, "summary": "Clear, lucid 2-3 sentence highlight of findings..."},\n'
+            "    ...\n"
+            "  ],\n"
+            '  "edits": [\n'
+            "    {\n"
+            '      "chapter": <chapter number>,\n'
+            '      "section": "<section heading where issue appears>",\n'
+            '      "issue": "<description of the problem>",\n'
+            '      "recommendation": "<specific edit recommendation>",\n'
+            '      "severity": "<high|medium|low>",\n'
+            '      "type": "<stylistic_consistency|logical_coherence|confirmation_bias|'
+            'alternative_hypothesis|protective_function|argument_flow>"\n'
+            "    },\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n\n"
+            "IMPORTANT:\n"
+            "- Return ONLY valid JSON. Do not include markdown fencing or explanatory text.\n"
+            "- Include an executive summary for EVERY chapter.\n"
+            "- Only recommend edits where there is a genuine issue. Do not invent problems.\n"
+            "- Respect the protective-function premise: the government acts in the people's interest.\n"
+            "- Guard against confirmation bias: flag unsupported conclusions.\n"
+            "- Consider alternative hypotheses and note where they should be addressed.\n"
+        )
+
+    def _build_apply_prompt(
+        self,
+        chapter_text: str,
+        chapter_edits: list[dict],
+        executive_summary: str,
+        include_executive_summary: bool,
+    ) -> str:
+        """Build the APPLY prompt to revise a single chapter."""
+        parts = [
+            "Apply the following editorial edits to this chapter.\n\n",
+            "RULES:\n",
+            "- Preserve ALL existing content, citations, references, and meaning\n",
+            "- Only make the specific changes recommended in the edit log\n",
+            "- Do NOT add numeric prefixes to headings\n",
+            "- Use exactly ONE # heading per chapter (keep the existing one)\n",
+            "- Maintain the same markdown structure and formatting\n",
+            "- Do NOT remove or alter any citation links\n\n",
+        ]
+
+        if chapter_edits:
+            parts.append(f"EDIT LOG:\n{json.dumps(chapter_edits, indent=2)}\n\n")
+        else:
+            parts.append("EDIT LOG: No structural edits needed.\n\n")
+
+        if include_executive_summary and executive_summary:
+            parts.extend([
+                "EXECUTIVE SUMMARY TO PREPEND:\n",
+                "After the chapter's # heading, insert a blockquote executive summary.\n",
+                "Format it as:\n",
+                "> **Executive Summary:** [summary text]\n\n",
+                f"Summary text: {executive_summary}\n\n",
+            ])
+
+        parts.extend([
+            f"CHAPTER MARKDOWN:\n{chapter_text}\n\n",
+            "Return ONLY the revised chapter markdown. No explanations.",
+        ])
+
+        return "".join(parts)
+
+    # -- context & style helpers --------------------------------------------
+
+    def _build_document_context(
+        self,
+        chapters_dir: Path,
+        chapter_entries: list[dict],
+    ) -> str:
+        """Concatenate all chapter text including conclusion."""
+        parts: list[str] = []
+        for entry in chapter_entries:
+            path = chapters_dir / entry["filename"]
+            if path.exists():
+                parts.append(path.read_text(encoding="utf-8"))
+        return "\n\n---\n\n".join(parts)
+
+    def _load_style_rules(self, path: Path) -> str:
+        """Extract STYLE CONVENTIONS section from the style guide."""
+        if not path.exists():
+            self._logger.warning("Style guide not found: %s", path)
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(
+            r'(## STYLE CONVE[NT]+IONS.*?)(?=\n## |\Z)',
+            text, re.DOTALL,
+        )
+        return match.group(1).strip() if match else text.strip()
+
+    def _load_editorial_principles(self, path: Path) -> str:
+        """Extract EDITORIAL PRINCIPLES section from the style guide."""
+        if not path.exists():
+            self._logger.warning("Style guide not found: %s", path)
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(
+            r'(## EDITORIAL PRINCIPLES.*?)(?=\n## |\Z)',
+            text, re.DOTALL,
+        )
+        return match.group(1).strip() if match else ""
+
+    def _parse_edit_log(self, response_text: str) -> dict | None:
+        """Parse JSON edit log from LLM response, handling code fences."""
+        text = response_text.strip()
+        # Strip code fences if present
+        if text.startswith("```"):
+            first_nl = text.index("\n") if "\n" in text else len(text)
+            text = text[first_nl + 1:]
+        if text.endswith("```"):
+            text = text[:-3].rstrip()
+
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as e:
+            self._logger.warning("  JSON parse error in edit log: %s", e)
+            # Try to extract JSON from response (LLM may have added text around it)
+            match = re.search(r'\{.*\}', text, re.DOTALL)
+            if match:
+                try:
+                    return json.loads(match.group(0))
+                except json.JSONDecodeError:
+                    pass
+            return None
+
+    # -- shared helpers -----------------------------------------------------
+
+    @staticmethod
+    def _strip_code_fencing(text: str) -> str:
+        """Strip leading/trailing markdown code fences if present."""
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
+            stripped = stripped[first_nl + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        return stripped
+
+    def _log_usage(self, label: str, usage: dict, model: str) -> None:
+        cost = self._calculate_cost(model, usage["input"], usage["output"])
+        self._logger.info(
+            "    %s — in: %s  out: %s  think: %s  ($%.4f)",
+            label,
+            f"{usage['input']:,}",
+            f"{usage['output']:,}",
+            f"{usage['thinking']:,}",
+            cost,
+        )
+
+    def _calculate_cost(
+        self, model: str, input_tokens: int, output_tokens: int,
+    ) -> float:
+        rates = self._PRICING.get(model, {"input": 2.50, "output": 10.00})
+        return (
+            input_tokens / 1_000_000 * rates["input"]
+            + output_tokens / 1_000_000 * rates["output"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — Publish
+# ---------------------------------------------------------------------------
+
 class PublishStage(Base):
     """Phase 6 — Build PDF / HTML via Sphinx (MyST‑parser)."""
 
@@ -2872,6 +3378,7 @@ STAGES = [
     ("kaliya",   KaliyaStage),
     ("format",   FormatStage),
     ("conclude", ConcludeStage),
+    ("edit",     EditStage),
     ("publish",  PublishStage),
 ]
 
@@ -2967,7 +3474,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stage 5b: Generate conclusion chapter via LLM")
     stages.add_argument("--no-conclude", dest="conclude", action="store_false",
                         help="Skip conclusion generation even if enabled in config")
-    stages.add_argument("--publish",  action="store_true", help="Stage 6: Build PDF / HTML / Confluence output")
+    stages.add_argument("--edit",      action="store_true", default=None,
+                        help="Stage 7: Editorial review via LLM")
+    stages.add_argument("--no-edit",   dest="edit", action="store_false",
+                        help="Skip editorial review even if enabled in config")
+    stages.add_argument("--publish",  action="store_true", help="Stage 8: Build PDF / HTML / Confluence output")
     stages.add_argument("--all",      action="store_true", help="Run all stages (1-6)")
 
     opts = parser.add_argument_group("options")
@@ -3015,14 +3526,25 @@ def main(argv: list[str] | None = None) -> None:
     # Handle --conclude/--no-conclude override
     if args.conclude is False:
         cfg.conclude.enabled = False
-    elif args.conclude is True and "conclude" not in selected:
+    elif args.conclude is True:
         cfg.conclude.enabled = True
-        selected.append("conclude")
-        stage_order = [name for name, _ in STAGES]
-        selected.sort(key=lambda s: stage_order.index(s))
+        if "conclude" not in selected:
+            selected.append("conclude")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --edit/--no-edit override
+    if args.edit is False:
+        cfg.edit.enabled = False
+    elif args.edit is True:
+        cfg.edit.enabled = True
+        if "edit" not in selected:
+            selected.append("edit")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
 
     if not selected:
-        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --publish, or --all.")
+        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --publish, or --all.")
 
     run_pipeline(cfg, selected, dry_run=args.dry_run)
 

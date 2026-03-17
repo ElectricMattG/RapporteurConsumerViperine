@@ -90,6 +90,18 @@ class ConcludeConfig:
 
 
 @dataclass
+class EditConfig:
+    """Editorial review configuration — Phase 9."""
+    enabled: bool = False
+    style_guide: str = "docs/style_guide.md"
+    provider: str = "openai"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "high"
+    edit_log: bool = True              # Write structured edit log to build dir
+    executive_summary: bool = True     # Generate executive summary per chapter
+
+
+@dataclass
 class ConfluenceConfig:
     server_url: str = ""
     space_key: str = ""
@@ -120,6 +132,7 @@ class PipelineConfig:
     kaliya: KaliyaConfig = field(default_factory=KaliyaConfig)
     format: FormatConfig = field(default_factory=FormatConfig)
     conclude: ConcludeConfig = field(default_factory=ConcludeConfig)
+    edit: EditConfig = field(default_factory=EditConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
 
     @property
@@ -232,6 +245,21 @@ class PipelineConfig:
             reasoning_effort=co.get("reasoning_effort", "high"),
             include_kaliya=co.get("include_kaliya", True),
             rag_service_url=rag_url,
+        )
+
+        # --- edit ---
+        ed = raw.get("edit") or {}
+        sg_ed = ed.get("style_guide", "docs/style_guide.md")
+        if sg_ed and not Path(sg_ed).is_absolute():
+            sg_ed = str((yaml_dir / sg_ed).resolve())
+        cfg.edit = EditConfig(
+            enabled=ed.get("enabled", False),
+            style_guide=sg_ed,
+            provider=ed.get("provider", "openai"),
+            model=ed.get("model", "gpt-5.4"),
+            reasoning_effort=ed.get("reasoning_effort", "high"),
+            edit_log=ed.get("edit_log", True),
+            executive_summary=ed.get("executive_summary", True),
         )
 
         # --- publish ---

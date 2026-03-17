@@ -679,3 +679,351 @@ class TestConcludeStageRegistration:
         conclude_idx = names.index("conclude")
         pub_idx = names.index("publish")
         assert fmt_idx < conclude_idx < pub_idx
+
+
+# ===========================================================================
+# Phase 9 — EditStage tests
+# ===========================================================================
+
+class TestEditConfig:
+    """9.1 — EditConfig dataclass and from_yaml() parsing."""
+
+    def test_defaults(self):
+        from src.models.publisher import EditConfig
+        ec = EditConfig()
+        assert ec.enabled is False
+        assert ec.style_guide == "docs/style_guide.md"
+        assert ec.provider == "openai"
+        assert ec.model == "gpt-5.4"
+        assert ec.reasoning_effort == "high"
+        assert ec.edit_log is True
+        assert ec.executive_summary is True
+
+    def test_from_yaml_with_edit(self, tmp_path):
+        """from_yaml() parses the edit section correctly."""
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(tmp_path)},
+            "edit": {
+                "enabled": True,
+                "provider": "gemini",
+                "model": "gemini-2.5-pro",
+                "reasoning_effort": "medium",
+                "style_guide": "custom/style.md",
+                "edit_log": False,
+                "executive_summary": False,
+            },
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        cfg = PipelineConfig.from_yaml(yaml_path)
+        assert cfg.edit.enabled is True
+        assert cfg.edit.provider == "gemini"
+        assert cfg.edit.model == "gemini-2.5-pro"
+        assert cfg.edit.reasoning_effort == "medium"
+        assert cfg.edit.edit_log is False
+        assert cfg.edit.executive_summary is False
+
+    def test_from_yaml_defaults_without_edit(self, tmp_path):
+        """from_yaml() uses defaults when edit section is absent."""
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(tmp_path)},
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        cfg = PipelineConfig.from_yaml(yaml_path)
+        assert cfg.edit.enabled is False
+        assert cfg.edit.provider == "openai"
+        assert cfg.edit.model == "gpt-5.4"
+
+
+class TestEditStageUnit:
+    """9.2–9.7 — EditStage unit tests (no LLM calls)."""
+
+    def _make_config(self, tmp_path, *, enabled=True):
+        """Create a PipelineConfig with chapters, conclusion, and manifest."""
+        build_dir = tmp_path / "build"
+        chapters_dir = build_dir / "chapters"
+        chapters_dir.mkdir(parents=True)
+
+        # Write stub chapters
+        (chapters_dir / "01-chapter.md").write_text(
+            "# Chapter One\n\nSome analysis content.\n", encoding="utf-8",
+        )
+        (chapters_dir / "02-chapter.md").write_text(
+            "# Chapter Two\n\nMore analysis.\n", encoding="utf-8",
+        )
+        # Conclusion chapter
+        (chapters_dir / "10-conclusion.md").write_text(
+            "# Conclusion\n\nFinal thoughts.\n", encoding="utf-8",
+        )
+
+        manifest = {
+            "chapters": [
+                {"filename": "01-chapter.md", "title": "Chapter One", "format_status": "done"},
+                {"filename": "02-chapter.md", "title": "Chapter Two", "format_status": "done"},
+                {"filename": "10-conclusion.md", "title": "Conclusion", "format_status": "done"},
+            ],
+        }
+        (chapters_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8",
+        )
+
+        # Write a style guide with EDITORIAL PRINCIPLES
+        style_guide = tmp_path / "style.md"
+        style_guide.write_text(
+            "## STYLE CONVENTIONS\nUse formal tone.\n\n"
+            "## EDITORIAL PRINCIPLES\nProtective-function premise.\n"
+            "Confirmation bias guard.\n\n"
+            "## CONCLUSION - PRO\nDraw conclusions.\n",
+            encoding="utf-8",
+        )
+
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(build_dir)},
+            "edit": {
+                "enabled": enabled,
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "style_guide": str(style_guide),
+                "edit_log": True,
+                "executive_summary": True,
+            },
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        return PipelineConfig.from_yaml(yaml_path)
+
+    def test_skips_when_disabled(self, tmp_path):
+        """Stage does nothing when edit.enabled is false."""
+        cfg = self._make_config(tmp_path, enabled=False)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=False)
+        stage.run()
+
+        manifest = json.loads(
+            (cfg.build_dir / "chapters" / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert "edit" not in manifest
+
+    def test_skips_when_already_reviewed(self, tmp_path):
+        """Stage is idempotent — skips if already reviewed."""
+        cfg = self._make_config(tmp_path, enabled=True)
+        manifest_path = cfg.build_dir / "chapters" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["edit"] = {"reviewed": True, "model": "test", "provider": "test"}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=False)
+        stage.run()
+
+        # Chapters should be unchanged
+        ch1 = (cfg.build_dir / "chapters" / "01-chapter.md").read_text(encoding="utf-8")
+        assert ch1 == "# Chapter One\n\nSome analysis content.\n"
+
+    def test_dry_run_skips_review(self, tmp_path):
+        """Dry run logs but does not write edit log or modify chapters."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=True)
+        stage.run()
+
+        manifest = json.loads(
+            (cfg.build_dir / "chapters" / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert "edit" not in manifest
+        assert not (cfg.build_dir / "editorial_edit_log.json").exists()
+
+    def test_strip_code_fencing(self):
+        from src.components.publisher.rapporteur_cli import EditStage
+        assert EditStage._strip_code_fencing("```markdown\n# Hi\n```") == "# Hi"
+        assert EditStage._strip_code_fencing("# Hi") == "# Hi"
+        assert EditStage._strip_code_fencing("```json\n{}\n```") == "{}"
+
+    def test_load_editorial_principles(self, tmp_path):
+        """_load_editorial_principles extracts the EDITORIAL PRINCIPLES section."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=True)
+        principles = stage._load_editorial_principles(Path(cfg.edit.style_guide))
+        assert "EDITORIAL PRINCIPLES" in principles
+        assert "Protective-function premise" in principles
+        assert "Confirmation bias guard" in principles
+        assert "STYLE CONVENTIONS" not in principles
+
+    def test_load_style_rules(self, tmp_path):
+        """_load_style_rules extracts the STYLE CONVENTIONS section."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=True)
+        rules = stage._load_style_rules(Path(cfg.edit.style_guide))
+        assert "STYLE CONVENTIONS" in rules
+        assert "formal tone" in rules
+        assert "EDITORIAL PRINCIPLES" not in rules
+
+    def test_build_document_context_includes_conclusion(self, tmp_path):
+        """_build_document_context includes all chapters incl. conclusion."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=True)
+        chapters_dir = cfg.build_dir / "chapters"
+        manifest = json.loads(
+            (chapters_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        ctx = stage._build_document_context(chapters_dir, manifest["chapters"])
+        assert "Chapter One" in ctx
+        assert "Chapter Two" in ctx
+        assert "Conclusion" in ctx
+        assert "Final thoughts" in ctx
+        assert "---" in ctx
+
+    def test_review_prompt_contains_criteria(self, tmp_path):
+        """Review prompt includes assessment criteria and chapter list."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import EditStage
+        stage = EditStage(cfg, dry_run=True)
+        prompt = stage._build_review_prompt(
+            "document text",
+            "editorial principles text",
+            "style rules text",
+            [{"filename": "01-chapter.md", "title": "Test Chapter"}],
+        )
+        assert "confirmation bias" in prompt.lower()
+        assert "protective-function" in prompt
+        assert "alternative hypotheses" in prompt
+        assert "document_score" in prompt
+        assert "executive_summaries" in prompt
+        assert "Chapter 1: Test Chapter" in prompt
+        assert "document text" in prompt
+        assert "editorial principles text" in prompt
+
+    def test_apply_prompt_contains_rules(self):
+        """Apply prompt includes preservation rules and edit log."""
+        from src.components.publisher.rapporteur_cli import EditStage
+        from src.models.publisher import PipelineConfig
+        stage = EditStage(PipelineConfig(), dry_run=True)
+
+        edits = [{"chapter": 1, "section": "Intro", "issue": "tone", "recommendation": "fix"}]
+        prompt = stage._build_apply_prompt(
+            "# Test\n\nContent here.\n", edits, "Chapter summary.", True,
+        )
+        assert "Preserve ALL" in prompt
+        assert "citation" in prompt.lower()
+        assert "ONE # heading" in prompt
+        assert "Executive Summary" in prompt
+        assert "Chapter summary." in prompt
+        assert json.dumps(edits, indent=2) in prompt
+
+    def test_apply_prompt_without_executive_summary(self):
+        """Apply prompt omits executive summary when disabled."""
+        from src.components.publisher.rapporteur_cli import EditStage
+        from src.models.publisher import PipelineConfig
+        stage = EditStage(PipelineConfig(), dry_run=True)
+
+        prompt = stage._build_apply_prompt(
+            "# Test\n\nContent.\n", [], "", False,
+        )
+        assert "Executive Summary" not in prompt
+        assert "No structural edits needed" in prompt
+
+    def test_parse_edit_log_valid_json(self):
+        """_parse_edit_log handles clean JSON."""
+        from src.components.publisher.rapporteur_cli import EditStage
+        from src.models.publisher import PipelineConfig
+        stage = EditStage(PipelineConfig(), dry_run=True)
+
+        valid_json = json.dumps({
+            "document_score": {
+                "stylistic_consistency": 8,
+                "argument_cohesiveness": 7,
+                "bias_risk": 3,
+                "logical_coherence": 8,
+            },
+            "executive_summaries": [
+                {"chapter": 1, "summary": "Summary one."},
+            ],
+            "edits": [
+                {"chapter": 1, "section": "Intro", "issue": "tone",
+                 "recommendation": "be formal", "severity": "low",
+                 "type": "stylistic_consistency"},
+            ],
+        })
+        result = stage._parse_edit_log(valid_json)
+        assert result is not None
+        assert result["document_score"]["stylistic_consistency"] == 8
+        assert len(result["executive_summaries"]) == 1
+        assert len(result["edits"]) == 1
+
+    def test_parse_edit_log_with_fences(self):
+        """_parse_edit_log handles JSON wrapped in code fences."""
+        from src.components.publisher.rapporteur_cli import EditStage
+        from src.models.publisher import PipelineConfig
+        stage = EditStage(PipelineConfig(), dry_run=True)
+
+        fenced = '```json\n{"document_score": {"stylistic_consistency": 9}, "edits": []}\n```'
+        result = stage._parse_edit_log(fenced)
+        assert result is not None
+        assert result["document_score"]["stylistic_consistency"] == 9
+
+    def test_parse_edit_log_invalid(self):
+        """_parse_edit_log returns None for garbage input."""
+        from src.components.publisher.rapporteur_cli import EditStage
+        from src.models.publisher import PipelineConfig
+        stage = EditStage(PipelineConfig(), dry_run=True)
+
+        result = stage._parse_edit_log("not json at all")
+        assert result is None
+
+
+class TestEditCLIFlags:
+    """9.8 — CLI flag handling for --edit/--no-edit."""
+
+    def test_edit_flag_registered(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["config.yaml", "--edit"])
+        assert args.edit is True
+
+    def test_no_edit_flag(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["config.yaml", "--no-edit", "--publish"])
+        assert args.edit is False
+
+    def test_default_edit_is_none(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["config.yaml", "--publish"])
+        assert args.edit is None
+
+
+class TestEditStageRegistration:
+    """9.9 — EditStage is in the STAGES list in correct position."""
+
+    def test_stages_contains_edit(self):
+        from src.components.publisher.rapporteur_cli import STAGES
+        names = [name for name, _ in STAGES]
+        assert "edit" in names
+
+    def test_edit_after_conclude_before_publish(self):
+        from src.components.publisher.rapporteur_cli import STAGES
+        names = [name for name, _ in STAGES]
+        conclude_idx = names.index("conclude")
+        edit_idx = names.index("edit")
+        pub_idx = names.index("publish")
+        assert conclude_idx < edit_idx < pub_idx
