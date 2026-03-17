@@ -367,13 +367,12 @@ class TestLiveBuildReferences:
         assert actual == expected, f"Manifest says {expected}, found {actual} chapter files"
 
     def test_all_chapters_have_abstract(self):
-        """Each chapter starts with a blockquote abstract."""
+        """Each chapter starts with a # heading (Sphinx-style structure)."""
         for f in self._chapter_files():
             text = f.read_text(encoding="utf-8")
             lines = text.strip().splitlines()
-            # First line is heading, then blank, then blockquote
-            has_blockquote = any(line.strip().startswith(">") for line in lines[:5])
-            assert has_blockquote, f"{f.name}: no blockquote abstract found"
+            has_heading = any(line.strip().startswith("#") for line in lines[:3])
+            assert has_heading, f"{f.name}: no # heading found"
 
     def test_footer_present(self):
         for f in self._chapter_files():

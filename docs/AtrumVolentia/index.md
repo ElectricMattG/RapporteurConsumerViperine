@@ -41,3 +41,27 @@ second strike of February 2026.
 10_second_strike_timeline
 11_second_strike_dow_framing
 ```
+
+```{toctree}
+:maxdepth: 2
+:caption: "Part IV — DoD AI Policy & the Anthropic Dispute"
+
+201_ai_initiatives_eo_overview
+202_dow_ai_media_response
+203_anthropic_supply_chain_media_analysis
+204_anthropic_supply_chain_deep_dive
+205_anthropic_deep_dive_recent_events
+206_anthropic_threat_cluster_table
+207_anthropic_media_legal_framework
+```
+
+```{toctree}
+:maxdepth: 2
+:caption: "Part V — Executive Orders, DEI & Information Control"
+
+208_dei_technology_governance
+209_information_control_rebranding
+210_media_response_paradox
+211_media_vetting_analysis
+212_media_cluster
+```

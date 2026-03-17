@@ -65,6 +65,16 @@ class KaliyaConfig:
     analysis_window: str = ""
     poll_interval_s: int = 15
     poll_timeout_s: int = 600
+    include_images: bool = True
+
+
+@dataclass
+class FormatConfig:
+    """Style formatter configuration — Phase 7."""
+    enabled: bool = False
+    style_guide: str = "docs/style_guide.md"
+    provider: str = "gemini"
+    model: str = "gemini-2.5-pro"
 
 
 @dataclass
@@ -96,6 +106,7 @@ class PipelineConfig:
     sessions: SessionsConfig = field(default_factory=SessionsConfig)
     render: RenderConfig = field(default_factory=RenderConfig)
     kaliya: KaliyaConfig = field(default_factory=KaliyaConfig)
+    format: FormatConfig = field(default_factory=FormatConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
 
     @property
@@ -177,6 +188,19 @@ class PipelineConfig:
             analysis_window=k.get("analysis_window", ""),
             poll_interval_s=k.get("poll_interval_s", 15),
             poll_timeout_s=k.get("poll_timeout_s", 600),
+            include_images=k.get("include_images", True),
+        )
+
+        # --- format ---
+        fm = raw.get("format") or {}
+        sg = fm.get("style_guide", "docs/style_guide.md")
+        if sg and not Path(sg).is_absolute():
+            sg = str((yaml_dir / sg).resolve())
+        cfg.format = FormatConfig(
+            enabled=fm.get("enabled", False),
+            style_guide=sg,
+            provider=fm.get("provider", "gemini"),
+            model=fm.get("model", "gemini-2.5-flash"),
         )
 
         # --- publish ---

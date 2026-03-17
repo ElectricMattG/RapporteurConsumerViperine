@@ -10,23 +10,22 @@ release = "1.0"
 
 # -- General configuration -----------------------------------------------------
 
+import os
+import shutil
+
 extensions = [
     "myst_parser",
+    "sphinxcontrib.mermaid",
     "sphinxcontrib.confluencebuilder",
 ]
 
-myst_enable_extensions = [
-    "colon_fence",
-    "deflist",
-    "tasklist",
-    "attrs_inline",
-]
+myst_enable_extensions = ["colon_fence", "deflist", "tasklist"]
+source_suffix = {".md": "markdown"}
 
 # Treat [[label]](url) as valid inline markup; suppress warnings from
 # the double-bracket citation style written by rapporteur_docs.py.
 myst_all_links_external = True
 
-templates_path = ["_templates"]
 exclude_patterns = [
     "_build",
     "Thumbs.db",
@@ -43,38 +42,36 @@ exclude_patterns = [
 # -- HTML output ---------------------------------------------------------------
 
 html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
 html_title = "Atrum Volentia — Hegseth, Iran & the Second Strike"
 
-html_theme_options = {
-    "navigation_depth": 4,
-    "titles_only": False,
-    "collapse_navigation": False,
-}
+# -- Mermaid settings ----------------------------------------------------------
+mermaid_cmd = shutil.which("mmdc") or os.path.expanduser("~/.local/node_modules/.bin/mmdc")
+mermaid_cmd_shell = "False"
+mermaid_output_format = "png"
+mermaid_params = [
+    "-p", os.path.join(os.path.dirname(__file__), "puppeteer-config.json"),
+    "-w", "1200",
+    "-f",
+]
 
 # -- LaTeX / PDF output --------------------------------------------------------
+# Matches Kaliya/Lamia/BBOA styling exactly.
 
 latex_engine = "pdflatex"
 
 latex_elements = {
     "papersize": "a4paper",
     "pointsize": "11pt",
-    "sphinxsetup": "TitleColor={rgb}{0,0,0}, InnerLinkColor={rgb}{0,0,0}, OuterLinkColor={rgb}{0,0,0}",
     "preamble": r"""
-\usepackage[scaled]{helvet}
-\renewcommand{\familydefault}{\sfdefault}
-\usepackage{inconsolata}
-\usepackage{setspace}\setstretch{1.4}
-\usepackage[top=2.5cm,bottom=2.5cm,left=2.8cm,right=2.8cm]{geometry}
-\usepackage{xcolor}
-\setcounter{secnumdepth}{3}
-\usepackage{titlesec}
-\titleformat{\chapter}[display]{\normalfont\fontsize{18}{22}\bfseries\color{black}}{\chaptertitlename\ \thechapter}{0pt}{}
-\titlespacing*{\chapter}{0pt}{10pt}{12pt}
-\titleformat{\section}{\normalfont\large\bfseries\color{black}}{\thesection}{1em}{}
-\titleformat{\subsection}{\normalfont\normalsize\bfseries\color{black}}{\thesubsection}{1em}{}
-\titleformat{\subsubsection}{\normalfont\normalsize\itshape\color{black}}{\thesubsubsection}{1em}{}
+\usepackage{graphicx}
+\setkeys{Gin}{width=\linewidth,height=0.85\textheight,keepaspectratio=true}
+\usepackage{float}
+\usepackage{booktabs}
+\usepackage{caption}
+\captionsetup{font=small,labelfont=bf,skip=4pt}
 """,
+    "figure_align": "H",
+    "geometry": r"\usepackage[a4paper,top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{geometry}",
 }
 
 latex_documents = [
