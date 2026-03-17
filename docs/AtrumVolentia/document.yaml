@@ -41,6 +41,15 @@ format:
   provider: "gemini"
   model: "gemini-2.5-pro"
 
+conclude:
+  enabled: true
+  style_guide: "../style_guide.md"
+  provider: "openai"
+  model: "gpt-5.4"
+  reasoning_effort: "high"
+  include_kaliya: true
+  rag_service_url: "http://localhost:8000"  # Phase 8.1: EO grounding via RAG
+
 publish:
   formats: ["pdf"]
   pdf_engine: "pdflatex"

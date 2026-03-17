@@ -436,3 +436,246 @@ class TestKaliyaCacheStructure:
             assert len(narrative) > 100, (
                 f"{d.name}: narrative too short ({len(narrative)} chars)"
             )
+
+
+# ===================================================================
+# 8 — ConcludeStage unit tests
+# ===================================================================
+
+class TestConcludeConfig:
+    """8.1 / 8.2 — ConcludeConfig dataclass and from_yaml() parsing."""
+
+    def test_defaults(self):
+        from src.models.publisher import ConcludeConfig
+        co = ConcludeConfig()
+        assert co.enabled is False
+        assert co.provider == "openai"
+        assert co.model == "gpt-5.4"
+        assert co.reasoning_effort == "high"
+        assert co.include_kaliya is True
+
+    def test_from_yaml_with_conclude(self, tmp_path):
+        """from_yaml() parses the conclude section correctly."""
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(tmp_path)},
+            "conclude": {
+                "enabled": True,
+                "provider": "gemini",
+                "model": "gemini-2.5-pro",
+                "reasoning_effort": "medium",
+                "include_kaliya": False,
+            },
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        cfg = PipelineConfig.from_yaml(yaml_path)
+        assert cfg.conclude.enabled is True
+        assert cfg.conclude.provider == "gemini"
+        assert cfg.conclude.model == "gemini-2.5-pro"
+        assert cfg.conclude.reasoning_effort == "medium"
+        assert cfg.conclude.include_kaliya is False
+
+    def test_from_yaml_defaults_without_conclude(self, tmp_path):
+        """from_yaml() uses defaults when conclude section is absent."""
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(tmp_path)},
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        cfg = PipelineConfig.from_yaml(yaml_path)
+        assert cfg.conclude.enabled is False
+        assert cfg.conclude.provider == "openai"
+        assert cfg.conclude.model == "gpt-5.4"
+
+
+class TestConcludeStageUnit:
+    """8.3–8.7 — ConcludeStage unit tests (no LLM calls)."""
+
+    def _make_config(self, tmp_path, *, enabled=True):
+        """Create a PipelineConfig with a chapters dir and manifest."""
+        build_dir = tmp_path / "build"
+        chapters_dir = build_dir / "chapters"
+        chapters_dir.mkdir(parents=True)
+
+        # Write two stub chapters
+        (chapters_dir / "01-chapter.md").write_text(
+            "# Chapter One\n\nSome analysis content.\n", encoding="utf-8",
+        )
+        (chapters_dir / "02-chapter.md").write_text(
+            "# Chapter Two\n\nMore analysis.\n", encoding="utf-8",
+        )
+
+        manifest = {
+            "chapters": [
+                {"filename": "01-chapter.md", "title": "Chapter One", "format_status": "done"},
+                {"filename": "02-chapter.md", "title": "Chapter Two", "format_status": "done"},
+            ],
+        }
+        (chapters_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2), encoding="utf-8",
+        )
+
+        cfg_dict = {
+            "project": {"title": "Test"},
+            "paths": {"build_dir": str(build_dir)},
+            "conclude": {
+                "enabled": enabled,
+                "provider": "gemini",
+                "model": "gemini-2.5-pro",
+                "reasoning_effort": "high",
+                "include_kaliya": False,
+            },
+        }
+        yaml_path = tmp_path / "doc.yaml"
+        yaml_path.write_text(yaml.dump(cfg_dict), encoding="utf-8")
+
+        from src.models.publisher import PipelineConfig
+        return PipelineConfig.from_yaml(yaml_path)
+
+    def test_skips_when_disabled(self, tmp_path):
+        """Stage does nothing when conclude.enabled is false."""
+        cfg = self._make_config(tmp_path, enabled=False)
+
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        stage = ConcludeStage(cfg, dry_run=False)
+        stage.run()
+
+        manifest = json.loads(
+            (cfg.build_dir / "chapters" / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert "conclude" not in manifest
+
+    def test_skips_when_already_generated(self, tmp_path):
+        """Stage is idempotent — skips if conclusion was already generated."""
+        cfg = self._make_config(tmp_path, enabled=True)
+        manifest_path = cfg.build_dir / "chapters" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest["conclude"] = {"generated": True, "model": "test", "provider": "test"}
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        stage = ConcludeStage(cfg, dry_run=False)
+        stage.run()
+
+        # Should not have added a new chapter file
+        chapter_files = sorted(
+            (cfg.build_dir / "chapters").glob("[0-9]*.md")
+        )
+        assert len(chapter_files) == 2
+
+    def test_dry_run_skips_generation(self, tmp_path):
+        """Dry run logs but does not write files."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        stage = ConcludeStage(cfg, dry_run=True)
+        stage.run()
+
+        manifest = json.loads(
+            (cfg.build_dir / "chapters" / "manifest.json").read_text(encoding="utf-8")
+        )
+        assert "conclude" not in manifest
+
+    def test_strip_code_fencing(self):
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        assert ConcludeStage._strip_code_fencing("```markdown\n# Hi\n```") == "# Hi"
+        assert ConcludeStage._strip_code_fencing("# Hi") == "# Hi"
+
+    def test_load_conclusion_rules(self, tmp_path):
+        """_load_conclusion_rules extracts the CONCLUSION section."""
+        style = (
+            "## STYLE CONVENTIONS\nStyle stuff.\n\n"
+            "## CONCLUSION - PRO\nDraw conclusions.\n\n"
+            "## EDITORIAL PRINCIPLES\nFinal review.\n"
+        )
+        sg = tmp_path / "style.md"
+        sg.write_text(style, encoding="utf-8")
+
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        from src.models.publisher import PipelineConfig
+        stage = ConcludeStage(PipelineConfig(), dry_run=True)
+        rules = stage._load_conclusion_rules(sg)
+        assert "CONCLUSION" in rules
+        assert "Draw conclusions" in rules
+        assert "EDITORIAL" not in rules
+
+    def test_build_document_context(self, tmp_path):
+        """_build_document_context concatenates chapter files."""
+        cfg = self._make_config(tmp_path, enabled=True)
+
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        stage = ConcludeStage(cfg, dry_run=True)
+        chapters_dir = cfg.build_dir / "chapters"
+        manifest = json.loads(
+            (chapters_dir / "manifest.json").read_text(encoding="utf-8")
+        )
+        ctx = stage._build_document_context(
+            chapters_dir, manifest["chapters"], include_kaliya=False,
+        )
+        assert "Chapter One" in ctx
+        assert "Chapter Two" in ctx
+        assert "---" in ctx  # separator
+
+    def test_conclude_prompt_contains_constraints(self):
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        from src.models.publisher import PipelineConfig
+        stage = ConcludeStage(PipelineConfig(), dry_run=True)
+        prompt = stage._build_conclude_prompt("doc text", "conclusion rules", "style rules")
+        assert "ONE # heading" in prompt
+        assert "numeric prefixes" in prompt
+        assert "doc text" in prompt
+
+    def test_reflect_prompt_contains_criteria(self):
+        from src.components.publisher.rapporteur_cli import ConcludeStage
+        from src.models.publisher import PipelineConfig
+        stage = ConcludeStage(PipelineConfig(), dry_run=True)
+        prompt = stage._build_reflect_prompt("draft", "doc context", "rules")
+        assert "protective-function" in prompt
+        assert "Mermaid timeline" in prompt
+        assert "draft" in prompt
+
+
+class TestConcludeCLIFlags:
+    """8.8 — CLI flag handling for --conclude/--no-conclude."""
+
+    def test_conclude_flag_registered(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        # Should not raise
+        args = parser.parse_args(["config.yaml", "--conclude"])
+        assert args.conclude is True
+
+    def test_no_conclude_flag(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["config.yaml", "--no-conclude", "--publish"])
+        assert args.conclude is False
+
+    def test_default_conclude_is_none(self):
+        from src.components.publisher.rapporteur_cli import build_parser
+        parser = build_parser()
+        args = parser.parse_args(["config.yaml", "--publish"])
+        assert args.conclude is None
+
+
+class TestConcludeStageRegistration:
+    """8.9 — ConcludeStage is in the STAGES list."""
+
+    def test_stages_contains_conclude(self):
+        from src.components.publisher.rapporteur_cli import STAGES
+        names = [name for name, _ in STAGES]
+        assert "conclude" in names
+
+    def test_conclude_after_format_before_publish(self):
+        from src.components.publisher.rapporteur_cli import STAGES
+        names = [name for name, _ in STAGES]
+        fmt_idx = names.index("format")
+        conclude_idx = names.index("conclude")
+        pub_idx = names.index("publish")
+        assert fmt_idx < conclude_idx < pub_idx

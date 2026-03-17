@@ -27,9 +27,9 @@
 -Don't perform comprehensive analysis for each prompt
 -See that each prompt will be a continuation of the previous response
 -We aggregate information in the conversation context and then generate a conclusion prompt
-1. Take into account legal framework
-2. Take into account events and selected media sources
-3. Take into account clustering
+1. Take into account legal framework (GROUNDING)
+2. Take into account events and selected media sources (USE THE REFS AND RETRIEVE FULL DOC)
+3. Take into account clustering (THREAT CLUSTER)
 4. Take into account narrative arc's and clusters
 5. Then draw conclusions: the governments intentions are always to fulfil a protective funtion
 always regard them as acting in the best interest of the people. Any criticism is respectful

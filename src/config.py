@@ -302,10 +302,10 @@ defaults = {
         "organization": None,  # Set via OPENAI_ORG_ID env var
         "model": "gpt-4o",  # Model to use for generation
         "model_name": "gpt-4o",  # Specific model name for citation research (faster than gpt-5.1)
-        "timeout": 180,  # Request timeout in seconds
-        "max_tokens": 32000,  # Maximum tokens in response (increased to prevent truncation)
+        "timeout": 600,  # Request timeout in seconds
+        "max_tokens": 250000,  # Maximum tokens in response (increased to prevent truncation)
         "temperature": 0.5,  # Temperature for generation
-        "reasoning_effort": "medium",  # Reasoning effort: low, medium, high
+        "reasoning_effort": "high",  # Reasoning effort: low, medium, high
         "verbosity": "medium",  # Verbosity level: low, medium, high
     },
     "llm": {

@@ -78,6 +78,18 @@ class FormatConfig:
 
 
 @dataclass
+class ConcludeConfig:
+    """Conclusion generation configuration — Phase 8."""
+    enabled: bool = False
+    style_guide: str = "docs/style_guide.md"
+    provider: str = "openai"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "high"
+    include_kaliya: bool = True
+    rag_service_url: str = "http://localhost:8000"  # Phase 8.1: EO grounding via RAG
+
+
+@dataclass
 class ConfluenceConfig:
     server_url: str = ""
     space_key: str = ""
@@ -107,6 +119,7 @@ class PipelineConfig:
     render: RenderConfig = field(default_factory=RenderConfig)
     kaliya: KaliyaConfig = field(default_factory=KaliyaConfig)
     format: FormatConfig = field(default_factory=FormatConfig)
+    conclude: ConcludeConfig = field(default_factory=ConcludeConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
 
     @property
@@ -201,6 +214,24 @@ class PipelineConfig:
             style_guide=sg,
             provider=fm.get("provider", "gemini"),
             model=fm.get("model", "gemini-2.5-flash"),
+        )
+
+        # --- conclude ---
+        co = raw.get("conclude") or {}
+        sg_co = co.get("style_guide", "docs/style_guide.md")
+        if sg_co and not Path(sg_co).is_absolute():
+            sg_co = str((yaml_dir / sg_co).resolve())
+        # Phase 8.1: Fallback to env var for RAG service URL
+        import os
+        rag_url = co.get("rag_service_url") or os.getenv("RAG_SERVICE_URL", "http://localhost:8000")
+        cfg.conclude = ConcludeConfig(
+            enabled=co.get("enabled", False),
+            style_guide=sg_co,
+            provider=co.get("provider", "openai"),
+            model=co.get("model", "gpt-5.4"),
+            reasoning_effort=co.get("reasoning_effort", "high"),
+            include_kaliya=co.get("include_kaliya", True),
+            rag_service_url=rag_url,
         )
 
         # --- publish ---

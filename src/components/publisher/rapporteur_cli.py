@@ -3,12 +3,13 @@
 rapporteur_cli.py — Unified Document Publishing Pipeline
 
 Orchestrates the full chat-to-published-document pipeline:
-  Stage 1 (export)   — Pull conversations from the frontend API or static file
-  Stage 2 (parse)    — Classify turns, generate footnotes, build citation map
-  Stage 3 (chapters) — Render session Markdown with per-chapter references
-  Stage 4 (kaliya)   — Detect threat clusters, send to Kaliya, collect results
-  Stage 5 (format)   — Apply LLM-based style formatting to chapter Markdown
-  Stage 6 (publish)  — Build PDF / HTML / Confluence from chapter markdowns
+  Stage 1  (export)   — Pull conversations from the frontend API or static file
+  Stage 2  (parse)    — Classify turns, generate footnotes, build citation map
+  Stage 3  (chapters) — Render session Markdown with per-chapter references
+  Stage 4  (kaliya)   — Detect threat clusters, send to Kaliya, collect results
+  Stage 5  (format)   — Apply LLM-based style formatting to chapter Markdown
+  Stage 5b (conclude) — Generate conclusion chapter via two-call LLM synthesis
+  Stage 6  (publish)  — Build PDF / HTML / Confluence from chapter markdowns
 
 Usage
 -----
@@ -52,7 +53,8 @@ from src.components.publisher.rapporteur_docs import (build_enrichment_section,
                                                       postprocess_response,
                                                       resolve_inline_citations)
 from src.config_handler import Base
-from src.models.publisher import ChapterSpec, FormatConfig, PipelineConfig
+from src.models.publisher import (ChapterSpec, ConcludeConfig, FormatConfig,
+                                  PipelineConfig)
 
 # ---------------------------------------------------------------------------
 # Logging (fallback for CLI entry-point; stages use Base._logger)
@@ -1925,6 +1927,609 @@ class FormatStage(Base):
 
 
 # ---------------------------------------------------------------------------
+# Phase 5b — Conclude
+# ---------------------------------------------------------------------------
+
+class ConcludeStage(Base):
+    """Phase 5b — Generate conclusion chapter via two-call LLM synthesis.
+
+    Uses a conclude → reflect pattern: the first call synthesises the full
+    document into a conclusion chapter; the second call critically reviews
+    and strengthens it.  Supports OpenAI (GPT-5.x, default) and Gemini
+    providers via ``ConcludeConfig.provider``.
+    """
+
+    # Pricing per 1M tokens — OpenAI GPT-5.x & Gemini 2.5
+    _PRICING: dict[str, dict[str, float]] = {
+        "gpt-5.4":               {"input": 2.50,  "output": 10.00},
+        "gpt-5.1":               {"input": 2.50,  "output": 10.00},
+        "gpt-5":                 {"input": 2.00,  "output":  8.00},
+        "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
+        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+    }
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    # -- public -------------------------------------------------------------
+
+    def run(self) -> None:
+        co = self.cfg.conclude
+        if not co.enabled:
+            self._logger.info("  Conclusion generation disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to conclude.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Idempotent — skip if already generated
+        if manifest.get("conclude", {}).get("generated"):
+            self._logger.info("  Conclusion already generated — skipping.")
+            return
+
+        # Load style rules
+        style_rules = self._load_style_rules(Path(co.style_guide))
+        conclusion_rules = self._load_conclusion_rules(Path(co.style_guide))
+
+        # Build full document context
+        document_context = self._build_document_context(
+            chapters_dir, chapter_entries, co.include_kaliya,
+        )
+
+        self._logger.info(
+            "  Generating conclusion with %s (%s, reasoning: %s)",
+            co.model, co.provider, co.reasoning_effort,
+        )
+
+        if self.dry_run:
+            self._logger.info("  (dry-run) would generate conclusion chapter")
+            return
+
+        # Phase 8.1: Extract EO reference URLs and fetch grounding from RAG
+        eo_urls = self._extract_eo_references(chapters_dir, chapter_entries)
+        eo_grounding = ""
+        if eo_urls:
+            self._logger.info(f"  Extracted {len(eo_urls)} EO reference URLs from chapters")
+            for url in eo_urls:
+                self._logger.debug(f"    - {url}")
+            eo_grounding = self._fetch_eo_grounding(eo_urls, co.rag_service_url)
+            if eo_grounding:
+                self._logger.info(f"  Retrieved EO grounding ({len(eo_grounding)} chars)")
+            else:
+                self._logger.warning("  No EO grounding retrieved from RAG service")
+        else:
+            self._logger.info("  No EO reference URLs found in chapters")
+
+        # Cost tracking accumulators
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+
+        # ── Call 1: Conclude ──
+        self._logger.info("  Call 1/2: CONCLUDE")
+        conclude_prompt = self._build_conclude_prompt(
+            document_context, conclusion_rules, style_rules, eo_grounding,
+        )
+        conclusion_draft, usage_1 = self._generate_with_usage(co, conclude_prompt)
+        total_input_tokens += usage_1.get("input", 0)
+        total_output_tokens += usage_1.get("output", 0)
+        total_thinking_tokens += usage_1.get("thinking", 0)
+        self._log_usage("conclude", usage_1, co.model)
+
+        if not conclusion_draft or not conclusion_draft.strip():
+            self._logger.warning("  Empty conclusion draft — aborting.")
+            return
+
+        conclusion_draft = self._strip_code_fencing(conclusion_draft)
+
+        # ── Call 2: Reflect ──
+        self._logger.info("  Call 2/2: REFLECT")
+        reflect_prompt = self._build_reflect_prompt(
+            conclusion_draft, document_context, conclusion_rules, eo_grounding,
+        )
+        refined_conclusion, usage_2 = self._generate_with_usage(co, reflect_prompt)
+        total_input_tokens += usage_2.get("input", 0)
+        total_output_tokens += usage_2.get("output", 0)
+        total_thinking_tokens += usage_2.get("thinking", 0)
+        self._log_usage("reflect", usage_2, co.model)
+
+        if not refined_conclusion or not refined_conclusion.strip():
+            self._logger.warning("  Empty reflect response — using draft.")
+            refined_conclusion = conclusion_draft
+
+        refined_conclusion = self._strip_code_fencing(refined_conclusion)
+
+        # Add footer
+        footer = (
+            f"\n---\n*Generated by Rapporteur CLI — "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+        )
+        refined_conclusion = refined_conclusion.rstrip() + "\n" + footer
+
+        # Write conclusion chapter — remove any prior conclusion entry first
+        non_conclusion = [c for c in chapter_entries if "conclusion" not in c["filename"]]
+        chapter_num = len(non_conclusion) + 1
+        filename = f"{chapter_num:02d}-conclusion.md"
+        # Clean up stale conclusion files
+        for old in chapter_entries:
+            if "conclusion" in old["filename"] and old["filename"] != filename:
+                stale = chapters_dir / old["filename"]
+                if stale.exists():
+                    stale.unlink()
+        conclusion_path = chapters_dir / filename
+        conclusion_path.write_text(refined_conclusion, encoding="utf-8")
+        self._logger.info(
+            "  Wrote %s (%d chars)", filename, len(refined_conclusion),
+        )
+
+        # Update manifest — replace any prior conclusion entry
+        chapter_entries[:] = non_conclusion
+        chapter_entries.append({
+            "filename": filename,
+            "title": "Conclusion",
+            "conclude_status": "done",
+        })
+
+        cost = self._calculate_cost(
+            co.model, total_input_tokens, total_output_tokens,
+        )
+        manifest["conclude"] = {
+            "generated": True,
+            "model": co.model,
+            "provider": co.provider,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        self._logger.info("  ─── Cost Summary ───")
+        self._logger.info("    Model:           %s", co.model)
+        self._logger.info("    Provider:        %s", co.provider)
+        self._logger.info("    Input tokens:    %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:   %s", f"{total_output_tokens:,}")
+        self._logger.info("    Thinking tokens: %s", f"{total_thinking_tokens:,}")
+        self._logger.info("    Estimated cost:  $%.4f", cost)
+        self._logger.info("  Updated manifest.json with conclude metadata.")
+
+    # -- LLM generation -----------------------------------------------------
+
+    def _generate_with_usage(
+        self, co: ConcludeConfig, prompt: str,
+    ) -> tuple[str, dict]:
+        """Call the configured LLM provider and return (text, usage_dict).
+
+        Supports dual-provider: OpenAI (Responses API) or Gemini.
+        """
+        import asyncio
+
+        usage: dict = {"input": 0, "output": 0, "thinking": 0}
+
+        if co.provider == "openai":
+            from src.clients.llm_openai_client import OpenAILLMClient
+
+            client = OpenAILLMClient(model_name=co.model)
+            max_tokens = 16_000
+
+            # Run async generate_content in sync context
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(
+                    client.client.responses.create(
+                        model=co.model,
+                        input=prompt,
+                        reasoning={"effort": co.reasoning_effort},
+                        max_output_tokens=max_tokens,
+                    )
+                )
+            finally:
+                loop.close()
+
+            text = response.output_text if hasattr(response, "output_text") else ""
+            # Extract usage from the response object
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                # Reasoning tokens are nested under output_tokens_details
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+
+            return text, usage
+
+        else:
+            # Gemini provider
+            from google.genai import types as genai_types
+
+            from src.clients.llm_gcp_client import GeminiLLMClient
+
+            client = GeminiLLMClient(model_name=co.model)
+            max_tokens = 16_000
+
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2,
+                top_p=client.top_p,
+                max_output_tokens=max_tokens,
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name,
+                contents=prompt,
+                config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+
+            return text, usage
+
+    # -- prompt builders ----------------------------------------------------
+
+    def _build_conclude_prompt(
+        self, document_context: str, conclusion_rules: str, style_rules: str,
+        eo_grounding: str = "",
+    ) -> str:
+        """Build the CONCLUDE prompt with full document context and optional EO grounding.
+
+        Phase 8.1: eo_grounding parameter adds primary-source legal framework data.
+        """
+        parts = [
+            "You are writing the conclusion chapter for a published analysis document.\n\n",
+            "CRITICAL CONSTRAINTS:\n",
+            "- Use exactly ONE # heading: '# Conclusion'\n",
+            "- All other headings use ## or ### (max 3 levels)\n",
+            "- Do NOT add numeric prefixes to headings — the build system numbers them automatically\n",
+            "- Favour free-flowing prose over seriated lists\n\n",
+            f"CONCLUSION GUIDELINES:\n{conclusion_rules}\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+        ]
+
+        if eo_grounding:
+            parts.extend([
+                f"{eo_grounding}\n\n",
+                "IMPORTANT — LEGAL FRAMEWORK INTEGRATION:\n",
+                "The Executive Order documents above establish the PRIMARY LEGAL FRAMEWORK ",
+                "for this analysis. These are the actual policy documents referenced throughout ",
+                "the chapters. When synthesizing your conclusion:\n",
+                "1. CITE these Executive Orders by number and title when discussing legal/policy foundations\n",
+                "2. REFERENCE specific provisions from the EO text to support your analysis\n",
+                "3. CONNECT the chapter discussions back to these primary-source documents\n",
+                "4. GROUND policy interpretations in the actual EO language provided above\n",
+                "5. CITE EOs as: 'Executive Order 14151 (\"Ending Radical and Wasteful Government DEI Programs\")'\n\n",
+                "These EOs are NOT just references — they are the legal bedrock of the events and ",
+                "policy debates analyzed in the document chapters.\n\n",
+            ])
+
+        parts.extend([
+            f"FULL DOCUMENT CONTEXT:\n{document_context}\n\n",
+            "Write a conclusion chapter that synthesises the entire document.\n",
+        ])
+
+        if eo_grounding:
+            parts.append(
+                "Ensure your conclusion demonstrates how the chapter analyses connect to and "
+                "illuminate the Executive Orders' implementation and impact.\n"
+            )
+
+        parts.extend([
+            "Include a Mermaid timeline diagram where date/event data is available.\n",
+            "Return ONLY the conclusion markdown."
+        ])
+
+        return "".join(parts)
+
+    def _build_reflect_prompt(
+        self,
+        conclusion_draft: str,
+        document_context: str,
+        conclusion_rules: str,
+        eo_grounding: str = "",
+    ) -> str:
+        """Build the REFLECT prompt to refine the conclusion draft.
+
+        Phase 8.1: eo_grounding parameter ensures reflection maintains EO citations.
+        """
+        parts = [
+            "Review and refine this conclusion chapter for a published analysis.\n\n",
+            f"CONCLUSION GUIDELINES:\n{conclusion_rules}\n\n",
+            "REVIEW CRITERIA:\n",
+            "1. Are all conclusions grounded in evidence from the document?\n",
+            "2. Is the protective-function framing consistent and respectful?\n",
+            "3. Are media intentions assessed for medium to long-term impact?\n",
+            "4. Is the information domain analysis connected to democratic implications?\n",
+            "5. Is the Mermaid timeline accurate and complete?\n",
+            "6. Are headings using #/##/### without numeric prefixes?\n",
+        ]
+
+        if eo_grounding:
+            parts.extend([
+                "7. Are Executive Orders cited correctly with number and title?\n",
+                "8. Are policy conclusions grounded in the actual EO text provided?\n",
+                "9. Are chapter analyses connected to the legal framework established by the EOs?\n",
+            ])
+
+        if eo_grounding:
+            parts.extend([
+                "\n",
+                f"{eo_grounding}\n\n",
+                "The Executive Orders above establish the legal framework. Ensure the conclusion:\n",
+                "- CITES EOs using: Executive Order [number] (\"[title]\")\n",
+                "- GROUNDS policy statements in specific EO provisions\n",
+                "- CONNECTS chapter content to these primary-source documents\n\n",
+            ])
+
+        parts.extend([
+            f"DOCUMENT CONTEXT:\n{document_context}\n\n",
+            f"CONCLUSION DRAFT:\n{conclusion_draft}\n\n",
+            "Return the refined conclusion chapter markdown.\n",
+            "Strengthen weak arguments with specific evidence references.\n",
+        ])
+
+        if eo_grounding:
+            parts.append(
+                "Add or strengthen Executive Order citations where policy/legal analysis appears.\n"
+            )
+
+        parts.append("Correct any factual inconsistencies.")
+
+        return "".join(parts)
+
+    # -- context helpers ----------------------------------------------------
+
+    def _build_document_context(
+        self,
+        chapters_dir: Path,
+        chapter_entries: list[dict],
+        include_kaliya: bool,
+    ) -> str:
+        """Concatenate all chapter text, optionally with Kaliya analysis."""
+        parts: list[str] = []
+        for entry in chapter_entries:
+            if "conclusion" in entry["filename"]:
+                continue  # exclude prior conclusion from context
+            path = chapters_dir / entry["filename"]
+            if path.exists():
+                parts.append(path.read_text(encoding="utf-8"))
+
+        if include_kaliya:
+            kaliya_dir = self.cfg.build_dir / "kaliya"
+            if kaliya_dir.is_dir():
+                for report in sorted(kaliya_dir.glob("*/report.json")):
+                    try:
+                        data = json.loads(report.read_text(encoding="utf-8"))
+                    except (json.JSONDecodeError, OSError):
+                        continue
+                    if "narrative" in data:
+                        cluster = data.get("cluster", report.parent.name)
+                        parts.append(
+                            f"## Kaliya Analysis: {cluster}\n\n{data['narrative']}"
+                        )
+
+        return "\n\n---\n\n".join(parts)
+
+    def _load_style_rules(self, path: Path) -> str:
+        """Extract STYLE CONVENTIONS section from the style guide."""
+        if not path.exists():
+            self._logger.warning("Style guide not found: %s", path)
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(
+            r'(## STYLE CONVE[NT]+IONS.*?)(?=\n## |\Z)',
+            text, re.DOTALL,
+        )
+        return match.group(1).strip() if match else text.strip()
+
+    def _load_conclusion_rules(self, path: Path) -> str:
+        """Extract CONCLUSION PRO section from the style guide."""
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(
+            r'(## CONCLUSION.*?)(?=\n## |\Z)',
+            text, re.DOTALL,
+        )
+        return match.group(1).strip() if match else ""
+
+    def _extract_eo_references(
+        self, chapters_dir: Path, chapter_entries: list[dict]
+    ) -> list[str]:
+        """Extract unique Executive Order reference URLs from all chapter files.
+
+        Scans citation sections for Federal Register and whitehouse.gov URLs that
+        reference Executive Orders. These URLs can be queried directly via RAG's
+        /query_metadata endpoint to retrieve full EO documents.
+
+        Phase 8.1: EO grounding enhancement.
+
+        Returns: Sorted list of unique EO URLs (Federal Register, whitehouse.gov)
+        """
+        # Pattern to extract markdown link URLs: [text](url)
+        # This captures just the URL part inside parentheses
+        markdown_url_pattern = re.compile(
+            r'\[([^\]]+)\]\((https://(?:www\.)?(?:federalregister\.gov|whitehouse\.gov)[^\)]+)\)',
+            re.IGNORECASE
+        )
+
+        eo_urls = set()
+        for entry in chapter_entries:
+            if "conclusion" in entry.get("filename", ""):
+                continue  # Don't extract from prior conclusion
+            path = chapters_dir / entry["filename"]
+            if path.exists():
+                text = path.read_text(encoding="utf-8")
+                for match in markdown_url_pattern.finditer(text):
+                    url = match.group(2)  # Group 2 is the URL
+                    # Filter for INDIVIDUAL EO document URLs (not list pages)
+                    # Valid: /documents/YYYY/MM/DD/document-id/title
+                    # Invalid: /presidential-documents/executive-orders/... (list page)
+                    if '/documents/' in url and re.search(r'/documents/\d{4}/\d{2}/\d{2}/', url):
+                        # This is an individual document with date pattern
+                        eo_urls.add(url)
+                    elif 'executive-order' in url.lower() and '/documents/' in url:
+                        # Catch any other executive order document URLs
+                        eo_urls.add(url)
+
+        return sorted(eo_urls)
+
+    def _fetch_eo_grounding(self, eo_urls: list[str], rag_url: str) -> str:
+        """Query RAG service for full EO documents by URL and return formatted grounding text.
+
+        Uses /query_metadata endpoint to retrieve documents by exact source_url match.
+        This requires the RAG service to have the EO index loaded as the active index.
+
+        Phase 8.1: EO grounding enhancement.
+
+        Returns empty string if no URLs or if RAG service unavailable.
+        """
+        if not eo_urls:
+            return ""
+
+        import requests
+        grounding_parts = []
+
+        # Check which index is currently active
+        try:
+            ready_response = requests.get(f"{rag_url}/ready", timeout=5)
+            ready_data = ready_response.json()
+            active_folder = ready_data.get("active_folder", "")
+
+            # If not on EO index, try to switch
+            if "eo" not in active_folder.lower():
+                self._logger.info(f"  RAG service using {active_folder}, switching to EO index...")
+                try:
+                    switch_response = requests.post(
+                        f"{rag_url}/switch-index",
+                        json={"folder": "x_indices_eo"},
+                        timeout=30
+                    )
+                    if switch_response.status_code == 200:
+                        self._logger.info("  Switched to EO index")
+                    else:
+                        self._logger.warning(f"  Could not switch to EO index: {switch_response.status_code}")
+                        return ""  # Can't proceed without EO index
+                except Exception as e:
+                    self._logger.warning(f"  Failed to switch index: {e}")
+                    return ""
+        except Exception as e:
+            self._logger.warning(f"  Could not check RAG service status: {e}")
+            # Continue anyway, might still work
+
+        for url in eo_urls:
+            try:
+                # Query by exact source URL to get full document
+                response = requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={
+                        "source_url": url,
+                        "include_summaries": True,
+                        "include_qa": True,
+                        "max_results": 100  # Get all QA pairs for this document
+                    },
+                    timeout=30
+                )
+                response.raise_for_status()
+                data = response.json()
+
+                # Extract summary (high-level overview)
+                retrieved_docs = data.get("retrieved_docs", [])
+                retrieved_qa = data.get("retrieved_qa", [])
+
+                if not retrieved_docs and not retrieved_qa:
+                    self._logger.debug(f"  No content for URL: {url[:80]}")
+                    continue
+
+                # Build grounding section for this EO
+                if retrieved_docs:
+                    doc = retrieved_docs[0]
+                    title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary_text = doc.get("summary_text", "")
+
+                    # Format: title + summary + QA context samples
+                    parts = [f"### {title}\n"]
+
+                    if summary_text:
+                        parts.append(f"\n**Summary:**\n{summary_text}\n")
+
+                    # Add detailed content from QA pairs (source context gives full text)
+                    if retrieved_qa:
+                        parts.append(f"\n**Detailed Content:**\n")
+                        # Take first N QA pairs to show detailed sections
+                        for i, qa in enumerate(retrieved_qa[:5], 1):
+                            context = qa.get("context", "")
+                            if context:
+                                parts.append(f"\n{context}\n")
+
+                    grounding_parts.append("".join(parts))
+                    self._logger.debug(f"  Retrieved EO: {title[:60]}... ({len(retrieved_qa)} QA pairs)")
+
+            except Exception as e:
+                self._logger.warning(f"  Failed to fetch EO from {url[:60]}...: {e}")
+
+        if grounding_parts:
+            header = (
+                "## LEGAL FRAMEWORK GROUNDING\n\n"
+                "Full Executive Order documents referenced in this analysis:\n\n"
+            )
+            return header + "\n\n".join(grounding_parts)
+        return ""
+
+    # -- shared helpers (mirror FormatStage) ---------------------------------
+
+    @staticmethod
+    def _strip_code_fencing(text: str) -> str:
+        """Strip leading/trailing markdown code fences if present."""
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
+            stripped = stripped[first_nl + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        return stripped
+
+    def _log_usage(self, label: str, usage: dict, model: str) -> None:
+        cost = self._calculate_cost(model, usage["input"], usage["output"])
+        self._logger.info(
+            "    %s — in: %s  out: %s  think: %s  ($%.4f)",
+            label,
+            f"{usage['input']:,}",
+            f"{usage['output']:,}",
+            f"{usage['thinking']:,}",
+            cost,
+        )
+
+    def _calculate_cost(
+        self, model: str, input_tokens: int, output_tokens: int,
+    ) -> float:
+        rates = self._PRICING.get(model, {"input": 2.50, "output": 10.00})
+        return (
+            input_tokens / 1_000_000 * rates["input"]
+            + output_tokens / 1_000_000 * rates["output"]
+        )
+
+
+# ---------------------------------------------------------------------------
 # Phase 6 — Publish
 # ---------------------------------------------------------------------------
 
@@ -2266,6 +2871,7 @@ STAGES = [
     ("chapters", ChapterStage),
     ("kaliya",   KaliyaStage),
     ("format",   FormatStage),
+    ("conclude", ConcludeStage),
     ("publish",  PublishStage),
 ]
 
@@ -2357,6 +2963,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stage 5: Apply LLM style formatter to chapters")
     stages.add_argument("--no-format", dest="format", action="store_false",
                         help="Skip style formatter even if enabled in config")
+    stages.add_argument("--conclude",  action="store_true", default=None,
+                        help="Stage 5b: Generate conclusion chapter via LLM")
+    stages.add_argument("--no-conclude", dest="conclude", action="store_false",
+                        help="Skip conclusion generation even if enabled in config")
     stages.add_argument("--publish",  action="store_true", help="Stage 6: Build PDF / HTML / Confluence output")
     stages.add_argument("--all",      action="store_true", help="Run all stages (1-6)")
 
@@ -2402,8 +3012,17 @@ def main(argv: list[str] | None = None) -> None:
         stage_order = [name for name, _ in STAGES]
         selected.sort(key=lambda s: stage_order.index(s))
 
+    # Handle --conclude/--no-conclude override
+    if args.conclude is False:
+        cfg.conclude.enabled = False
+    elif args.conclude is True and "conclude" not in selected:
+        cfg.conclude.enabled = True
+        selected.append("conclude")
+        stage_order = [name for name, _ in STAGES]
+        selected.sort(key=lambda s: stage_order.index(s))
+
     if not selected:
-        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --publish, or --all.")
+        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --publish, or --all.")
 
     run_pipeline(cfg, selected, dry_run=args.dry_run)
 
