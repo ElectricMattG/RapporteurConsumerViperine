@@ -152,7 +152,7 @@ class EOLinkingConfig:
     domain_exclude: list[str] = field(default_factory=list)
     eo_book_dir: str = "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"
     eo_index_folder: str = "x_indices_eo"
-    batch_size: int = 25
+    batch_size: int = 150
     rag_summaries: int = 3
     rag_qa_pairs: int = 3
     analysis_provider: str = "gemini"
