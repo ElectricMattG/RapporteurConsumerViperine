@@ -4,6 +4,8 @@ Orchestrates the EO linking pipeline:
   Phase 1: extract .gov/.mil articles, build EO registry
   Phase 2: batch articles, query RAG, build conversation JSON
   Phase 3: LINK-REFLECT prompt tuple per batch via Gemini
+  Phase 4: extract linkage records from REFLECT, build implementation cache
+  Phase 5: generate Mermaid precedence diagrams per chapter
 """
 
 from __future__ import annotations
@@ -14,8 +16,12 @@ from pathlib import Path
 from src.components.analysis.eo_linking import (_RAG_PRICING, ArticleRecord,
                                                 ConversationBuilder,
                                                 CostTracker, EOChatDriver,
-                                                EORegistry, GovMilExtractor,
-                                                IndexLoader, LinkReflectDriver,
+                                                EODiagramGenerator,
+                                                EOImplementationCache,
+                                                EONameLookup, EORegistry,
+                                                GovMilExtractor, IndexLoader,
+                                                LinkageExtractor,
+                                                LinkReflectDriver,
                                                 TokenBudgetBatcher,
                                                 load_index_catalog)
 from src.config_handler import Base
@@ -30,6 +36,8 @@ class EOLinkStage(Base):
     Phase 2 — batches articles, queries RAG per article, writes
     per-batch conversation JSON.
     Phase 3 — LINK-REFLECT two-call LLM synthesis per batch.
+    Phase 4 — Linkage extraction and implementation cache build.
+    Phase 5 — Mermaid precedence diagram generation per chapter.
     """
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -135,6 +143,17 @@ class EOLinkStage(Base):
         )
 
         eo_grounding = registry.full_grounding_text
+
+        # Phase 5.5: Reconstitute full EO index via /query_metadata for REFLECT
+        from src.components.publisher.rapporteur_cli import \
+            _fetch_full_eo_grounding
+        eo_article_grounding = _fetch_full_eo_grounding(eo_cfg.rag_service_url)
+        if eo_article_grounding:
+            self._logger.info(
+                "  Reconstituted full EO article grounding (%d chars)",
+                len(eo_article_grounding),
+            )
+
         completed = 0
         skipped = 0
 
@@ -151,6 +170,7 @@ class EOLinkStage(Base):
                 batch_index=batch_idx,
                 eo_grounding=eo_grounding,
                 batch_conversations=batch_convs,
+                eo_article_grounding=eo_article_grounding,
             )
             if result.get("status") == "complete":
                 completed += 1
@@ -174,10 +194,74 @@ class EOLinkStage(Base):
         self._logger.info("  Estimated cost:     $%.4f", est_cost)
         self._logger.info("=" * 60)
 
-        # -- Phase 4+ placeholder -------------------------------------------
-        # TODO: LinkageExtractor, EOImplementationCache
-        self._logger.info(
-            "Phase 3 complete — %d batches linked. "
-            "Phase 4 (Linkage Extraction) not yet implemented.",
-            completed,
+        # -- Phase 4: Linkage Extraction & Cache Build ----------------------
+        self._logger.info("Starting Phase 4 — Linkage Extraction on %d batches...",
+                          len(batches))
+
+        extractor_p4 = LinkageExtractor()
+        cache = EOImplementationCache(cache_path=eo_cfg.output_cache_path)
+
+        total_extracted = 0
+        total_new = 0
+        for batch_idx in range(len(batches)):
+            reflect_path = output_dir / f"batch_{batch_idx}" / "reflect.md"
+            if not reflect_path.exists():
+                self._logger.warning("Batch %d — no reflect.md, skipping.", batch_idx)
+                continue
+            reflect_text = reflect_path.read_text(encoding="utf-8")
+            records = extractor_p4.extract(reflect_text, batch_id=f"batch_{batch_idx}")
+            total_extracted += len(records)
+            if records:
+                new_count = cache.append(records)
+                total_new += new_count
+
+        # Precedence validation
+        conflicts = cache.validate_precedence()
+        for warning in conflicts:
+            self._logger.warning("  Precedence: %s", warning)
+
+        summary = cache.summary()
+        self._logger.info("=" * 60)
+        self._logger.info("EO Linking — Phase 4 Summary")
+        self._logger.info("  Records extracted:  %d", total_extracted)
+        self._logger.info("  New records cached: %d", total_new)
+        self._logger.info("  Unique EOs:         %d", summary["unique_eos"])
+        self._logger.info("  Records with comms: %d", summary["records_with_comms"])
+        self._logger.info("  Unique domains:     %d", summary["unique_domains"])
+        self._logger.info("  Cache path:         %s", eo_cfg.output_cache_path)
+        self._logger.info("  Precedence conflicts: %d", len(conflicts))
+        self._logger.info("=" * 60)
+
+        # -- Phase 5: Mermaid Diagram Generation ----------------------------
+        self._logger.info("Starting Phase 5 — Mermaid Diagram Generation...")
+
+        # Build EO name lookup (official titles)
+        names_path = output_dir / "eo_names.json"
+        name_lookup = EONameLookup(cache_path=names_path)
+        name_lookup.load()
+        eo_index_path = Path.cwd() / eo_cfg.eo_index_folder
+        name_lookup.populate(
+            impl_cache_path=eo_cfg.output_cache_path,
+            eo_index_dir=eo_index_path,
+            chapters_dir=eo_cfg.eo_book_dir,
         )
+        name_lookup.save()
+
+        diagram_gen = EODiagramGenerator()
+        prec_graph = cache.precedence_graph()
+        manifest = diagram_gen.generate_for_chapters(
+            registry=registry,
+            precedence_graph=prec_graph,
+            output_dir=output_dir,
+            name_lookup=name_lookup,
+        )
+
+        total_warnings = sum(len(m["warnings"]) for m in manifest)
+        self._logger.info("=" * 60)
+        self._logger.info("EO Linking — Phase 5 Summary")
+        self._logger.info("  Diagrams generated: %d", len(manifest))
+        self._logger.info("  Total nodes:        %d",
+                          sum(m["nodes"] for m in manifest))
+        self._logger.info("  Warnings:           %d", total_warnings)
+        self._logger.info("  Output dir:         %s/diagrams/", output_dir)
+        self._logger.info("=" * 60)

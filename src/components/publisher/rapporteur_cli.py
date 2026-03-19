@@ -78,6 +78,149 @@ log = logging.getLogger("rapporteur")
 
 
 # ---------------------------------------------------------------------------
+# Phase 5.5 — Full EO index grounding (shared helper)
+# ---------------------------------------------------------------------------
+
+def _load_all_eo_urls(project_root: Path | None = None) -> list[str]:
+    """Read ALL unique source URLs from the EO summaries index JSONL.
+
+    Phase 5.5: Extract every URL so we can reconstitute ALL EOs via
+    ``/query_metadata`` — no filtering by what chapters cite.
+    """
+    if project_root is None:
+        project_root = Path(_PROJECT_ROOT)
+
+    index_path = project_root / "x_indices_eo" / "research_summaries_with_embeddings_combined.jsonl"
+    if not index_path.exists():
+        log.warning("EO index not found at %s", index_path)
+        return []
+
+    urls: set[str] = set()
+    try:
+        with open(index_path, "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                record = json.loads(line)
+                url = record.get("source_url", "").strip()
+                if url:
+                    urls.add(url)
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning("Failed to read EO index URLs: %s", exc)
+        return []
+
+    return sorted(urls)
+
+
+def _fetch_full_eo_grounding(rag_url: str, project_root: Path | None = None) -> str:
+    """Reconstitute ALL EO articles via ``/query_metadata`` and return grounding text.
+
+    Phase 5.5: Always inject the FULL reconstituted EO index into grounding.
+    This avoids false negatives from URL-filtered grounding — every EO's
+    summary + QA context is included so the LLM can correctly identify
+    relationships, rescissions, and precedence.
+
+    Steps:
+      1. Read all source URLs from the EO summaries JSONL.
+      2. Switch RAG service to ``x_indices_eo`` if needed.
+      3. Call ``/query_metadata`` per URL to get summary + QA pairs.
+      4. Format into grounding text.
+
+    Returns formatted grounding text, or empty string on failure.
+    """
+    all_urls = _load_all_eo_urls(project_root)
+    if not all_urls:
+        return ""
+
+    if not rag_url:
+        log.warning("No RAG service URL — cannot reconstitute EO articles")
+        return ""
+
+    import requests as _requests
+
+    # Ensure the EO index is active
+    try:
+        ready = _requests.get(f"{rag_url}/ready", timeout=5)
+        active = ready.json().get("active_folder", "")
+        if "eo" not in active.lower():
+            log.info("RAG not on EO index (%s), switching to x_indices_eo...", active)
+            resp = _requests.post(
+                f"{rag_url}/switch-index",
+                json={"folder": "x_indices_eo"},
+                timeout=30,
+            )
+            if resp.status_code != 200:
+                log.warning("Could not switch to EO index: %s", resp.status_code)
+                return ""
+            log.info("Switched to EO index")
+    except Exception as exc:
+        log.warning("Could not check/switch RAG index: %s", exc)
+        # continue anyway — might already be on the right index
+
+    grounding_parts: list[str] = []
+
+    for url in all_urls:
+        try:
+            resp = _requests.post(
+                f"{rag_url}/query_metadata",
+                json={
+                    "source_url": url,
+                    "include_summaries": True,
+                    "include_qa": True,
+                    "max_results": 100,
+                },
+                timeout=30,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+
+            retrieved_docs = data.get("retrieved_docs", [])
+            retrieved_qa = data.get("retrieved_qa", [])
+
+            if not retrieved_docs and not retrieved_qa:
+                continue
+
+            # Build grounding section for this EO
+            if retrieved_docs:
+                doc = retrieved_docs[0]
+                title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                summary_text = doc.get("summary_text", "")
+
+                parts = [f"### {title}\n"]
+                parts.append(f"**Source:** {url}\n")
+
+                if summary_text:
+                    parts.append(f"\n**Summary:**\n{summary_text}\n")
+
+                # QA context is the actual reconstituted article text
+                if retrieved_qa:
+                    parts.append("\n**Detailed Content (Federal Register):**\n")
+                    for qa in retrieved_qa:
+                        context = qa.get("context", "")
+                        if context:
+                            parts.append(f"\n{context}\n")
+
+                grounding_parts.append("".join(parts))
+                log.debug(
+                    "Retrieved EO: %s (%d QA pairs)", title[:60], len(retrieved_qa),
+                )
+
+        except Exception as exc:
+            log.warning("Failed to fetch EO from %s: %s", url[:80], exc)
+
+    if not grounding_parts:
+        return ""
+
+    header = (
+        "## LEGAL FRAMEWORK GROUNDING\n\n"
+        f"Full Executive Order index ({len(grounding_parts)} documents) "
+        "reconstituted via /query_metadata:\n\n"
+    )
+    return header + "\n\n".join(grounding_parts)
+
+
+# ---------------------------------------------------------------------------
 # Stage 1 — Export
 # ---------------------------------------------------------------------------
 
@@ -2006,20 +2149,12 @@ class ConcludeStage(Base):
             self._logger.info("  (dry-run) would generate conclusion chapter")
             return
 
-        # Phase 8.1: Extract EO reference URLs and fetch grounding from RAG
-        eo_urls = self._extract_eo_references(chapters_dir, chapter_entries)
-        eo_grounding = ""
-        if eo_urls:
-            self._logger.info(f"  Extracted {len(eo_urls)} EO reference URLs from chapters")
-            for url in eo_urls:
-                self._logger.debug(f"    - {url}")
-            eo_grounding = self._fetch_eo_grounding(eo_urls, co.rag_service_url)
-            if eo_grounding:
-                self._logger.info(f"  Retrieved EO grounding ({len(eo_grounding)} chars)")
-            else:
-                self._logger.warning("  No EO grounding retrieved from RAG service")
+        # Phase 5.5: Always reconstitute full EO index via /query_metadata
+        eo_grounding = _fetch_full_eo_grounding(co.rag_service_url)
+        if eo_grounding:
+            self._logger.info("  Reconstituted full EO grounding (%d chars)", len(eo_grounding))
         else:
-            self._logger.info("  No EO reference URLs found in chapters")
+            self._logger.warning("  No EO grounding available (RAG service unreachable or index empty)")
 
         # Cost tracking accumulators
         total_input_tokens = 0
@@ -4409,14 +4544,12 @@ class IntroduceStage(Base):
             self._logger.info("  (dry-run) would generate introduction chapter")
             return
 
-        # EO grounding (reuse ConcludeStage pattern)
-        eo_urls = self._extract_eo_references(chapters_dir, chapter_entries)
-        eo_grounding = ""
-        if eo_urls:
-            self._logger.info("  Extracted %d EO reference URLs", len(eo_urls))
-            eo_grounding = self._fetch_eo_grounding(eo_urls, ic.rag_service_url)
-            if eo_grounding:
-                self._logger.info("  Retrieved EO grounding (%d chars)", len(eo_grounding))
+        # Phase 5.5: Always reconstitute full EO index via /query_metadata
+        eo_grounding = _fetch_full_eo_grounding(ic.rag_service_url)
+        if eo_grounding:
+            self._logger.info("  Reconstituted full EO grounding (%d chars)", len(eo_grounding))
+        else:
+            self._logger.warning("  No EO grounding available (RAG service unreachable or index empty)")
 
         # Build citable EO list from chapters (constrains LLM to known EOs)
         citable_eo_list = self._build_citable_eo_list(chapters_dir, chapter_entries)
