@@ -90,6 +90,27 @@ class ConcludeConfig:
 
 
 @dataclass
+class CiteConfig:
+    """Citation resolver configuration."""
+    enabled: bool = False
+    eo_name_max_chars: int = 60
+    resolve_web_citations: bool = True
+    apa_first_mention_title: bool = True   # Include truncated title on first citation per chapter
+
+
+@dataclass
+class IntroduceConfig:
+    """Introduction generation configuration — Phase 8."""
+    enabled: bool = False
+    style_guide: str = "docs/style_guide.md"
+    provider: str = "openai"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "high"
+    include_kaliya: bool = False
+    rag_service_url: str = "http://localhost:8000"
+
+
+@dataclass
 class EditConfig:
     """Editorial review configuration — Phase 9."""
     enabled: bool = False
@@ -99,6 +120,8 @@ class EditConfig:
     reasoning_effort: str = "high"
     edit_log: bool = True              # Write structured edit log to build dir
     executive_summary: bool = True     # Generate executive summary per chapter
+    target_chapter: str | None = None  # If set, only edit this chapter file
+    custom_instructions: str | None = None  # Extra editorial instructions
 
 
 @dataclass
@@ -113,6 +136,31 @@ class PublishConfig:
     formats: list[str] = field(default_factory=lambda: ["pdf"])
     pdf_engine: str = "pdflatex"
     confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
+
+
+@dataclass
+class EOLinkingConfig:
+    """EO Event Linking configuration — map .gov/.mil comms to EO framework."""
+    enabled: bool = False
+    rag_service_url: str = "http://localhost:8080"
+    index_folders: list[str] = field(default_factory=lambda: [
+        "x_indices_hegseth", "x_indices_trump",
+    ])
+    domain_include: list[str] = field(default_factory=lambda: [
+        ".gov", ".mil", ".gov.il", "dirco.gov.za",
+    ])
+    domain_exclude: list[str] = field(default_factory=list)
+    eo_book_dir: str = "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"
+    eo_index_folder: str = "x_indices_eo"
+    batch_size: int = 25
+    rag_summaries: int = 3
+    rag_qa_pairs: int = 3
+    analysis_provider: str = "gemini"
+    analysis_model: str = "gemini-3.1-pro-preview"
+    analysis_reasoning_effort: str = "high"
+    analysis_location: str = "global"
+    output_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"
+    shared_volume: str = "/mnt/workspace_2"
 
 
 # ---------------------------------------------------------------------------
@@ -132,8 +180,12 @@ class PipelineConfig:
     kaliya: KaliyaConfig = field(default_factory=KaliyaConfig)
     format: FormatConfig = field(default_factory=FormatConfig)
     conclude: ConcludeConfig = field(default_factory=ConcludeConfig)
+    introduce: IntroduceConfig = field(default_factory=IntroduceConfig)
     edit: EditConfig = field(default_factory=EditConfig)
+    cite: CiteConfig = field(default_factory=CiteConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
+    eo_linking: EOLinkingConfig = field(default_factory=EOLinkingConfig)
+    force: bool = False
 
     @property
     def build_dir(self) -> Path:
@@ -247,6 +299,22 @@ class PipelineConfig:
             rag_service_url=rag_url,
         )
 
+        # --- introduce ---
+        intro = raw.get("introduce") or {}
+        sg_intro = intro.get("style_guide", "docs/style_guide.md")
+        if sg_intro and not Path(sg_intro).is_absolute():
+            sg_intro = str((yaml_dir / sg_intro).resolve())
+        rag_url_intro = intro.get("rag_service_url") or os.getenv("RAG_SERVICE_URL", "http://localhost:8000")
+        cfg.introduce = IntroduceConfig(
+            enabled=intro.get("enabled", False),
+            style_guide=sg_intro,
+            provider=intro.get("provider", "openai"),
+            model=intro.get("model", "gpt-5.4"),
+            reasoning_effort=intro.get("reasoning_effort", "high"),
+            include_kaliya=intro.get("include_kaliya", False),
+            rag_service_url=rag_url_intro,
+        )
+
         # --- edit ---
         ed = raw.get("edit") or {}
         sg_ed = ed.get("style_guide", "docs/style_guide.md")
@@ -262,6 +330,15 @@ class PipelineConfig:
             executive_summary=ed.get("executive_summary", True),
         )
 
+        # --- cite ---
+        ci = raw.get("cite") or {}
+        cfg.cite = CiteConfig(
+            enabled=ci.get("enabled", False),
+            eo_name_max_chars=ci.get("eo_name_max_chars", 60),
+            resolve_web_citations=ci.get("resolve_web_citations", True),
+            apa_first_mention_title=ci.get("apa_first_mention_title", True),
+        )
+
         # --- publish ---
         pu = raw.get("publish") or {}
         conf = pu.get("confluence") or {}
@@ -273,6 +350,29 @@ class PipelineConfig:
                 space_key=conf.get("space_key", ""),
                 parent_page=conf.get("parent_page", ""),
             ),
+        )
+
+        # --- eo_linking ---
+        eo = raw.get("eo_linking") or {}
+        cfg.eo_linking = EOLinkingConfig(
+            enabled=eo.get("enabled", False),
+            rag_service_url=eo.get("rag_service_url", "http://localhost:8080"),
+            index_folders=eo.get("index_folders", ["x_indices_hegseth", "x_indices_trump"]),
+            domain_include=eo.get("domain_include", [".gov", ".mil", ".gov.il", "dirco.gov.za"]),
+            domain_exclude=eo.get("domain_exclude", []),
+            eo_book_dir=eo.get("eo_book_dir",
+                               "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"),
+            eo_index_folder=eo.get("eo_index_folder", "x_indices_eo"),
+            batch_size=eo.get("batch_size", 25),
+            rag_summaries=eo.get("rag_summaries", 3),
+            rag_qa_pairs=eo.get("rag_qa_pairs", 3),
+            analysis_provider=eo.get("analysis_provider", "gemini"),
+            analysis_model=eo.get("analysis_model", "gemini-3.1-pro-preview"),
+            analysis_reasoning_effort=eo.get("analysis_reasoning_effort", "high"),
+            analysis_location=eo.get("analysis_location", "global"),
+            output_cache_path=eo.get("output_cache_path",
+                                     "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"),
+            shared_volume=eo.get("shared_volume", "/mnt/workspace_2"),
         )
 
         return cfg

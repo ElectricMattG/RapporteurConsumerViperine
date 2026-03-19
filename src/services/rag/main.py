@@ -87,6 +87,8 @@ class ServiceState:
         self.eo_overlay_enabled: bool = False
         self.events_overlay_enabled: bool = False
         self.eo_top_k: int = 10
+        # Concurrency guard: prevents /query_llm from reading mid-switch
+        self.index_lock: asyncio.Lock = asyncio.Lock()
 
 state = ServiceState()
 
@@ -1621,38 +1623,41 @@ async def switch_index(request: SwitchIndexRequest):
     old_folder = state.active_folder
     logger.info(f"🔀 Switching index: {old_folder} → {request.folder}")
 
-    # Load all indices from new folder
-    new_summaries = load_summaries_index(str(summaries_path))
+    # HC-12: hold index_lock during the entire switch so concurrent
+    # /query_llm calls block until the new index is fully loaded.
+    async with state.index_lock:
+        # Load all indices from new folder
+        new_summaries = load_summaries_index(str(summaries_path))
 
-    qa_path = _find_qa_file(folder_path)
-    if qa_path:
-        new_qa = load_qa_index(str(qa_path))
-        state.qa_items = new_qa
-        state.qa_index_path = str(qa_path)
-        state.qa_index_loaded = True
-    else:
-        state.qa_items = []
-        state.qa_index_path = None
-        state.qa_index_loaded = False
+        qa_path = _find_qa_file(folder_path)
+        if qa_path:
+            new_qa = load_qa_index(str(qa_path))
+            state.qa_items = new_qa
+            state.qa_index_path = str(qa_path)
+            state.qa_index_loaded = True
+        else:
+            state.qa_items = []
+            state.qa_index_path = None
+            state.qa_index_loaded = False
 
-    linked_path = _find_enrichment_file(folder_path, "linked_media_bboa")
-    unlinked_path = _find_enrichment_file(folder_path, "unlinked_media_bboa")
+        linked_path = _find_enrichment_file(folder_path, "linked_media_bboa")
+        unlinked_path = _find_enrichment_file(folder_path, "unlinked_media_bboa")
 
-    state.linked_enrichments = load_enrichment_index(str(linked_path)) if linked_path else {}
-    state.linked_index_path = str(linked_path) if linked_path else None
-    state.unlinked_enrichments = load_enrichment_index(str(unlinked_path)) if unlinked_path else {}
-    state.unlinked_index_path = str(unlinked_path) if unlinked_path else None
+        state.linked_enrichments = load_enrichment_index(str(linked_path)) if linked_path else {}
+        state.linked_index_path = str(linked_path) if linked_path else None
+        state.unlinked_enrichments = load_enrichment_index(str(unlinked_path)) if unlinked_path else {}
+        state.unlinked_index_path = str(unlinked_path) if unlinked_path else None
 
-    from src.services.rag.enrichment_retriever import EnrichmentRetriever
-    state.enrichment_retriever = EnrichmentRetriever(
-        linked_map=state.linked_enrichments,
-        unlinked_map=state.unlinked_enrichments,
-    )
+        from src.services.rag.enrichment_retriever import EnrichmentRetriever
+        state.enrichment_retriever = EnrichmentRetriever(
+            linked_map=state.linked_enrichments,
+            unlinked_map=state.unlinked_enrichments,
+        )
 
-    # Atomic-ish commit: update summaries + folder name last
-    state.summaries = new_summaries
-    state.index_path = str(summaries_path)
-    state.active_folder = request.folder
+        # Atomic commit: update summaries + folder name last
+        state.summaries = new_summaries
+        state.index_path = str(summaries_path)
+        state.active_folder = request.folder
 
     # Notify consumers to re-route their output to the new folder
     try:
@@ -1848,6 +1853,12 @@ async def query_llm(request: QueryLLMRequest):
     Performs vector similarity search, then uses retrieved documents
     as grounding data for LLM response generation.
     """
+    # HC-12: snapshot active folder under the index lock so a concurrent
+    # /switch-index cannot mutate state between our reads.  The lock is
+    # held exclusively by switch_index during the heavy reload; here we
+    # only acquire it briefly to capture a consistent reference set.
+    async with state.index_lock:
+        query_folder = state.active_folder
     start_time = time.time()
     request_id = str(uuid.uuid4())
     session_id = f"query_{int(time.time())}"

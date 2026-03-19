@@ -14,19 +14,19 @@ Orchestrates the full chat-to-published-document pipeline:
 Usage
 -----
     # Export conversations from the live frontend:
-    python docs/rapporteur_cli.py docs/AtrumVolentia/document.yaml --export
+    python /home/electric/workspace/RapporteurApp/src/components/publisher/rapporteur_cli.py docs/CultureTechnologyProcurementMedia/document.yaml --export
 
     # Export + parse + build chapters:
-    python docs/rapporteur_cli.py docs/AtrumVolentia/document.yaml --export --parse --chapters
+    python docs/rapporteur_cli.py docs/CultureTechnologyProcurementMedia/document.yaml --export --parse --chapters
 
     # Run the full pipeline:
-    python docs/rapporteur_cli.py docs/AtrumVolentia/document.yaml --all
+    python docs/rapporteur_cli.py docs/CultureTechnologyProcurementMedia/document.yaml --all
 
     # Dry-run (no writes):
-    python docs/rapporteur_cli.py docs/AtrumVolentia/document.yaml --export --dry-run
+    python docs/rapporteur_cli.py docs/CultureTechnologyProcurementMedia/document.yaml --export --dry-run
 
     # Override build directory:
-    python docs/rapporteur_cli.py docs/AtrumVolentia/document.yaml --all --build-dir /tmp/test_build
+    python docs/rapporteur_cli.py docs/CultureTechnologyProcurementMedia/document.yaml --all --build-dir /tmp/test_build
 """
 
 from __future__ import annotations
@@ -42,18 +42,27 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
+# Ensure project root is on sys.path so `src.*` imports work when invoked directly.
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[3])
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
 import requests
 from PIL import Image
 
+from src.components.analysis.eo_linking_stage import EOLinkStage
 # Re-use rendering helpers from the original document builder.
-from src.components.publisher.rapporteur_docs import (build_enrichment_section,
+from src.components.publisher.rapporteur_docs import (_CITE_GROUP_RE,
+                                                      _cite_token_to_cm_key,
+                                                      build_enrichment_section,
                                                       build_references,
                                                       build_top_sources,
                                                       extract_abstract,
                                                       postprocess_response,
                                                       resolve_inline_citations)
 from src.config_handler import Base
-from src.models.publisher import (ChapterSpec, ConcludeConfig, FormatConfig,
+from src.models.publisher import (ChapterSpec, CiteConfig, ConcludeConfig,
+                                  FormatConfig, IntroduceConfig,
                                   PipelineConfig)
 
 # ---------------------------------------------------------------------------
@@ -1532,7 +1541,7 @@ class FormatStage(Base):
                 continue
 
             # Skip chapters already formatted in a prior run
-            if entry.get("format_status") == "done":
+            if entry.get("format_status") == "done" and not self.cfg.force:
                 self._logger.info(
                     "  [%d/%d] %s — already formatted, skipping.",
                     idx + 1, len(chapter_entries), entry["filename"],
@@ -1975,7 +1984,7 @@ class ConcludeStage(Base):
             return
 
         # Idempotent — skip if already generated
-        if manifest.get("conclude", {}).get("generated"):
+        if manifest.get("conclude", {}).get("generated") and not self.cfg.force:
             self._logger.info("  Conclusion already generated — skipping.")
             return
 
@@ -2573,6 +2582,11 @@ class EditStage(Base):
             self._logger.info("  Editorial review disabled — skipping.")
             return
 
+        # Targeted single-chapter edit mode
+        if ec.target_chapter:
+            self._run_targeted()
+            return
+
         chapters_dir = self.cfg.build_dir / "chapters"
         manifest_path = chapters_dir / "manifest.json"
         if not manifest_path.exists():
@@ -2586,7 +2600,7 @@ class EditStage(Base):
             return
 
         # Idempotent — skip if already reviewed
-        if manifest.get("edit", {}).get("reviewed"):
+        if manifest.get("edit", {}).get("reviewed") and not self.cfg.force:
             self._logger.info("  Editorial review already done — skipping.")
             return
 
@@ -2761,6 +2775,284 @@ class EditStage(Base):
         self._logger.info("    Thinking tokens:  %s", f"{total_thinking_tokens:,}")
         self._logger.info("    Estimated cost:   $%.4f", cost)
         self._logger.info("  Updated manifest.json with edit metadata.")
+
+    # -- targeted (single-chapter) edit ------------------------------------
+
+    def _run_targeted(self) -> None:
+        """Run two-call editorial review on a single chapter.
+
+        Call 1 (REVIEW): produces JSON edit log with scores, bias assessment,
+        executive summary, and specific edit recommendations.
+        Call 2 (APPLY): applies the recommended edits to the chapter text.
+        """
+        ec = self.cfg.edit
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to review.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+
+        # Find target chapter
+        target_entry = None
+        target_idx = None
+        for i, entry in enumerate(chapter_entries):
+            if ec.target_chapter in entry["filename"]:
+                target_entry = entry
+                target_idx = i
+                break
+
+        if target_entry is None:
+            self._logger.warning("Chapter not found: %s", ec.target_chapter)
+            return
+
+        chapter_path = chapters_dir / target_entry["filename"]
+        if not chapter_path.exists():
+            self._logger.warning("Chapter file missing: %s", chapter_path)
+            return
+
+        chapter_text = chapter_path.read_text(encoding="utf-8")
+
+        # Load style context
+        style_rules = self._load_style_rules(Path(ec.style_guide))
+        editorial_principles = self._load_editorial_principles(Path(ec.style_guide))
+
+        # Build citable EO list for LLM-generated chapters
+        citable_eo_list = ""
+        if self._is_llm_generated_chapter(target_entry, target_entry["filename"]):
+            citable_eo_list = self._build_citable_eo_list(chapters_dir, chapter_entries)
+            if citable_eo_list:
+                self._logger.info("  Built citable EO index (%d entries)",
+                                  citable_eo_list.count("- Exec."))
+
+        self._logger.info(
+            "  Targeted editorial: %s (%s, %s, reasoning: %s)",
+            target_entry["filename"], ec.model, ec.provider,
+            ec.reasoning_effort,
+        )
+        if ec.custom_instructions:
+            self._logger.info("  Custom instructions: %s", ec.custom_instructions)
+
+        if self.dry_run:
+            self._logger.info("  (dry-run) would edit %s", target_entry["filename"])
+            return
+
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+
+        # ── Call 1: REVIEW ──
+        self._logger.info("  Call 1: REVIEW (%s)", target_entry["filename"])
+        review_prompt = self._build_targeted_review_prompt(
+            chapter_text, editorial_principles, style_rules,
+            target_entry, ec.custom_instructions, citable_eo_list,
+        )
+        review_response, usage_1 = self._generate_with_usage(ec, review_prompt)
+        total_input_tokens += usage_1.get("input", 0)
+        total_output_tokens += usage_1.get("output", 0)
+        total_thinking_tokens += usage_1.get("thinking", 0)
+        self._log_usage("review", usage_1, ec.model)
+
+        if not review_response or not review_response.strip():
+            self._logger.warning("  Empty review response — aborting.")
+            return
+
+        edit_log = self._parse_edit_log(review_response)
+        if not edit_log:
+            self._logger.warning("  Could not parse edit log — aborting.")
+            return
+
+        scores = edit_log.get("document_score", {})
+        self._logger.info(
+            "  Review complete — scores: consistency=%s, cohesiveness=%s, "
+            "bias_risk=%s, coherence=%s",
+            scores.get("stylistic_consistency", "?"),
+            scores.get("argument_cohesiveness", "?"),
+            scores.get("bias_risk", "?"),
+            scores.get("logical_coherence", "?"),
+        )
+        edits = edit_log.get("edits", [])
+        self._logger.info("  Edits recommended: %d", len(edits))
+
+        # Write edit log
+        if ec.edit_log:
+            log_path = self.cfg.build_dir / "editorial_edit_log.json"
+            log_data = {
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "model": ec.model,
+                "provider": ec.provider,
+                "target_chapter": target_entry["filename"],
+                **edit_log,
+            }
+            log_path.write_text(
+                json.dumps(log_data, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self._logger.info("  Wrote editorial_edit_log.json")
+
+        exec_summary = ""
+        for es in edit_log.get("executive_summaries", []):
+            if es.get("summary"):
+                exec_summary = es["summary"]
+                break
+
+        # ── Call 2: APPLY ──
+        self._logger.info("  Call 2: APPLY edits to %s", target_entry["filename"])
+        apply_prompt = self._build_apply_prompt(
+            chapter_text, edits, exec_summary, ec.executive_summary,
+        )
+        # Inject custom instructions and citation constraint into apply prompt
+        extra_parts = []
+        if ec.custom_instructions:
+            extra_parts.append(f"ADDITIONAL INSTRUCTIONS:\n{ec.custom_instructions}")
+        if citable_eo_list:
+            extra_parts.append(
+                f"{citable_eo_list}\n\n"
+                "CITATION CONSTRAINT:\n"
+                "- You may ONLY reference Executive Orders from the CITABLE list above.\n"
+                "- Do NOT introduce any Executive Order from your own knowledge.\n"
+                "- Do NOT remove or alter existing citation links."
+            )
+        if extra_parts:
+            apply_prompt = apply_prompt.rstrip() + "\n\n" + "\n\n".join(extra_parts) + "\n"
+
+        revised_text, usage_2 = self._generate_with_usage(ec, apply_prompt)
+        total_input_tokens += usage_2.get("input", 0)
+        total_output_tokens += usage_2.get("output", 0)
+        total_thinking_tokens += usage_2.get("thinking", 0)
+        self._log_usage("apply", usage_2, ec.model)
+
+        if revised_text and revised_text.strip():
+            revised_text = self._strip_code_fencing(revised_text)
+            chapter_path.write_text(revised_text, encoding="utf-8")
+            self._logger.info("  Updated %s (%s chars)",
+                              target_entry["filename"], f"{len(revised_text):,}")
+        else:
+            self._logger.warning("  Empty apply response — keeping original.")
+            return
+
+        cost = self._calculate_cost(
+            ec.model, total_input_tokens, total_output_tokens,
+        )
+        self._logger.info("  ─── Cost Summary ───")
+        self._logger.info("    Model:           %s", ec.model)
+        self._logger.info("    Input tokens:    %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:   %s", f"{total_output_tokens:,}")
+        self._logger.info("    Thinking tokens: %s", f"{total_thinking_tokens:,}")
+        self._logger.info("    Estimated cost:  $%.4f", cost)
+
+    def _build_targeted_review_prompt(
+        self,
+        chapter_text: str,
+        editorial_principles: str,
+        style_rules: str,
+        chapter_entry: dict,
+        custom_instructions: str | None,
+        citable_eo_list: str = "",
+    ) -> str:
+        """Build the REVIEW prompt for a single-chapter editorial assessment."""
+        parts = [
+            "You are performing an editorial review of a single chapter "
+            "within a published analysis document.\n\n",
+            f"EDITORIAL PRINCIPLES:\n{editorial_principles}\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            f"CHAPTER: {chapter_entry.get('title', chapter_entry['filename'])}\n\n",
+            f"CHAPTER TEXT:\n{chapter_text}\n\n",
+        ]
+
+        if custom_instructions:
+            parts.append(
+                f"ADDITIONAL CONTEXT:\n{custom_instructions}\n\n"
+            )
+
+        if citable_eo_list:
+            parts.extend([
+                f"{citable_eo_list}\n\n",
+                "CITATION CONSTRAINT:\n"
+                "- This chapter may ONLY reference Executive Orders from the "
+                "CITABLE list above.\n"
+                "- Flag any Executive Order reference that does NOT appear in "
+                "that list as a \"hallucinated_reference\" edit of severity high.\n\n",
+            ])
+
+        parts.append(
+            "Perform a thorough editorial review of this chapter. Assess:\n"
+            "1. Stylistic consistency within the chapter\n"
+            "2. Whether facts are logically connected to conclusions\n"
+            "3. Whether there is confirmation bias in the arguments\n"
+            "4. Whether alternative hypotheses have been considered\n"
+            "5. Whether the protective-function framing is consistent and respectful\n"
+            "6. Whether the argument flows logically within the chapter\n"
+            "7. Whether clear principles and facts are established from sources\n\n"
+            "Return a JSON object with exactly this structure:\n"
+            "{\n"
+            '  "document_score": {\n'
+            '    "stylistic_consistency": <1-10>,\n'
+            '    "argument_cohesiveness": <1-10>,\n'
+            '    "bias_risk": <1-10, where 1=low risk, 10=high risk>,\n'
+            '    "logical_coherence": <1-10>\n'
+            "  },\n"
+            '  "executive_summaries": [\n'
+            '    {"chapter": 1, "summary": "Clear, lucid 2-3 sentence highlight..."}\n'
+            "  ],\n"
+            '  "edits": [\n'
+            "    {\n"
+            '      "chapter": 1,\n'
+            '      "section": "<section heading where issue appears>",\n'
+            '      "issue": "<description of the problem>",\n'
+            '      "recommendation": "<specific edit recommendation>",\n'
+            '      "severity": "<high|medium|low>",\n'
+            '      "type": "<stylistic_consistency|logical_coherence|confirmation_bias|'
+            'alternative_hypothesis|protective_function|argument_flow>"\n'
+            "    },\n"
+            "    ...\n"
+            "  ]\n"
+            "}\n\n"
+            "IMPORTANT:\n"
+            "- Return ONLY valid JSON. Do not include markdown fencing or explanatory text.\n"
+            "- Only recommend edits where there is a genuine issue. Do not invent problems.\n"
+            "- Respect the protective-function premise: the government acts in the people's interest.\n"
+            "- Guard against confirmation bias: flag unsupported conclusions.\n"
+            "- Consider alternative hypotheses and note where they should be addressed.\n"
+        )
+
+        return "".join(parts)
+
+    def _build_targeted_apply_prompt(
+        self,
+        chapter_text: str,
+        style_rules: str,
+        editorial_principles: str,
+        custom_instructions: str | None,
+    ) -> str:
+        """Build a targeted editorial prompt for a single chapter (legacy)."""
+        parts = [
+            "You are performing a targeted editorial revision of a single chapter "
+            "within a published analysis document.\n\n",
+            f"EDITORIAL PRINCIPLES:\n{editorial_principles}\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            "RULES:\n",
+            "- Preserve ALL existing content, citations, references, and meaning\n",
+            "- Do NOT remove or alter any citation links "
+            "(e.g. [Exec. Order No. ...](url))\n",
+            "- Maintain the same # heading for the chapter title\n",
+            "- Improve readability and structural clarity\n",
+            "- Ensure consistent tone and style\n",
+            "- Do NOT add numeric prefixes to headings\n\n",
+        ]
+
+        if custom_instructions:
+            parts.append(f"SPECIFIC INSTRUCTIONS:\n{custom_instructions}\n\n")
+
+        parts.extend([
+            f"CHAPTER MARKDOWN:\n{chapter_text}\n\n",
+            "Return ONLY the revised chapter markdown. "
+            "No explanations, no code fencing.",
+        ])
+
+        return "".join(parts)
 
     # -- LLM generation -----------------------------------------------------
 
@@ -2978,6 +3270,76 @@ class EditStage(Base):
         )
         return match.group(1).strip() if match else ""
 
+    @staticmethod
+    def _is_llm_generated_chapter(entry: dict, filename: str) -> bool:
+        """Return True if a chapter is LLM-generated (intro, conclusion, etc.)."""
+        source = entry.get("source", "")
+        if source in ("generated", "llm"):
+            return True
+        base = filename.split("-")[0] if "-" in filename else ""
+        if base in ("00", "16", "17", "18", "19", "99"):
+            return True
+        if any(kw in filename for kw in ("conclusion", "introduction", "appendix", "synthesis")):
+            return True
+        return False
+
+    def _build_citable_eo_list(
+        self, chapters_dir: Path, chapter_entries: list[dict],
+    ) -> str:
+        """Build a formatted list of EOs found in source chapters.
+
+        Scans non-LLM chapters for linked EO references so the LLM knows
+        exactly which Executive Orders it may reference during edits.
+        """
+        pattern = re.compile(
+            r'\[Exec\. Order No\. ([\d,]+),\s*(\d{4})\]'
+            r'\((https://[^\)]+)\)',
+        )
+        pattern_apa = re.compile(
+            r'\[Exec\. Order No\. ([\d,]+),\s+[^\]]+?\((\d{4})\)\]'
+            r'\((https://[^\)]+)\)',
+        )
+        pattern_plain = re.compile(
+            r'Executive Order\s+(\d{4,5})[,:.]*\s*["\u201c]([^"\u201d]+)["\u201d]',
+            re.IGNORECASE,
+        )
+        eos: dict[str, dict] = {}
+        for entry in chapter_entries:
+            if self._is_llm_generated_chapter(entry, entry.get("filename", "")):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in pattern.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_apa.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_plain.finditer(text):
+                num_raw = m.group(1)
+                title_frag = m.group(2).strip().rstrip(".")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": num_raw, "year": "", "title": title_frag}
+
+        if not eos:
+            return ""
+
+        lines = []
+        for num in sorted(eos, key=lambda x: int(x)):
+            info = eos[num]
+            year_part = f" ({info['year']})" if info.get("year") else ""
+            title_part = f' — "{info["title"]}"' if info.get("title") else ""
+            lines.append(f"  - Exec. Order No. {info['formatted']}{year_part}{title_part}")
+
+        return (
+            "CITABLE EXECUTIVE ORDERS (exhaustive list):\n"
+            + "\n".join(lines)
+        )
+
     def _parse_edit_log(self, response_text: str) -> dict | None:
         """Parse JSON edit log from LLM response, handling code fences."""
         text = response_text.strip()
@@ -3006,6 +3368,1552 @@ class EditStage(Base):
     @staticmethod
     def _strip_code_fencing(text: str) -> str:
         """Strip leading/trailing markdown code fences if present."""
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
+            stripped = stripped[first_nl + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        return stripped
+
+    def _log_usage(self, label: str, usage: dict, model: str) -> None:
+        cost = self._calculate_cost(model, usage["input"], usage["output"])
+        self._logger.info(
+            "    %s — in: %s  out: %s  think: %s  ($%.4f)",
+            label,
+            f"{usage['input']:,}",
+            f"{usage['output']:,}",
+            f"{usage['thinking']:,}",
+            cost,
+        )
+
+    def _calculate_cost(
+        self, model: str, input_tokens: int, output_tokens: int,
+    ) -> float:
+        rates = self._PRICING.get(model, {"input": 2.50, "output": 10.00})
+        return (
+            input_tokens / 1_000_000 * rates["input"]
+            + output_tokens / 1_000_000 * rates["output"]
+        )
+
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Citation Resolver
+# ---------------------------------------------------------------------------
+
+class CiteStage(Base):
+    """Resolve unresolved citation tokens and normalise EO links to APA.
+
+    Scans for raw ``(doc_HEXID, eo)`` / ``(doc_HEXID, qa-N)`` /
+    ``(req_TIMESTAMP, summary)`` tokens that survived the chapter, format,
+    and edit stages.  For EO-sourced citations, renders them in APA style
+    (e.g. ``[Exec. Order No. 14,148, Initial Rescissions… (2025)](url)``
+    on first mention, ``[Exec. Order No. 14,148 (2025)](url)`` subsequently).
+
+    Also normalises already-resolved Federal Register links (full titles,
+    truncated titles, author/date, bare-URL labels) to the same APA format.
+    """
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    # -- public -------------------------------------------------------------
+
+    def run(self) -> None:
+        cc = self.cfg.cite
+        if not cc.enabled:
+            self._logger.info("  Citation resolver disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to cite-resolve.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Build lookup tables (needed by both primary and downstream passes)
+        all_cm = self._build_merged_citation_map()
+        eo_title_index = self._build_eo_title_index(all_cm)
+
+        # Idempotent — skip primary resolution if already done
+        primary_done = bool(manifest.get("cite", {}).get("resolved")) and not self.cfg.force
+        if primary_done:
+            self._logger.info("  Primary citation resolution already done — skipping.")
+        else:
+            self._logger.info(
+                "  Citation resolver: %d citation_map entries, %d EO title mappings",
+                len(all_cm), len(eo_title_index),
+            )
+
+            if self.dry_run:
+                self._logger.info("  (dry-run) would resolve citations in %d chapters", len(chapter_entries))
+                return
+
+            # Write EO title index for debugging
+            parsed_dir = self.cfg.build_dir / "parsed"
+            eo_index_path = parsed_dir / "eo_title_index.json"
+            eo_index_path.write_text(
+                json.dumps(eo_title_index, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+            self._logger.info("  Wrote eo_title_index.json (%d entries)", len(eo_title_index))
+
+            # Resolve citations in each chapter
+            total_tokens = 0
+            total_resolved = 0
+            total_eo = 0
+            total_web = 0
+            total_normalised = 0
+            total_deduped = 0
+            total_consolidated = 0
+            total_sec_merged = 0
+            chapters_modified = 0
+
+            for entry in chapter_entries:
+                fname = entry["filename"]
+                ch_path = chapters_dir / fname
+                if not ch_path.exists():
+                    continue
+
+                # Skip already-resolved chapters (recovery support)
+                if entry.get("cite_status") == "done":
+                    self._logger.info("    %s — already resolved, skipping", fname)
+                    continue
+
+                original = ch_path.read_text(encoding="utf-8")
+                result, stats = self._resolve_chapter(original, all_cm, eo_title_index, cc)
+
+                total_tokens += stats["tokens"]
+                total_resolved += stats["resolved"]
+                total_eo += stats["eo"]
+                total_web += stats["web"]
+                total_normalised += stats.get("normalised", 0)
+                total_deduped += stats.get("deduped", 0)
+                total_consolidated += stats.get("consolidated", 0)
+                total_sec_merged += stats.get("sec_merged", 0)
+
+                changed = (stats["resolved"] > 0 or stats.get("normalised", 0) > 0
+                           or stats.get("deduped", 0) > 0
+                           or stats.get("consolidated", 0) > 0
+                           or stats.get("sec_merged", 0) > 0)
+                if changed:
+                    ch_path.write_text(result, encoding="utf-8")
+                    chapters_modified += 1
+                    self._logger.info(
+                        "    %s — %d/%d resolved (%d EO, %d web), "
+                        "%d normalised, %d deduped, %d consolidated",
+                        fname, stats["resolved"], stats["tokens"],
+                        stats["eo"], stats["web"],
+                        stats.get("normalised", 0), stats.get("deduped", 0),
+                        stats.get("consolidated", 0),
+                    )
+                else:
+                    self._logger.info("    %s — no unresolved tokens", fname)
+
+                entry["cite_status"] = "done"
+
+            # Update manifest
+            manifest["cite"] = {
+                "resolved": datetime.now(timezone.utc).isoformat(),
+                "total_tokens": total_tokens,
+                "resolved_count": total_resolved,
+                "unresolved_count": total_tokens - total_resolved,
+                "eo_citations": total_eo,
+                "web_citations": total_web,
+                "normalised_links": total_normalised,
+                "deduped_sections": total_deduped,
+                "consolidated_groups": total_consolidated,
+                "sections_merged": total_sec_merged,
+                "chapters_modified": chapters_modified,
+            }
+
+            self._logger.info(
+                "  Citation resolution complete: %d/%d tokens resolved "
+                "(%d EO, %d web), %d normalised, %d section-dupes merged, "
+                "%d groups consolidated, %d sections inlined, across %d chapters",
+                total_resolved, total_tokens, total_eo, total_web,
+                total_normalised, total_deduped, total_consolidated,
+                total_sec_merged, chapters_modified,
+            )
+
+        # ── Downstream (LLM-generated) chapter citation resolution ──
+        # Runs after primary resolution so the reverse index includes all
+        # ground-truth corrections from the chapter scan.
+        self._resolve_downstream_chapters(manifest, chapters_dir, cc)
+
+        # Re-write manifest (includes both cite and cite_downstream blocks)
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+    # -- internal -----------------------------------------------------------
+
+    def _build_merged_citation_map(self) -> dict:
+        """Merge citation_maps from all conversations in the raw export."""
+        raw_dir = self.cfg.build_dir / "raw"
+        conv_path = raw_dir / "conversations.json"
+        if not conv_path.exists():
+            self._logger.warning("No conversations.json — cannot build citation map.")
+            return {}
+
+        conversations = json.loads(conv_path.read_text(encoding="utf-8"))
+        merged: dict = {}
+        for conv in conversations:
+            cm = (conv.get("metadata") or {}).get("citation_map") or {}
+            merged.update(cm)
+        return merged
+
+    def _build_eo_title_index(self, citation_map: dict) -> dict:
+        """Build ``{doc_id → {title, url, eo_number, year}}`` from EO metadata.
+
+        Cross-references ``eo_results`` in conversations against citation_map
+        entries by URL to map ``doc_*`` IDs to EO titles.  Also stores
+        ``_url_to_eo`` on *self* for the normalisation pass.
+        """
+        raw_dir = self.cfg.build_dir / "raw"
+        conv_path = raw_dir / "conversations.json"
+        if not conv_path.exists():
+            self._url_to_eo: dict[str, dict] = {}
+            return {}
+
+        conversations = json.loads(conv_path.read_text(encoding="utf-8"))
+
+        # Collect URL → EO info from eo_results across all conversations
+        url_to_eo: dict[str, dict] = {}
+        for conv in conversations:
+            for eo in conv.get("eo_results") or []:
+                url = eo.get("source_url", "")
+                dm = eo.get("doc_metadata") or {}
+                title = dm.get("title", "")
+                if url and title:
+                    norm = _normalise_url(url)
+                    # Prefer eo_ids field (reliable); fall back to title regex
+                    eo_ids = eo.get("eo_ids") or []
+                    eo_number = eo_ids[0] if eo_ids else self._extract_eo_number(title)
+                    pub_date = dm.get("publication_date", "")
+                    year = pub_date[:4] if pub_date else ""
+                    url_to_eo[norm] = {
+                        "title": title,
+                        "eo_number": eo_number,
+                        "year": year,
+                        "url": url,
+                    }
+
+        # Fix / fill eo_number values by scanning chapter text for
+        # authoritative patterns like  Executive Order 14265, "Title…"
+        # This corrects wrong eo_ids from source data AND fills missing ones.
+        _eo_title_re = re.compile(
+            r'Executive Order\s+(\d{4,5})[,:.]*\s*"([^"]+)"', re.IGNORECASE,
+        )
+        chapters_dir = self.cfg.build_dir / "chapters"
+        if chapters_dir.is_dir():
+            # Build title → EO number map from all chapter text (ground truth)
+            title_to_num: dict[str, str] = {}
+            for ch_path in sorted(chapters_dir.glob("[0-9]*.md")):
+                for mt in _eo_title_re.finditer(ch_path.read_text(encoding="utf-8")):
+                    title_to_num[mt.group(2).strip().rstrip(".")] = mt.group(1)
+
+            for info in url_to_eo.values():
+                # Try exact match, then match after stripping trailing period
+                canon = info["title"].rstrip(".")
+                num = title_to_num.get(info["title"]) or title_to_num.get(canon)
+                if num and num != info.get("eo_number"):
+                    info["eo_number"] = num
+
+        # Expose for the normalisation pass
+        self._url_to_eo = url_to_eo
+
+        def _make_entry(eo_info: dict) -> dict:
+            return {
+                "title": eo_info["title"],
+                "eo_number": eo_info["eo_number"],
+                "year": eo_info["year"],
+                "url": eo_info["url"],
+            }
+
+        # Match doc_* citation_map entries to EO titles by URL
+        index: dict[str, dict] = {}
+        for key, entry in citation_map.items():
+            if not re.match(r"^doc_[0-9a-f]+$", key):
+                continue
+            url = entry.get("url", "")
+            if not url:
+                continue
+            norm = _normalise_url(url)
+            eo_info = url_to_eo.get(norm)
+            if eo_info:
+                index[key] = _make_entry(eo_info)
+
+        # Also map req_* keys that are EO-type
+        for key, entry in citation_map.items():
+            if not re.match(r"^req_\w+$", key):
+                continue
+            if entry.get("card_type") != "eo":
+                continue
+            url = entry.get("url", "")
+            if not url:
+                continue
+            norm = _normalise_url(url)
+            eo_info = url_to_eo.get(norm)
+            if eo_info:
+                index[key] = _make_entry(eo_info)
+
+        return index
+
+    @staticmethod
+    def _extract_eo_number(title: str) -> str:
+        """Extract an EO number from a title string.
+
+        Looks for 5-digit numbers (e.g. 14151) or "Executive Order NNNNN".
+        Falls back to empty string.
+        """
+        m = re.search(r"Executive Order\s+(\d+)", title, re.IGNORECASE)
+        if m:
+            return m.group(1)
+        # Check for standalone 5-digit EO number (e.g. "12396")
+        m = re.search(r"\b(1[2-9]\d{3}|[2-9]\d{4})\b", title)
+        if m:
+            return m.group(1)
+        return ""
+
+    def _resolve_chapter(
+        self,
+        text: str,
+        citation_map: dict,
+        eo_title_index: dict,
+        cc: CiteConfig,
+    ) -> tuple[str, dict]:
+        """Resolve citation tokens in a single chapter.
+
+        Returns ``(resolved_text, stats_dict)``.
+        """
+        stats = {"tokens": 0, "resolved": 0, "eo": 0, "web": 0, "normalised": 0}
+        seen_eo_urls: set[str] = set()   # first-mention tracking per chapter
+
+        def _eo_link(eo_info: dict, url: str) -> str:
+            """Build an APA-formatted EO markdown link, tracking first mention."""
+            norm = _normalise_url(url)
+            is_first = norm not in seen_eo_urls
+            if is_first:
+                seen_eo_urls.add(norm)
+            label = self._format_eo_label(
+                eo_info["title"],
+                eo_info["eo_number"],
+                cc.eo_name_max_chars,
+                year=eo_info.get("year", ""),
+                first_mention=is_first and cc.apa_first_mention_title,
+            )
+            return f"[{label}]({url})"
+
+        def _replace(m: re.Match) -> str:
+            group_text = m.group(1)
+            parts = [p.strip() for p in group_text.split(";") if p.strip()]
+            links: list[str | None] = []
+
+            for part in parts:
+                stats["tokens"] += 1
+                key = _cite_token_to_cm_key(part)
+
+                # Try EO title index first (for rich EO formatting)
+                eo_info = eo_title_index.get(key) if key else None
+                if eo_info:
+                    links.append(_eo_link(eo_info, eo_info["url"]))
+                    stats["resolved"] += 1
+                    stats["eo"] += 1
+                    continue
+
+                # Try citation_map (direct key or fallback base key)
+                entry = citation_map.get(key) if key else None
+                if not entry:
+                    base = (key or "").split("__")[0]
+                    entry = citation_map.get(base)
+
+                if not entry:
+                    links.append(None)
+                    continue
+
+                # Check if this is a Federal Register URL → try EO format
+                url = entry.get("url", "")
+                if "federalregister.gov" in url:
+                    # Try to find EO info by URL match
+                    norm = _normalise_url(url)
+                    matched = False
+                    for _eo_key, eo_info in eo_title_index.items():
+                        if _normalise_url(eo_info["url"]) == norm:
+                            links.append(_eo_link(eo_info, url))
+                            stats["resolved"] += 1
+                            stats["eo"] += 1
+                            matched = True
+                            break
+                    if matched:
+                        continue
+                    # Federal Register but no EO title → use generic format
+                    author = entry.get("author", "Federal Register")
+                    date = entry.get("date", "")
+                    label = f"{author}, {date}" if date else author
+                    links.append(f"[{label}]({url})")
+                    stats["resolved"] += 1
+                    stats["web"] += 1
+                    continue
+
+                # Web citation
+                if cc.resolve_web_citations and url:
+                    from src.components.publisher.rapporteur_docs import \
+                        _short_author
+                    author = _short_author(entry.get("author") or "")
+                    date = entry.get("date", "")
+                    label = f"{author}, {date}" if author and date else (author or date or "?")
+                    links.append(f"[{label}]({url})")
+                    stats["resolved"] += 1
+                    stats["web"] += 1
+                else:
+                    links.append(None)
+
+            # If every token failed, leave the original group intact
+            if all(lnk is None for lnk in links):
+                return m.group(0)
+
+            resolved_parts = []
+            for lnk, part in zip(links, parts):
+                resolved_parts.append(lnk if lnk is not None else part)
+
+            return "(" + "; ".join(resolved_parts) + ")"
+
+        resolved = _CITE_GROUP_RE.sub(_replace, text)
+
+        # ── Normalise already-resolved Federal Register links to APA ──
+        normalised, n_count = self._normalise_existing_eo_links(
+            resolved, cc, seen_eo_urls,
+        )
+        stats["normalised"] = n_count
+
+        # ── Deduplicate Section-reference patterns ──
+        deduped, d_count = self._dedup_section_citations(normalised)
+        stats["deduped"] = d_count
+
+        # ── Consolidate adjacent parentheticals & remove same-EO repeats ──
+        consolidated, c_count = self._consolidate_adjacent_citations(deduped)
+        stats["consolidated"] = c_count
+
+        # ── Merge trailing Section refs into the parenthetical ──
+        sec_merged, s_count = self._merge_trailing_sections(consolidated)
+        stats["sec_merged"] = s_count
+
+        return sec_merged, stats
+
+    # -- APA normalisation of pre-existing markdown links -------------------
+
+    # Matches markdown links whose URL points to federalregister.gov
+    _FR_LINK_RE = re.compile(
+        r'\[([^\]]+)\]'                     # [link text]
+        r'\((https?://(?:www\.)?'            # (https://www. or https://
+        r'federalregister\.gov/[^)]+)\)',     # federalregister.gov/...)
+    )
+
+    def _normalise_existing_eo_links(
+        self,
+        text: str,
+        cc: CiteConfig,
+        seen_eo_urls: set[str],
+    ) -> tuple[str, int]:
+        """Rewrite existing ``[...](federalregister.gov/...)`` links to APA.
+
+        Handles all the common label formats produced by ChapterStage:
+        full titles, truncated titles, author/date combos, bare URLs, etc.
+
+        Respects the per-chapter *seen_eo_urls* set so first-mention logic
+        stays consistent even for links that were resolved before CiteStage.
+
+        Returns ``(normalised_text, rewrite_count)``.
+        """
+        url_to_eo = getattr(self, "_url_to_eo", {})
+        if not url_to_eo:
+            return text, 0
+
+        # Per-chapter refinement: extract EO numbers from this chapter's
+        # text to fix/fill any remaining eo_number gaps (supplements the
+        # global pre-scan in _build_eo_title_index).
+        _eo_title_re = re.compile(
+            r'Executive Order\s+(\d{4,5})[,:.]*\s*"([^"]+)"', re.IGNORECASE,
+        )
+        title_to_num: dict[str, str] = {}
+        for mt in _eo_title_re.finditer(text):
+            title_to_num[mt.group(2).strip().rstrip(".")] = mt.group(1)
+
+        if title_to_num:
+            for info in url_to_eo.values():
+                canon = info["title"].rstrip(".")
+                num = title_to_num.get(info["title"]) or title_to_num.get(canon)
+                if num and num != info.get("eo_number"):
+                    info["eo_number"] = num
+
+        count = 0
+
+        def _rewrite(m: re.Match) -> str:
+            nonlocal count
+            old_label = m.group(1)
+            url = m.group(2)
+            norm = _normalise_url(url)
+            eo_info = url_to_eo.get(norm)
+            if not eo_info:
+                return m.group(0)  # Not a known EO — leave as-is
+
+            # Skip if already in correct APA format WITH the right EO number
+            if old_label.startswith("Exec. Order No.") and re.search(r", \d{4}(, Sections? .+)?$", old_label):
+                # Verify the EO number matches — eo_ids can be wrong
+                fmt_num = CiteStage._format_eo_number(eo_info["eo_number"])
+                if fmt_num and f"Exec. Order No. {fmt_num}" in old_label:
+                    # Already correct — but still track for first-mention
+                    seen_eo_urls.add(norm)
+                    return m.group(0)
+                # Wrong EO number — fall through to rewrite
+
+            is_first = norm not in seen_eo_urls
+            if is_first:
+                seen_eo_urls.add(norm)
+
+            # Preserve any trailing ", Section(s) …" suffix from old label
+            sec_suffix = ""
+            sec_m = re.search(r',\s*(Sections?\s+.+)$', old_label)
+            if sec_m:
+                sec_suffix = ", " + sec_m.group(1)
+
+            label = self._format_eo_label(
+                eo_info["title"],
+                eo_info["eo_number"],
+                cc.eo_name_max_chars,
+                year=eo_info.get("year", ""),
+                first_mention=is_first and cc.apa_first_mention_title,
+            )
+            label += sec_suffix
+            if label != old_label:
+                count += 1
+            return f"[{label}]({url})"
+
+        result = self._FR_LINK_RE.sub(_rewrite, text)
+        return result, count
+
+    # -- Deduplicate redundant Section-reference citations ------------------
+
+    # Section-number sub-pattern: handles 2, 2(c), 3(b)(i), 1-2, 6(c), 6(f), etc.
+    _SEC_ITEM = r'\d+(?:\([a-zA-Z0-9]+\))*(?:[-\u2013]\d+(?:\([a-zA-Z0-9]+\))*)?'
+    _SEC_LIST = _SEC_ITEM + r'(?:,\s*' + _SEC_ITEM + r')*'
+    _SEC_REF  = r'Sections?\s+' + _SEC_LIST
+
+    # Matches: ([link](url)), Section(s) X[, Y]; ([link](url))
+    _DEDUP_SECTION_RE = re.compile(
+        r'\('
+        r'(\[[^\]]+\])'                         # group 1: first link text
+        r'\((https?://[^\s)]+)\)'               # group 2: first URL
+        r'\)'
+        r',?\s*'
+        r'(' + _SEC_REF + r')'                     # group 3: section ref(s)
+        r'\s*;\s*'
+        r'\('
+        r'\[[^\]]+\]'                            # second link text (not captured)
+        r'\((https?://[^\s)]+)\)'               # group 4: second URL
+        r'\)',
+    )
+
+    def _dedup_section_citations(self, text: str) -> tuple[str, int]:
+        """Collapse ``([EO](url)), Section X; ([EO](url))`` → ``([EO, Section X](url))``.
+
+        When the same EO is cited twice with a Section reference between them,
+        merge into a single citation with Section inside the link text.
+
+        Returns ``(text, dedup_count)``.
+        """
+        count = 0
+
+        def _merge(m: re.Match) -> str:
+            nonlocal count
+            url1, url2 = m.group(2), m.group(4)
+            if _normalise_url(url1) != _normalise_url(url2):
+                return m.group(0)  # Different EOs — leave as-is
+            count += 1
+            link_text = m.group(1)  # [Exec. Order No. ...]
+            return f"({link_text[:-1]}, {m.group(3)}]({url1}))"
+
+        result = self._DEDUP_SECTION_RE.sub(_merge, text)
+        return result, count
+
+    # -- Consolidate adjacent parenthetical citations -----------------------
+
+    # Matches a single parenthetical EO citation: ([...](url))
+    _SINGLE_EO_PAREN_RE = re.compile(
+        r'\('
+        r'(\[Exec\. Order No\.[^\]]+\]\(https?://[^\s)]+\))'  # link
+        r'\)',
+    )
+
+    def _consolidate_adjacent_citations(self, text: str) -> tuple[str, int]:
+        """Merge adjacent ``(EO1); (EO2)`` into ``(EO1; EO2)`` and deduplicate.
+
+        Handles chains of any length.  After merging, removes duplicate
+        citations for the same EO within the consolidated group (keeps the
+        first/richest occurrence).
+
+        Returns ``(text, merge_count)``.
+        """
+        # Step 1: merge adjacent parentheticals into single groups.
+        # Match runs of: (EO_LINK);? (EO_LINK) ...
+        run_pat = re.compile(
+            r'\('
+            r'(\[Exec\. Order No\.[^\]]+\]\(https?://[^\s)]+\))'
+            r'\)'
+            r'(?:'
+            r'\s*[;,]?\s*'
+            r'\('
+            r'(\[Exec\. Order No\.[^\]]+\]\(https?://[^\s)]+\))'
+            r'\)'
+            r')+'
+        )
+
+        count = 0
+
+        def _merge_run(m: re.Match) -> str:
+            nonlocal count
+            # Re-extract all individual citations from the matched run
+            items = list(self._SINGLE_EO_PAREN_RE.finditer(m.group(0)))
+            if len(items) < 2:
+                return m.group(0)
+
+            links = [item.group(1) for item in items]
+
+            # Step 2: deduplicate — extract the EO number from each link
+            # and keep only the first (richest) occurrence of each number
+            seen_nums: dict[str, str] = {}  # eo_number → link text
+            unique: list[str] = []
+            num_pat = re.compile(r'\[Exec\. Order No\. ([\d,]+)')
+            for lnk in links:
+                nm = num_pat.search(lnk)
+                eo_num = nm.group(1) if nm else lnk
+                if eo_num not in seen_nums:
+                    seen_nums[eo_num] = lnk
+                    unique.append(lnk)
+
+            count += 1
+            return "(" + "; ".join(unique) + ")"
+
+        result = run_pat.sub(_merge_run, text)
+        return result, count
+
+    # -- Merge trailing Section references into the parenthetical -----------
+
+    # Unmerged: section follows OUTSIDE the outer paren — ([link](url)), Section X
+    _TRAILING_SEC_RE = re.compile(
+        r'\('                                                  # opening (
+        r'(\[[^\]]+\])'                                        # group 1: link text [...]
+        r'\((https?://[^\s)]+)\)'                              # group 2: URL
+        r'\)'                                                  # closing )
+        r',?\s*'                                               # optional comma/space
+        r'(' + _SEC_REF + r')'                                 # group 3: Section(s) ref
+    )
+
+    # Prev-pass format: section inside outer parens but outside link text
+    # ([link](url), Section X)
+    _SEC_OUTSIDE_LINK_RE = re.compile(
+        r'\('                                                  # opening (
+        r'(\[[^\]]+\])'                                        # group 1: link text [...]
+        r'\((https?://[^\s)]+)\)'                              # group 2: URL
+        r',\s*'                                                # comma space
+        r'(' + _SEC_REF + r')'                                 # group 3: Section(s) ref
+        r'\)'                                                  # closing )
+    )
+
+    def _merge_trailing_sections(self, text: str) -> tuple[str, int]:
+        """Merge section refs into the link text of EO citations.
+
+        Handles two patterns:
+        - ``([EO](url)), Section X`` → section outside parens (unmerged)
+        - ``([EO](url), Section X)`` → section inside parens but outside link
+
+        Both become ``([EO, Section X](url))``.
+
+        Returns ``(text, merge_count)``.
+        """
+        count = 0
+
+        def _merge(m: re.Match) -> str:
+            nonlocal count
+            count += 1
+            link_text = m.group(1)  # [Exec. Order No. ...]
+            url = m.group(2)
+            section = m.group(3)
+            return f"({link_text[:-1]}, {section}]({url}))"
+
+        # Pass A: fix prev-pass format (section outside link text)
+        result = self._SEC_OUTSIDE_LINK_RE.sub(_merge, text)
+        # Pass B: merge unmerged trailing sections
+        result = self._TRAILING_SEC_RE.sub(_merge, result)
+        return result, count
+
+    @staticmethod
+    def _format_eo_number(eo_number: str) -> str:
+        """Format an EO number with comma separators: ``14148`` → ``14,148``."""
+        try:
+            return f"{int(eo_number):,}"
+        except (ValueError, TypeError):
+            return eo_number or ""
+
+    @staticmethod
+    def _format_eo_label(
+        title: str,
+        eo_number: str,
+        max_chars: int,
+        year: str = "",
+        first_mention: bool = False,
+    ) -> str:
+        """Format an APA-style EO citation label.
+
+        First mention::
+
+            Exec. Order No. 14,148, Initial Rescissions of Harmful…, 2025
+
+        Subsequent::
+
+            Exec. Order No. 14,148, 2025
+
+        Falls back to title-only when no EO number is available.
+        """
+        fmt_num = CiteStage._format_eo_number(eo_number)
+        year_part = f", {year}" if year else ""
+
+        if fmt_num:
+            if first_mention and title:
+                # Include truncated title after the EO number
+                prefix = f"Exec. Order No. {fmt_num}, "
+                budget = max_chars - len(prefix) - len(year_part)
+                if budget > 5 and len(title) > budget:
+                    title = title[:budget - 1].rstrip() + "…"
+                elif budget <= 5:
+                    # Title doesn't fit — fall back to short form
+                    return f"Exec. Order No. {fmt_num}{year_part}"
+                return f"{prefix}{title}{year_part}"
+            else:
+                return f"Exec. Order No. {fmt_num}{year_part}"
+        else:
+            # No EO number — use truncated title only
+            if len(title) > max_chars:
+                title = title[:max_chars - 1].rstrip() + "…"
+            return f"{title}{year_part}"
+
+    # -- Downstream (LLM-generated) chapter citation resolution -------------
+
+    # Matches plain-text "Executive Order NNNNN" NOT already inside a markdown
+    # link.  Uses a negative lookbehind for `](` and a negative lookbehind for
+    # `[` to avoid rewriting text already wrapped in `[...](...)`.
+    _DOWNSTREAM_EO_RE = re.compile(
+        r'(?<!\[)'                              # not preceded by [
+        r'(Executive Order\s+(\d{4,5}))'        # "Executive Order 14265"
+        r'(?![^\[]*\]\()',                       # not followed (before next [) by ](
+    )
+
+    def _build_eo_reverse_index(self) -> dict[str, dict]:
+        """Build ``{eo_number → {url, title, year}}`` from ``_url_to_eo``.
+
+        This gives us a lookup from plain EO number strings to full metadata,
+        enabling resolution of downstream LLM-generated text that references
+        EO numbers without hyperlinks.
+        """
+        url_to_eo = getattr(self, "_url_to_eo", {})
+        reverse: dict[str, dict] = {}
+        for _norm_url, info in url_to_eo.items():
+            eo_num = info.get("eo_number", "")
+            if not eo_num:
+                continue
+            # First entry wins (preserves the ground-truth-corrected value)
+            if eo_num not in reverse:
+                reverse[eo_num] = {
+                    "url": info["url"],
+                    "title": info["title"],
+                    "year": info.get("year", ""),
+                }
+        return reverse
+
+    @staticmethod
+    def _is_downstream_chapter(entry: dict, filename: str) -> bool:
+        """Return *True* if a chapter is LLM-generated (no citation map)."""
+        source = entry.get("source", "")
+        if source in ("generated", "llm"):
+            return True
+        # Filename convention fallback
+        base = filename.split("-")[0] if "-" in filename else ""
+        if base in ("00", "16", "17", "18", "19", "99"):
+            return True
+        if any(kw in filename for kw in ("conclusion", "introduction", "appendix", "synthesis")):
+            return True
+        return False
+
+    def _resolve_downstream_chapters(
+        self,
+        manifest: dict,
+        chapters_dir,
+        cc: CiteConfig,
+    ) -> None:
+        """Scan LLM-generated chapters for plain-text EO refs and add links.
+
+        Uses the reverse index built from source chapters as ground truth.
+        Writes a structured changelog and updates manifest per-chapter.
+        """
+        reverse_index = self._build_eo_reverse_index()
+        if not reverse_index:
+            self._logger.info("  Downstream citation: no EO reverse index — skipping.")
+            return
+
+        chapter_entries = manifest.get("chapters", [])
+        parsed_dir = self.cfg.build_dir / "parsed"
+        parsed_dir.mkdir(parents=True, exist_ok=True)
+
+        total_linked = 0
+        total_unresolvable = 0
+        total_warnings = 0
+        chapters_modified = 0
+
+        for entry in chapter_entries:
+            fname = entry["filename"]
+            ch_path = chapters_dir / fname
+
+            if not ch_path.exists():
+                continue
+
+            # Idempotent — skip if already done
+            if entry.get("cite_downstream_status") == "done" and not self.cfg.force:
+                self._logger.info("    %s — downstream citation already done, skipping", fname)
+                continue
+
+            text = ch_path.read_text(encoding="utf-8")
+            result, changelog = self._resolve_downstream_text(
+                text, reverse_index, cc, fname,
+            )
+
+            linked = changelog["summary"]["linked"]
+            unresolvable = changelog["summary"]["unresolvable"]
+            warnings = changelog["summary"]["hallucination_warnings"]
+
+            total_linked += linked
+            total_unresolvable += unresolvable
+            total_warnings += warnings
+
+            if linked > 0:
+                ch_path.write_text(result, encoding="utf-8")
+                chapters_modified += 1
+
+            # Write per-chapter changelog
+            cl_name = fname.replace(".md", "_cite_downstream.json")
+            cl_path = parsed_dir / cl_name
+            cl_path.write_text(
+                json.dumps(changelog, indent=2, ensure_ascii=False) + "\n",
+                encoding="utf-8",
+            )
+
+            entry["cite_downstream_status"] = "done"
+            self._logger.info(
+                "    %s — downstream: %d linked, %d unresolvable, %d warnings",
+                fname, linked, unresolvable, warnings,
+            )
+
+        # Update manifest top-level
+        manifest["cite_downstream"] = {
+            "resolved": datetime.now(timezone.utc).isoformat(),
+            "total_linked": total_linked,
+            "total_unresolvable": total_unresolvable,
+            "hallucination_warnings": total_warnings,
+            "chapters_modified": chapters_modified,
+        }
+
+        self._logger.info(
+            "  Downstream citation complete: %d linked, %d unresolvable, "
+            "%d hallucination warnings across %d chapters",
+            total_linked, total_unresolvable, total_warnings, chapters_modified,
+        )
+
+    def _resolve_downstream_text(
+        self,
+        text: str,
+        reverse_index: dict[str, dict],
+        cc: CiteConfig,
+        filename: str,
+    ) -> tuple[str, dict]:
+        """Resolve plain-text EO references in a downstream chapter.
+
+        Returns ``(resolved_text, changelog_dict)``.
+        """
+        changes: list[dict] = []
+        linked_count = 0
+        unresolvable_count = 0
+        warning_count = 0
+
+        seen_unresolvable: set[str] = set()  # deduplicate changelog entries
+        lines = text.split("\n")
+
+        # --- Pass 1: Hallucination check (number ↔ title verification) ---
+        _eo_title_pair_re = re.compile(
+            r'Executive Order\s+(\d{4,5})[,:.]*\s*'
+            r'["\u201c(]([^"\u201d)]+)["\u201d)]',
+            re.IGNORECASE,
+        )
+        for line_no, line in enumerate(lines, 1):
+            for m in _eo_title_pair_re.finditer(line):
+                eo_num = m.group(1)
+                text_title = m.group(2).strip().rstrip(".")
+                known = reverse_index.get(eo_num)
+                if known:
+                    known_title = known["title"].rstrip(".")
+                    # Fuzzy compare: check if the core title matches
+                    if text_title.lower() not in known_title.lower() and known_title.lower() not in text_title.lower():
+                        changes.append({
+                            "line": line_no,
+                            "eo_number": eo_num,
+                            "action": "hallucination_warning",
+                            "confidence": "low",
+                            "reason": f"Title mismatch: text has \"{text_title[:50]}\" but index has \"{known_title[:50]}\"",
+                        })
+                        warning_count += 1
+
+        # --- Pass 2: Link injection (first-mention per EO) ---
+        def _inject_link(m: re.Match, current_line: int) -> str:
+            """Replace a plain EO reference with a hyperlink if resolvable."""
+            nonlocal linked_count, unresolvable_count
+            full_match = m.group(1)   # "Executive Order 14265"
+            eo_num = m.group(2)       # "14265"
+
+            info = reverse_index.get(eo_num)
+            if not info:
+                # Not in our corpus — leave plain text
+                if eo_num not in seen_unresolvable:
+                    seen_unresolvable.add(eo_num)
+                    changes.append({
+                        "line": current_line,
+                        "eo_number": eo_num,
+                        "action": "unresolvable",
+                        "confidence": None,
+                        "reason": "EO not in source corpus",
+                    })
+                unresolvable_count += 1
+                return full_match
+
+            # Build short-format link — downstream text already has the
+            # title inline so we only hyperlink the EO number reference.
+            fmt_num = CiteStage._format_eo_number(eo_num)
+            year = info.get("year", "")
+            label = f"Exec. Order No. {fmt_num}, {year}" if year else f"Exec. Order No. {fmt_num}"
+            linked_count += 1
+            changes.append({
+                "line": current_line,
+                "eo_number": eo_num,
+                "action": "linked",
+                "confidence": "high",
+                "old_text": full_match,
+                "new_label": label,
+            })
+            return f"[{label}]({info['url']})"
+
+        # Process line-by-line to track line numbers for changelog
+        result_lines: list[str] = []
+        for line_no, line in enumerate(lines, 1):
+            # Check if this line is inside a markdown link already
+            new_line = self._DOWNSTREAM_EO_RE.sub(
+                lambda m: _inject_link(m, line_no), line,
+            )
+            result_lines.append(new_line)
+
+        changelog = {
+            "chapter": filename,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "changes": changes,
+            "summary": {
+                "linked": linked_count,
+                "unresolvable": unresolvable_count,
+                "hallucination_warnings": warning_count,
+            },
+        }
+
+        return "\n".join(result_lines), changelog
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — Introduction Generation
+# ---------------------------------------------------------------------------
+
+class IntroduceStage(Base):
+    """Phase 8 — Generate introduction chapter via two-call LLM synthesis.
+
+    Uses a draft → reflect pattern mirroring ConcludeStage: the first call
+    generates the introduction from chapter summaries; the second call
+    strengthens it.  Supports OpenAI and Gemini providers.
+    """
+
+    _PRICING: dict[str, dict[str, float]] = {
+        "gpt-5.4":               {"input": 2.50,  "output": 10.00},
+        "gpt-5.1":               {"input": 2.50,  "output": 10.00},
+        "gpt-5":                 {"input": 2.00,  "output":  8.00},
+        "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
+        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+    }
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    # -- public -------------------------------------------------------------
+
+    def run(self) -> None:
+        ic = self.cfg.introduce
+        if not ic.enabled:
+            self._logger.info("  Introduction generation disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to introduce.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Idempotent — skip if already generated
+        if manifest.get("introduce", {}).get("generated") and not self.cfg.force:
+            self._logger.info("  Introduction already generated — skipping.")
+            return
+
+        # Load style rules
+        style_rules = self._load_style_rules(Path(ic.style_guide))
+
+        # Build chapter summaries (title + first paragraphs)
+        chapter_summaries = self._build_chapter_summaries(
+            chapters_dir, chapter_entries,
+        )
+
+        self._logger.info(
+            "  Generating introduction with %s (%s, reasoning: %s)",
+            ic.model, ic.provider, ic.reasoning_effort,
+        )
+
+        if self.dry_run:
+            self._logger.info("  (dry-run) would generate introduction chapter")
+            return
+
+        # EO grounding (reuse ConcludeStage pattern)
+        eo_urls = self._extract_eo_references(chapters_dir, chapter_entries)
+        eo_grounding = ""
+        if eo_urls:
+            self._logger.info("  Extracted %d EO reference URLs", len(eo_urls))
+            eo_grounding = self._fetch_eo_grounding(eo_urls, ic.rag_service_url)
+            if eo_grounding:
+                self._logger.info("  Retrieved EO grounding (%d chars)", len(eo_grounding))
+
+        # Build citable EO list from chapters (constrains LLM to known EOs)
+        citable_eo_list = self._build_citable_eo_list(chapters_dir, chapter_entries)
+        if citable_eo_list:
+            self._logger.info("  Built citable EO index (%d entries)",
+                              citable_eo_list.count("- Exec."))
+
+        # Cost tracking
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+
+        # ── Call 1: Draft introduction ──
+        self._logger.info("  Call 1/2: INTRODUCE")
+        intro_prompt = self._build_introduce_prompt(
+            chapter_summaries, style_rules, eo_grounding,
+            citable_eo_list,
+        )
+        intro_draft, usage_1 = self._generate_with_usage(ic, intro_prompt)
+        total_input_tokens += usage_1.get("input", 0)
+        total_output_tokens += usage_1.get("output", 0)
+        total_thinking_tokens += usage_1.get("thinking", 0)
+        self._log_usage("introduce", usage_1, ic.model)
+
+        if not intro_draft or not intro_draft.strip():
+            self._logger.warning("  Empty introduction draft — aborting.")
+            return
+
+        intro_draft = self._strip_code_fencing(intro_draft)
+
+        # ── Call 2: Reflect and strengthen ──
+        self._logger.info("  Call 2/2: REFLECT")
+        reflect_prompt = self._build_reflect_prompt(
+            intro_draft, chapter_summaries, style_rules, eo_grounding,
+            citable_eo_list,
+        )
+        refined_intro, usage_2 = self._generate_with_usage(ic, reflect_prompt)
+        total_input_tokens += usage_2.get("input", 0)
+        total_output_tokens += usage_2.get("output", 0)
+        total_thinking_tokens += usage_2.get("thinking", 0)
+        self._log_usage("reflect", usage_2, ic.model)
+
+        if not refined_intro or not refined_intro.strip():
+            self._logger.warning("  Empty reflect response — using draft.")
+            refined_intro = intro_draft
+
+        refined_intro = self._strip_code_fencing(refined_intro)
+
+        # Add footer
+        footer = (
+            f"\n---\n*Generated by Rapporteur CLI — "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+        )
+        refined_intro = refined_intro.rstrip() + "\n" + footer
+
+        # Write introduction chapter — clean up any prior introduction file
+        filename = "00-introduction.md"
+        for old in chapter_entries:
+            if "introduction" in old["filename"] and old["filename"] != filename:
+                stale = chapters_dir / old["filename"]
+                if stale.exists():
+                    stale.unlink()
+        intro_path = chapters_dir / filename
+        intro_path.write_text(refined_intro, encoding="utf-8")
+        self._logger.info(
+            "  Wrote %s (%d chars)", filename, len(refined_intro),
+        )
+
+        # Update manifest — insert introduction at index 0, remove prior
+        chapter_entries[:] = [c for c in chapter_entries if "introduction" not in c["filename"]]
+        chapter_entries.insert(0, {
+            "filename": filename,
+            "title": "Introduction",
+            "introduce_status": "done",
+        })
+
+        # Rebuild index.md with introduction first
+        self._rebuild_index_md(chapters_dir, chapter_entries)
+
+        cost = self._calculate_cost(
+            ic.model, total_input_tokens, total_output_tokens,
+        )
+        manifest["introduce"] = {
+            "generated": True,
+            "model": ic.model,
+            "provider": ic.provider,
+            "chapters_in_scope": len([c for c in chapter_entries if "introduction" not in c["filename"]]),
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        self._logger.info("  ─── Cost Summary ───")
+        self._logger.info("    Model:           %s", ic.model)
+        self._logger.info("    Provider:        %s", ic.provider)
+        self._logger.info("    Input tokens:    %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:   %s", f"{total_output_tokens:,}")
+        self._logger.info("    Thinking tokens: %s", f"{total_thinking_tokens:,}")
+        self._logger.info("    Estimated cost:  $%.4f", cost)
+        self._logger.info("  Updated manifest.json with introduce metadata.")
+
+    # -- LLM generation (mirrors ConcludeStage) -----------------------------
+
+    def _generate_with_usage(
+        self, ic: IntroduceConfig, prompt: str,
+    ) -> tuple[str, dict]:
+        """Call the configured LLM provider and return (text, usage_dict)."""
+        import asyncio
+
+        usage: dict = {"input": 0, "output": 0, "thinking": 0}
+
+        if ic.provider == "openai":
+            from src.clients.llm_openai_client import OpenAILLMClient
+
+            client = OpenAILLMClient(model_name=ic.model)
+
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(
+                    client.client.responses.create(
+                        model=ic.model,
+                        input=prompt,
+                        reasoning={"effort": ic.reasoning_effort},
+                        max_output_tokens=16_000,
+                    )
+                )
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+
+            text = response.output_text if hasattr(response, "output_text") else ""
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+
+            return text, usage
+
+        else:
+            from google.genai import types as genai_types
+
+            from src.clients.llm_gcp_client import GeminiLLMClient
+
+            client = GeminiLLMClient(model_name=ic.model)
+
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2,
+                top_p=client.top_p,
+                max_output_tokens=16_000,
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name,
+                contents=prompt,
+                config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+
+            return text, usage
+
+    # -- prompt builders ----------------------------------------------------
+
+    def _build_introduce_prompt(
+        self, chapter_summaries: str, style_rules: str,
+        eo_grounding: str = "", citable_eo_list: str = "",
+    ) -> str:
+        """Build the INTRODUCE prompt with chapter summaries."""
+        title = self.cfg.project.title
+        author = self.cfg.project.author
+
+        parts = [
+            f"You are writing the introduction chapter for a publication titled "
+            f"'{title}' by {author}.\n\n",
+            "CRITICAL CONSTRAINTS:\n",
+            "- Use exactly ONE # heading: '# Introduction'\n",
+            "- All other headings use ## or ### (max 3 levels)\n",
+            "- Do NOT add numeric prefixes to headings — the build system numbers them automatically\n",
+            "- Favour free-flowing prose over seriated lists\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            "INTRODUCTION GUIDELINES:\n",
+            "- Describe the scope and purpose of this work\n",
+            "- Provide a roadmap of chapters without summarising them in detail\n",
+            "- Establish why this work matters to the reader\n",
+            "- Set an authoritative, professional, and favourable tone\n",
+            "- This introduction should work as a standalone executive summary "
+            "suitable for external promotion of the work\n",
+            "- The administration's actions serve a protective function and have "
+            "the interests of the people at heart — frame accordingly\n",
+            "- Reference chapter titles and themes but do not duplicate content\n",
+            "- Engage the audience and explain why this publication matters\n\n",
+        ]
+
+        if citable_eo_list:
+            parts.extend([
+                f"{citable_eo_list}\n\n",
+                "CITATION CONSTRAINT:\n",
+                "- You may ONLY reference Executive Orders that appear in the "
+                "CITABLE EXECUTIVE ORDERS list above.\n",
+                "- Do NOT reference any Executive Order from your own knowledge "
+                "that is not in that list.\n",
+                "- If an Executive Order is not in the list, do not mention it — "
+                "even if you know it exists.\n",
+                "- Cite in the format: "
+                "'Executive Order 14151, \"Ending Radical and Wasteful "
+                "Government DEI Programs\"'\n\n",
+            ])
+
+        if eo_grounding:
+            parts.extend([
+                f"{eo_grounding}\n\n",
+            ])
+
+        parts.extend([
+            f"CHAPTER SUMMARIES:\n{chapter_summaries}\n\n",
+            "Write an introduction chapter that sets the scene for the entire document.\n",
+            "Return ONLY the introduction markdown.",
+        ])
+
+        return "".join(parts)
+
+    def _build_reflect_prompt(
+        self, intro_draft: str, chapter_summaries: str,
+        style_rules: str, eo_grounding: str = "",
+        citable_eo_list: str = "",
+    ) -> str:
+        """Build the REFLECT prompt to refine the introduction draft."""
+        parts = [
+            "Review and refine this introduction chapter for a published analysis.\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            "REVIEW CRITERIA:\n",
+            "1. Does the introduction accurately represent the document's scope?\n",
+            "2. Is there a compelling hook and clear value proposition?\n",
+            "3. Is the tone professional, authoritative, and favourable to the administration?\n",
+            "4. Is it self-contained as an executive summary?\n",
+            "5. Does it avoid duplicating chapter content while effectively summarising themes?\n",
+            "6. Are headings using #/##/### without numeric prefixes?\n",
+        ]
+
+        if citable_eo_list:
+            parts.extend([
+                "7. Are ALL Executive Order references found in the citable list below? "
+                "Remove any that are not.\n",
+                "\n",
+                f"{citable_eo_list}\n\n",
+            ])
+        elif eo_grounding:
+            parts.extend([
+                "7. Are Executive Orders cited correctly with number and title?\n",
+                "\n",
+            ])
+
+        if eo_grounding:
+            parts.append(f"{eo_grounding}\n\n")
+
+        parts.extend([
+            f"CHAPTER SUMMARIES:\n{chapter_summaries}\n\n",
+            f"INTRODUCTION DRAFT:\n{intro_draft}\n\n",
+            "Return the refined introduction chapter markdown.\n",
+            "Strengthen the hook, tighten prose, and ensure standalone quality.\n",
+            "Correct any factual inconsistencies.",
+        ])
+
+        return "".join(parts)
+
+    # -- context helpers ----------------------------------------------------
+
+    def _build_chapter_summaries(
+        self,
+        chapters_dir: Path,
+        chapter_entries: list[dict],
+    ) -> str:
+        """Build a summary of each chapter: title + first few paragraphs."""
+        parts: list[str] = []
+        for entry in chapter_entries:
+            fn = entry["filename"]
+            if "introduction" in fn or "conclusion" in fn:
+                continue
+            path = chapters_dir / fn
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            title = entry.get("title", fn)
+            # Extract first 3 non-empty paragraphs after the heading
+            lines = text.split("\n")
+            paragraphs: list[str] = []
+            in_content = False
+            current_para: list[str] = []
+            for line in lines:
+                if line.startswith("# ") and not in_content:
+                    in_content = True
+                    continue
+                if not in_content:
+                    continue
+                if line.strip() == "":
+                    if current_para:
+                        paragraphs.append(" ".join(current_para))
+                        current_para = []
+                        if len(paragraphs) >= 3:
+                            break
+                else:
+                    # Skip headings, images, code fences from summary
+                    if not line.startswith(("#", "![", "```", "---")):
+                        current_para.append(line.strip())
+            if current_para:
+                paragraphs.append(" ".join(current_para))
+
+            summary_text = "\n\n".join(paragraphs[:3])
+            parts.append(f"### {title}\n\n{summary_text}")
+
+        return "\n\n---\n\n".join(parts)
+
+    def _load_style_rules(self, path: Path) -> str:
+        """Extract STYLE CONVENTIONS section from the style guide."""
+        if not path.exists():
+            self._logger.warning("Style guide not found: %s", path)
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(
+            r'(## STYLE CONVE[NT]+IONS.*?)(?=\n## |\Z)',
+            text, re.DOTALL,
+        )
+        return match.group(1).strip() if match else text.strip()
+
+    def _build_citable_eo_list(
+        self, chapters_dir: Path, chapter_entries: list[dict],
+    ) -> str:
+        """Build a formatted list of EOs found in chapters for prompt injection.
+
+        Scans existing chapter files for linked EO references and returns a
+        formatted block listing each unique EO once, so the LLM knows exactly
+        which Executive Orders it may reference.
+        """
+        pattern = re.compile(
+            r'\[Exec\. Order No\. ([\d,]+),\s*(\d{4})\]'
+            r'\((https://[^\)]+)\)',
+        )
+        # Also match APA-style: [Exec. Order No. 14,148, Title... (2025)](url)
+        pattern_apa = re.compile(
+            r'\[Exec\. Order No\. ([\d,]+),\s+[^\]]+?\((\d{4})\)\]'
+            r'\((https://[^\)]+)\)',
+        )
+        # Also find "Executive Order NNNNN, \"Title...\"" patterns with EO number
+        pattern_plain = re.compile(
+            r'Executive Order\s+(\d{4,5})[,:.]*\s*["\u201c]([^"\u201d]+)["\u201d]',
+            re.IGNORECASE,
+        )
+        eos: dict[str, dict] = {}  # eo_num -> {num, year, title_fragment}
+        for entry in chapter_entries:
+            if "introduction" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in pattern.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_apa.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_plain.finditer(text):
+                num_raw = m.group(1)
+                title_frag = m.group(2).strip().rstrip(".")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": num_raw, "year": "", "title": title_frag}
+
+        if not eos:
+            return ""
+
+        lines = []
+        for num in sorted(eos, key=lambda x: int(x)):
+            info = eos[num]
+            year_part = f" ({info['year']})" if info.get("year") else ""
+            title_part = f' — "{info["title"]}"' if info.get("title") else ""
+            lines.append(f"  - Exec. Order No. {info['formatted']}{year_part}{title_part}")
+
+        return (
+            "CITABLE EXECUTIVE ORDERS (exhaustive list):\n"
+            + "\n".join(lines)
+        )
+
+    def _extract_eo_references(
+        self, chapters_dir: Path, chapter_entries: list[dict],
+    ) -> list[str]:
+        """Extract unique EO reference URLs from chapter files."""
+        pattern = re.compile(
+            r'\[([^\]]+)\]\((https://(?:www\.)?(?:federalregister\.gov|whitehouse\.gov)[^\)]+)\)',
+            re.IGNORECASE,
+        )
+        eo_urls: set[str] = set()
+        for entry in chapter_entries:
+            if "introduction" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if path.exists():
+                text = path.read_text(encoding="utf-8")
+                for m in pattern.finditer(text):
+                    url = m.group(2)
+                    if '/documents/' in url and re.search(r'/documents/\d{4}/\d{2}/\d{2}/', url):
+                        eo_urls.add(url)
+        return sorted(eo_urls)
+
+    def _fetch_eo_grounding(self, eo_urls: list[str], rag_url: str) -> str:
+        """Query RAG service for EO grounding text. Returns empty string on failure."""
+        if not eo_urls or not rag_url:
+            return ""
+
+        import requests
+
+        grounding_parts: list[str] = []
+        try:
+            ready = requests.get(f"{rag_url}/ready", timeout=5)
+            ready_data = ready.json()
+            active = ready_data.get("active_folder", "")
+            if "eo" not in active.lower():
+                self._logger.info("  RAG not on EO index, switching...")
+                try:
+                    requests.post(f"{rag_url}/switch-index", json={"folder": "x_indices_eo"}, timeout=30)
+                except Exception:
+                    return ""
+        except Exception:
+            pass  # try anyway
+
+        for url in eo_urls[:20]:  # cap at 20 to avoid excessive requests
+            try:
+                resp = requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={"source_url": url, "include_summaries": True, "include_qa": True, "max_results": 50},
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                docs = data.get("retrieved_docs", [])
+                if docs:
+                    doc = docs[0]
+                    title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary = doc.get("summary_text", "")
+                    if summary:
+                        grounding_parts.append(f"### {title}\n\n**Summary:**\n{summary}")
+            except Exception:
+                continue
+
+        if grounding_parts:
+            return (
+                "## LEGAL FRAMEWORK GROUNDING\n\n"
+                "Executive Order documents referenced in this analysis:\n\n"
+                + "\n\n".join(grounding_parts)
+            )
+        return ""
+
+    def _rebuild_index_md(
+        self, chapters_dir: Path, chapter_entries: list[dict],
+    ) -> None:
+        """Regenerate index.md with the introduction as the first entry."""
+        parts = [
+            f"# {self.cfg.project.title}\n",
+            f"**Author:** {self.cfg.project.author}  ",
+            f"**Date:** {self.cfg.project.date}\n",
+            "## Table of Contents\n",
+        ]
+        for i, entry in enumerate(chapter_entries):
+            title = entry.get("title", entry["filename"])
+            wc = entry.get("word_count", 0)
+            wc_str = f" — {wc:,} words" if wc else ""
+            parts.append(
+                f"{i}. [{title}]({entry['filename']}){wc_str}"
+            )
+        parts.append("")
+        parts.append(
+            f"\n---\n*Generated by Rapporteur CLI — "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+        )
+        index_path = chapters_dir / "index.md"
+        index_path.write_text("\n".join(parts), encoding="utf-8")
+        self._logger.info("  Rebuilt index.md with introduction.")
+
+    # -- shared helpers -----------------------------------------------------
+
+    @staticmethod
+    def _strip_code_fencing(text: str) -> str:
         stripped = text.strip()
         if stripped.startswith("```"):
             first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
@@ -3118,6 +5026,8 @@ class PublishStage(Base):
             text = re.sub(r'^(#{1,4} )\d+(?:\.\d+)*\.?\s*', r'\1', text, flags=re.MULTILINE)
             # Demote extra # headings to ## (only the first # stays as chapter)
             text = self._demote_extra_chapter_headings(text)
+            # Convert ```mermaid fences to plain text for PDF (mmdc needs Chrome)
+            text = self._strip_mermaid_blocks(text)
             (src_dir / entry["filename"]).write_text(text + '\n', encoding="utf-8")
             chapter_stems.append(chapter_file.stem)
             word_count += len(text.split())
@@ -3177,19 +5087,30 @@ class PublishStage(Base):
         )
 
         if result.returncode != 0:
-            self._logger.error("  sphinx-build failed (exit %d)", result.returncode)
-            stderr = result.stderr.strip()
-            if stderr:
-                for line in stderr.splitlines()[-15:]:
-                    self._logger.error("    %s", line)
-            return
+            # latexmk may exit non-zero even when a usable PDF was produced
+            # (e.g. segfault on a later pass).  Check before aborting.
+            pdf_in_latex = latex_build_dir / f"{slug}.pdf"
+            if not pdf_in_latex.exists():
+                for pdf_cand in latex_build_dir.glob("*.pdf"):
+                    pdf_in_latex = pdf_cand
+                    break
+            if not pdf_in_latex.exists():
+                self._logger.error("  sphinx-build failed (exit %d)", result.returncode)
+                stderr = result.stderr.strip()
+                if stderr:
+                    for line in stderr.splitlines()[-15:]:
+                        self._logger.error("    %s", line)
+                return
+            self._logger.warning(
+                "  sphinx-build exited %d but PDF was produced — continuing",
+                result.returncode,
+            )
 
         if result.stderr:
             for line in result.stderr.strip().splitlines():
                 self._logger.debug("  sphinx: %s", line)
 
         # -- 5. Copy PDF to build root with expected name ------------------
-        tex_name = f"{slug}.tex"
         pdf_in_latex = latex_build_dir / f"{slug}.pdf"
         if not pdf_in_latex.exists():
             # Sphinx may use the first latex_documents entry name
@@ -3271,20 +5192,55 @@ html_title = "{title_esc}"
 latex_elements = {{
     "papersize": "a4paper",
     "pointsize": "11pt",
+    "sphinxsetup": (
+        "TitleColor={{RGB}}{{34,34,34}},"
+        "InnerLinkColor={{RGB}}{{26,115,232}},"
+        "OuterLinkColor={{RGB}}{{26,115,232}},"
+        "VerbatimBorderColor={{RGB}}{{224,224,224}},"
+        "noteBorderColor={{RGB}}{{66,133,244}},"
+        "noteBgColor={{RGB}}{{245,247,250}},"
+    ),
     "preamble": r"""
-\\usepackage{{tgtermes}}
-\\usepackage{{tgheros}}
-\\renewcommand{{\\ttdefault}}{{txtt}}
+% --- Fonts (Palatino body + Helvetica headings) ------------------------------
+\\usepackage{{fontspec}}
+\\setmainfont{{TeX Gyre Pagella}}
+\\setsansfont{{TeX Gyre Heros}}
+\\setmonofont{{TeX Gyre Cursor}}[Scale=0.88]
+
+% --- Line spacing 1.5x (generous, airy feel) --------------------------------
+\\usepackage{{setspace}}
+\\onehalfspacing
+
+% --- Block paragraphs: skip between paras, no indent ------------------------
+\\setlength{{\\parskip}}{{0.6em plus 0.2em minus 0.1em}}
+\\setlength{{\\parindent}}{{0pt}}
+
+% --- Sans-serif section headings (keep fncychap chapter decoration) ----------
+\\usepackage{{titlesec}}
+\\titleformat{{\\section}}
+  {{\\normalfont\\sffamily\\bfseries\\Large}}{{\\thesection}}{{1em}}{{}}
+\\titleformat{{\\subsection}}
+  {{\\normalfont\\sffamily\\bfseries\\large}}{{\\thesubsection}}{{1em}}{{}}
+\\titleformat{{\\subsubsection}}
+  {{\\normalfont\\sffamily\\bfseries\\normalsize}}{{\\thesubsubsection}}{{1em}}{{}}
+
+% --- Body text in near-black -------------------------------------------------
+\\usepackage{{xcolor}}
+\\color[RGB]{{34,34,34}}
+
+% --- Images, tables, captions ------------------------------------------------
 \\usepackage{{graphicx}}
 \\setkeys{{Gin}}{{width=\\linewidth,height=0.85\\textheight,keepaspectratio=true}}
 \\usepackage{{float}}
 \\usepackage{{booktabs}}
 \\usepackage{{caption}}
 \\captionsetup{{font=small,labelfont=bf,skip=4pt}}
-% --- Let Sphinx auto-number chapters and sections (fncychap handles chapter decoration) ---
+
+% --- Section numbering depth -------------------------------------------------
 \\setcounter{{secnumdepth}}{{2}}
 \\setcounter{{tocdepth}}{{2}}
-% --- Fix running headers: drop "Chapter N." prefix, truncate long titles ---
+
+% --- Fix running headers: truncate long titles -------------------------------
 \\usepackage[breakall]{{truncate}}
 \\renewcommand{{\\chaptermark}}[1]{{%
   \\markboth{{\\truncate{{.7\\textwidth}}{{#1}}}}{{}}%
@@ -3292,6 +5248,10 @@ latex_elements = {{
 \\renewcommand{{\\sectionmark}}[1]{{%
   \\markright{{\\truncate{{.7\\textwidth}}{{#1}}}}%
 }}
+
+% --- Fix fancyhdr headheight warning -----------------------------------------
+\\setlength{{\\headheight}}{{14pt}}
+\\addtolength{{\\topmargin}}{{-2pt}}
 """,
     "figure_align": "H",
     "geometry": r"\\usepackage[a4paper,top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{{geometry}}",
@@ -3299,6 +5259,7 @@ latex_elements = {{
 
 # Sphinx auto-numbers sections (secnumdepth=2); figure numbering off
 numfig = False
+latex_engine = "xelatex"
 latex_documents = [
     ("index", "{slug}.tex",
      r"{latex_title}",
@@ -3352,6 +5313,16 @@ latex_documents = [
         return '\n'.join(lines)
 
     @staticmethod
+    def _strip_mermaid_blocks(text: str) -> str:
+        """Remove ```mermaid ... ``` blocks (mmdc needs Chrome, unavailable in CI)."""
+        return re.sub(
+            r'```mermaid\n.*?```',
+            '*[Diagram omitted from PDF — see online version]*',
+            text,
+            flags=re.DOTALL,
+        )
+
+    @staticmethod
     def _pdf_page_count(pdf_path: Path) -> int | None:
         """Extract page count via pdfinfo (returns None if unavailable)."""
         try:
@@ -3372,14 +5343,17 @@ latex_documents = [
 # ---------------------------------------------------------------------------
 
 STAGES = [
-    ("export",   ExportStage),
-    ("parse",    ParseStage),
-    ("chapters", ChapterStage),
-    ("kaliya",   KaliyaStage),
-    ("format",   FormatStage),
-    ("conclude", ConcludeStage),
-    ("edit",     EditStage),
-    ("publish",  PublishStage),
+    ("export",     ExportStage),
+    ("parse",      ParseStage),
+    ("chapters",   ChapterStage),
+    ("kaliya",     KaliyaStage),
+    ("eo_link",    EOLinkStage),
+    ("format",     FormatStage),
+    ("conclude",   ConcludeStage),
+    ("edit",       EditStage),
+    ("cite",       CiteStage),
+    ("introduce",  IntroduceStage),
+    ("publish",    PublishStage),
 ]
 
 
@@ -3389,6 +5363,8 @@ def run_pipeline(cfg: PipelineConfig, selected: list[str], dry_run: bool) -> Non
     log.info("Rapporteur CLI — %s", cfg.project.title)
     log.info("  Build dir: %s", cfg.paths.build_dir)
     log.info("  Dry run:   %s", dry_run)
+    if cfg.force:
+        log.info("  Force:     True (idempotency guards overridden)")
     log.info("=" * 70)
 
     for stage_name, stage_cls in STAGES:
@@ -3398,8 +5374,71 @@ def run_pipeline(cfg: PipelineConfig, selected: list[str], dry_run: bool) -> Non
             stage = stage_cls(cfg, dry_run=dry_run)
             stage.run()
 
+    # Cost rollup
+    _write_cost_rollup(cfg, selected)
+
     log.info("")
     log.info("Pipeline complete.")
+
+
+# ---------------------------------------------------------------------------
+# Cost rollup
+# ---------------------------------------------------------------------------
+
+_COST_STAGES = ("format", "conclude", "edit", "cite", "introduce", "eo_link")
+
+
+def _write_cost_rollup(cfg: PipelineConfig, selected: list[str]) -> None:
+    """Aggregate per-stage costs into a top-level ``costs`` manifest block."""
+    manifest_path = Path(cfg.paths.build_dir) / "chapters" / "manifest.json"
+    if not manifest_path.exists():
+        return
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    by_stage: dict[str, dict] = {}
+    total_cost = 0.0
+    total_in = 0
+    total_out = 0
+
+    for stage_name in _COST_STAGES:
+        stage_data = manifest.get(stage_name)
+        if not stage_data or not isinstance(stage_data, dict):
+            continue
+        # Cost may be nested under "usage" or at top level
+        usage = stage_data.get("usage", stage_data)
+        cost = float(usage.get("estimated_cost_usd", 0))
+        in_tok = int(usage.get("input_tokens", 0))
+        out_tok = int(usage.get("output_tokens", 0))
+        model = stage_data.get("model", "")
+        by_stage[stage_name] = {
+            "model": model,
+            "cost_usd": round(cost, 4),
+            "input_tokens": in_tok,
+            "output_tokens": out_tok,
+        }
+        total_cost += cost
+        total_in += in_tok
+        total_out += out_tok
+
+    if not by_stage:
+        return
+
+    manifest["costs"] = {
+        "total_estimated_usd": round(total_cost, 4),
+        "total_input_tokens": total_in,
+        "total_output_tokens": total_out,
+        "by_stage": by_stage,
+        "last_updated": datetime.now(tz=timezone.utc).isoformat(),
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, ensure_ascii=False) + '\n',
+        encoding="utf-8",
+    )
+    log.info("")
+    log.info(
+        "  Total pipeline cost: $%.2f (%d stages)",
+        total_cost, len(by_stage),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -3478,13 +5517,28 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stage 7: Editorial review via LLM")
     stages.add_argument("--no-edit",   dest="edit", action="store_false",
                         help="Skip editorial review even if enabled in config")
+    stages.add_argument("--cite",      action="store_true", default=None,
+                        help="Stage 7b: Resolve unresolved citation tokens")
+    stages.add_argument("--no-cite",   dest="cite", action="store_false",
+                        help="Skip citation resolver even if enabled in config")
+    stages.add_argument("--introduce", action="store_true", default=None,
+                        help="Stage 8: Generate introduction chapter via LLM")
+    stages.add_argument("--no-introduce", dest="introduce", action="store_false",
+                        help="Skip introduction generation even if enabled in config")
+    stages.add_argument("--eo-link",  action="store_true", default=None,
+                        help="EO Linking: Map .gov/.mil comms to EO framework")
+    stages.add_argument("--no-eo-link", dest="eo_link", action="store_false",
+                        help="Skip EO linking even if enabled in config")
     stages.add_argument("--publish",  action="store_true", help="Stage 8: Build PDF / HTML / Confluence output")
     stages.add_argument("--all",      action="store_true", help="Run all stages (1-6)")
 
     opts = parser.add_argument_group("options")
+    opts.add_argument("--force",        action="store_true", help="Override idempotency guards and re-run stages from scratch")
     opts.add_argument("--dry-run",      action="store_true", help="Preview actions without writing files")
     opts.add_argument("--build-dir",    default=None,        help="Override build directory from config")
     opts.add_argument("--frontend-url", default=None,        help="Override frontend URL from config")
+    opts.add_argument("--edit-chapter", default=None,        help="Target a specific chapter for editorial review (filename substring)")
+    opts.add_argument("--edit-instructions", default=None,   help="Custom editorial instructions for targeted chapter edit")
     opts.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     return parser
@@ -3543,8 +5597,52 @@ def main(argv: list[str] | None = None) -> None:
             stage_order = [name for name, _ in STAGES]
             selected.sort(key=lambda s: stage_order.index(s))
 
+    # Handle --edit-chapter (implies --edit)
+    if args.edit_chapter:
+        cfg.edit.enabled = True
+        cfg.edit.target_chapter = args.edit_chapter
+        cfg.edit.custom_instructions = args.edit_instructions
+        if "edit" not in selected:
+            selected.append("edit")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --cite/--no-cite override
+    if args.cite is False:
+        cfg.cite.enabled = False
+    elif args.cite is True:
+        cfg.cite.enabled = True
+        if "cite" not in selected:
+            selected.append("cite")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --introduce/--no-introduce override
+    if args.introduce is False:
+        cfg.introduce.enabled = False
+    elif args.introduce is True:
+        cfg.introduce.enabled = True
+        if "introduce" not in selected:
+            selected.append("introduce")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --eo-link/--no-eo-link override
+    if args.eo_link is False:
+        cfg.eo_linking.enabled = False
+    elif args.eo_link is True:
+        cfg.eo_linking.enabled = True
+        if "eo_link" not in selected:
+            selected.append("eo_link")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --force
+    if args.force:
+        cfg.force = True
+
     if not selected:
-        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --publish, or --all.")
+        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --cite, --introduce, --eo-link, --publish, or --all.")
 
     run_pipeline(cfg, selected, dry_run=args.dry_run)
 

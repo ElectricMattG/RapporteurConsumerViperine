@@ -314,8 +314,8 @@ class RefResolver:
 #   (req_20260302_194549_000, summary; doc_c7682f0c01f2, qa-34)
 _CITE_GROUP_RE = re.compile(
     r"\("
-    r"((?:(?:doc_[0-9a-f]+|req_\w+)[^;)]*)"
-    r"(?:;\s*(?:doc_[0-9a-f]+|req_\w+)[^;)]*)*)"
+    r"((?:(?:doc_[0-9a-f]+|req_\w+)[^;)\n]*)"
+    r"(?:;\s*(?:doc_[0-9a-f]+|req_\w+)[^;)\n]*)*)"
     r"\)"
 )
 
@@ -324,12 +324,18 @@ def _cite_token_to_cm_key(part: str) -> str | None:
     """Convert one semicolon-split part of a citation group to a citation_map key.
 
     ``(doc_HEXID, qa-N)``        → ``doc_HEXID__qa-N``
+    ``(doc_HEXID, eo)``          → ``doc_HEXID``
     ``(req_TIMESTAMP, summary)`` → ``req_TIMESTAMP``
+    ``(req_TIMESTAMP, eo)``      → ``req_TIMESTAMP``
     """
     part = part.strip()
     m = re.match(r"(doc_[0-9a-f]+),\s*(qa-\d+)", part)
     if m:
         return f"{m.group(1)}__{m.group(2)}"
+    # doc_HEXID with non-qa subtype (e.g. "eo") → bare doc_id key
+    m = re.match(r"(doc_[0-9a-f]+),\s*\w+", part)
+    if m:
+        return m.group(1)
     m = re.match(r"(req_\w+),\s*\w+", part)
     if m:
         return m.group(1)
