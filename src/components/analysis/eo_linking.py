@@ -501,18 +501,11 @@ _EO_QUERY_PROMPT = (
 
 
 class EOChatDriver(Base):
-    """Query each article via RAG /query-llm with EO enrichments.
+    """Build conversation history from local article metadata — no API calls.
 
-    Reuses the multi-index aware query pattern: switches index when the
-    article's index_folder differs from the currently active one, then
-    posts to /query-llm with enrichment flags for events and
-    executive_orders.
-
-    Retries with exponential backoff on HTTP 429 (Too Many Requests).
+    The URL carries the event linkage.  Phase 3 (LINK-REFLECT) does all
+    the LLM work using the conversation history + EO grounding.
     """
-
-    _MAX_RETRIES = 5
-    _BACKOFF_BASE = 2.0  # seconds; doubles each retry
 
     def __init__(
         self,
@@ -526,112 +519,38 @@ class EOChatDriver(Base):
         self.top_k = top_k
         self.qa_top_k = qa_top_k
         self.timeout = timeout
-        self._active_folder: str | None = None
 
     # -- public API ----------------------------------------------------------
 
     def query_batch(
         self, batch: list[ArticleRecord]
     ) -> list[dict[str, Any]]:
-        """Query every article in a batch, returning chat result dicts."""
-        results: list[dict[str, Any]] = []
-        for article in batch:
-            result = self.query_article(article)
-            results.append(result)
-        return results
+        """Build metadata dicts for every article in a batch."""
+        return [self.query_article(article) for article in batch]
 
     def query_article(self, article: ArticleRecord) -> dict[str, Any]:
-        """Call /query-llm for a single article, switching index if needed."""
-        # Switch index if necessary
-        if article.index_folder != self._active_folder:
-            self._switch_index(article.index_folder)
+        """Extract metadata from the local ArticleRecord — no API call.
 
-        query_text = f"{article.title}\n\n{article.summary_text[:2000]}"
-
-        payload = {
-            "query": query_text,
-            "mode": "ask",
-            "top_k": self.top_k,
-            "temperature": 0.5,
-            "max_tokens": 16000,
-            "use_qa": True,
-            "qa_top_k": self.qa_top_k,
-            "enrich": True,
-            "enrich_types": ["events", "executive_orders"],
-            "get_linked": False,
-        }
-
-        data = self._post_with_retry(
-            f"{self.rag_url}/query_llm",
-            payload,
-            label=article.source_url,
-        )
+        The metadata (URL, title, publisher, date, summary) is sufficient
+        for the conversation history consumed by Phase 3.
+        """
+        publisher = (article.doc_metadata.get("publisher", "")
+                     or article.doc_metadata.get("author", ""))
+        date = (article.doc_metadata.get("publication_date", "")
+                or article.doc_metadata.get("date", ""))
+        title = article.title or "Untitled"
+        summary = article.summary_text or ""
 
         return {
             "article_url": article.source_url,
-            "article_title": article.title,
+            "article_title": title,
             "document_id": article.document_id,
-            "publisher": article.doc_metadata.get("author", ""),
+            "publisher": publisher,
+            "date": date,
             "domain": article.domain,
             "index_folder": article.index_folder,
-            "llm_response": data.get("llm_response", ""),
-            "retrieved_docs": data.get("retrieved_docs", []),
-            "retrieved_qa": data.get("retrieved_qa", []),
-            "enrichment_results": data.get("enrichment_results", []),
-            "eo_results": data.get("eo_results") or [],
-            "event_results": data.get("event_results") or [],
-            "citation_map": data.get("citation_map", {}),
-            "execution_time_ms": data.get("execution_time_ms", 0),
-            "llm_model": data.get("llm_model", ""),
+            "article_content": summary,
         }
-
-    # -- private helpers -----------------------------------------------------
-
-    def _post_with_retry(
-        self,
-        url: str,
-        payload: dict[str, Any],
-        *,
-        label: str = "",
-        req_timeout: int | None = None,
-    ) -> dict[str, Any]:
-        """POST with exponential backoff on 429 responses."""
-        timeout = req_timeout or self.timeout
-        for attempt in range(self._MAX_RETRIES + 1):
-            try:
-                resp = requests.post(url, json=payload, timeout=timeout)
-                if resp.status_code == 429:
-                    if attempt < self._MAX_RETRIES:
-                        wait = self._BACKOFF_BASE * (2 ** attempt)
-                        self._logger.warning(
-                            "429 Too Many Requests for %s — retrying in %.1fs (attempt %d/%d)",
-                            label or url, wait, attempt + 1, self._MAX_RETRIES,
-                        )
-                        time.sleep(wait)
-                        continue
-                    self._logger.error(
-                        "429 Too Many Requests for %s — exhausted %d retries",
-                        label or url, self._MAX_RETRIES,
-                    )
-                    return {}
-                resp.raise_for_status()
-                return resp.json()
-            except requests.exceptions.RequestException as exc:
-                self._logger.error("Request failed for %s: %s", label or url, exc)
-                return {}
-        return {}
-
-    def _switch_index(self, folder: str) -> None:
-        """POST /switch-index to change the active RAG index."""
-        result = self._post_with_retry(
-            f"{self.rag_url}/switch-index",
-            {"folder": folder},
-            label=f"switch-index/{folder}",
-            req_timeout=60,
-        )
-        if result is not None:
-            self._active_folder = folder
-            self._logger.info("Switched RAG index → %s", folder)
 
 
 # ---------------------------------------------------------------------------
@@ -656,22 +575,15 @@ class ConversationBuilder(Base):
             entry = {
                 "user_query": _EO_QUERY_PROMPT,
                 "timestamp": datetime.now(timezone.utc).isoformat(),
-                "assistant_response": result.get("llm_response", ""),
-                "retrieved_docs": result.get("retrieved_docs", []),
-                "retrieved_qa": result.get("retrieved_qa", []),
-                "eo_results": result.get("eo_results", []),
-                "event_results": result.get("event_results", []),
-                "enrichment_results": result.get("enrichment_results", []),
+                "assistant_response": result.get("article_content", ""),
                 "metadata": {
                     "article_url": result.get("article_url", ""),
                     "article_title": result.get("article_title", ""),
                     "document_id": result.get("document_id", ""),
                     "publisher": result.get("publisher", ""),
+                    "date": result.get("date", ""),
                     "domain": result.get("domain", ""),
                     "index_folder": result.get("index_folder", ""),
-                    "llm_model": result.get("llm_model", ""),
-                    "execution_time_ms": result.get("execution_time_ms", 0),
-                    "citation_map": result.get("citation_map", {}),
                 },
             }
             conversation.append(entry)
@@ -768,10 +680,6 @@ Output as structured JSON with markdown headings per EO for RegExp anchoring.
 
 {eo_grounding}
 
---- ACTUAL EXECUTIVE ORDER TEXT (Federal Register) ---
-
-{eo_article_grounding}
-
 --- OFFICIAL GOVERNMENT COMMUNICATIONS ---
 
 {batch_conversations}
@@ -788,21 +696,12 @@ Identify gaps in the implementation record — EOs with no corresponding \
 official communications. Identify cross-EO actions that implement multiple \
 orders simultaneously.
 
-Use the actual executive order text provided below to verify whether each \
-EO truly rescinds, supersedes, derives from, or is read together with \
-other EOs. The Federal Register text is authoritative — if the chapter \
-analysis conflicts with the actual order text, prefer the order text.
-
 Refine the structured JSON output to include corrected linkages, expanded \
 precedence chains, and confidence scores per linkage.
 
---- EO LEGAL FRAMEWORK (Analytical Chapters) ---
+--- EO LEGAL FRAMEWORK ---
 
 {eo_grounding}
-
---- ACTUAL EXECUTIVE ORDER TEXT (Federal Register) ---
-
-{eo_article_grounding}
 
 --- LINK ANALYSIS OUTPUT ---
 
@@ -829,10 +728,9 @@ def _clean_json_markdown(text: str) -> str:
 class LinkReflectDriver(Base):
     """Two-call LLM synthesis per batch: LINK then REFLECT.
 
-    Uses ``gemini-3.1-pro-preview`` with ``reasoning_effort: "high"``
-    and ``location: "global"`` via the ``GeminiLLMClient``.
-
-    HC-9: 15-minute request timeout for 100k+ token input with high reasoning.
+    Uses ``gemini-3.1-pro-preview`` with high reasoning via the
+    ``GeminiLLMClient``.  Gemini's 1M+ token context window handles
+    large chapter grounding + batch conversations without truncation.
     """
 
     def __init__(
@@ -869,7 +767,6 @@ class LinkReflectDriver(Base):
         batch_index: int,
         eo_grounding: str,
         batch_conversations: str,
-        eo_article_grounding: str = "",
     ) -> dict[str, Any]:
         """Run LINK + REFLECT for a single batch. Returns result dict.
 
@@ -905,7 +802,6 @@ class LinkReflectDriver(Base):
             self._logger.info("Batch %d — LINK call...", batch_index)
             link_prompt = _LINK_PROMPT.format(
                 eo_grounding=eo_grounding,
-                eo_article_grounding=eo_article_grounding or "(No reconstituted EO text available)",
                 batch_conversations=batch_conversations,
             )
             link_text, link_usage = self._generate(link_prompt)
@@ -923,7 +819,6 @@ class LinkReflectDriver(Base):
             self._logger.info("Batch %d — REFLECT call...", batch_index)
             reflect_prompt = _REFLECT_PROMPT.format(
                 eo_grounding=eo_grounding,
-                eo_article_grounding=eo_article_grounding or "(No reconstituted EO text available)",
                 link_output=link_text,
                 batch_conversations=batch_conversations,
             )
@@ -954,16 +849,9 @@ class LinkReflectDriver(Base):
 
     # -- private helpers -----------------------------------------------------
 
-    _MAX_RETRIES = 5
-    _BACKOFF_BASE = 10.0  # seconds; doubles each retry (10, 20, 40, 80, 160)
-
     def _generate(self, prompt: str) -> tuple[str, dict[str, int]]:
-        """Call Gemini and return (text, usage_dict).
-
-        Retries with exponential backoff on 429 RESOURCE_EXHAUSTED.
-        """
+        """Call Gemini and return (text, usage_dict)."""
         from google.genai import types as genai_types
-        from google.genai.errors import ClientError
 
         client = self._get_client()
         config = genai_types.GenerateContentConfig(
@@ -971,26 +859,11 @@ class LinkReflectDriver(Base):
             top_p=client.top_p,
             max_output_tokens=32_000,
         )
-
-        for attempt in range(self._MAX_RETRIES + 1):
-            try:
-                response = client.client.models.generate_content(
-                    model=client.model_name,
-                    contents=prompt,
-                    config=config,
-                )
-                break  # success
-            except ClientError as exc:
-                if exc.code == 429 and attempt < self._MAX_RETRIES:
-                    wait = self._BACKOFF_BASE * (2 ** attempt)
-                    self._logger.warning(
-                        "Gemini 429 RESOURCE_EXHAUSTED — retrying in %.0fs (attempt %d/%d)",
-                        wait, attempt + 1, self._MAX_RETRIES,
-                    )
-                    time.sleep(wait)
-                    continue
-                raise  # non-429 or exhausted retries
-
+        response = client.client.models.generate_content(
+            model=client.model_name,
+            contents=prompt,
+            config=config,
+        )
         text = response.text if response.text else ""
         usage: dict[str, int] = {"input": 0, "output": 0, "thinking": 0}
         um = getattr(response, "usage_metadata", None)
@@ -1008,7 +881,11 @@ class LinkReflectDriver(Base):
     def format_conversations_for_prompt(
         self, conv_path: Path,
     ) -> str:
-        """Load a batch conversation.json and format for prompt injection."""
+        """Load a batch conversation.json and format for prompt injection.
+
+        Only includes metadata and URL — no summaries — to reduce token
+        cost.  The URL is parseable for date and domain signals.
+        """
         if not conv_path.exists():
             return ""
         conversations = json.loads(conv_path.read_text(encoding="utf-8"))
@@ -1019,8 +896,8 @@ class LinkReflectDriver(Base):
                 f"### {meta.get('article_title', 'Untitled')}\n"
                 f"URL: {meta.get('article_url', '')}\n"
                 f"Domain: {meta.get('domain', '')}\n"
-                f"Publisher: {meta.get('publisher', '')}\n\n"
-                f"{entry.get('assistant_response', '')}\n"
+                f"Publisher: {meta.get('publisher', '')}\n"
+                f"Date: {meta.get('date', '')}\n"
             )
         return "\n---\n\n".join(parts)
 
@@ -1051,11 +928,19 @@ class LinkageExtractor(Base):
         self,
         reflect_text: str,
         batch_id: str,
+        article_lookup: dict[str, dict[str, str]] | None = None,
     ) -> list[dict[str, Any]]:
         """Extract linkage records from a REFLECT output.
 
         Returns a list of flat dicts (one per EO-communication pair),
         plus EO-level records for precedence even when comms are empty.
+
+        Args:
+            reflect_text: The full text output from the REFLECT prompt.
+            batch_id: Identifier for the batch (provenance).
+            article_lookup: Optional mapping of URL/Title -> metadata dict.
+                           Used to backfill missing fields (url, domain, date)
+                           when the LLM omits them.
         """
         cleaned = _clean_json_markdown(reflect_text)
 
@@ -1145,6 +1030,40 @@ class LinkageExtractor(Base):
 
                 comm_url = comm.get("url", "")
                 comm_title = comm.get("communication_title", "")
+                comm_date = comm.get("date", "")
+
+                # Hydrate missing metadata from article lookup (if available)
+                if article_lookup:
+                    meta = {}
+                    # 1. Exact match on URL
+                    if comm_url and comm_url in article_lookup:
+                        meta = article_lookup[comm_url]
+                    # 2. Exact match on title
+                    elif comm_title and comm_title in article_lookup:
+                        meta = article_lookup[comm_title]
+                    # 3. Normalized title match
+                    elif comm_title:
+                        norm = comm_title.strip().lower()
+                        if norm in article_lookup:
+                            meta = article_lookup[norm]
+
+                    if meta:
+                        if not comm_url:
+                            comm_url = meta.get("url", "")
+                        if not comm_title:
+                            comm_title = meta.get("title", "")
+
+                        # Date enhancement: prefer metadata date if more precise than LLM date
+                        meta_date = meta.get("date", "")
+                        if not comm_date or (meta_date and len(meta_date) > len(comm_date)):
+                            comm_date = meta_date
+
+                        # Domain is handled below via _extract_domain(comm_url)
+
+                        # Fallback for official/department using publisher if available
+                        if not comm.get("responsible_official_or_department") and meta.get("publisher"):
+                            comm["responsible_official_or_department"] = meta["publisher"]
+
                 action_type = (
                     comm.get("implementation_status")
                     or comm.get("implements_extends_or_modifies", "")
@@ -1173,7 +1092,7 @@ class LinkageExtractor(Base):
                     "communication": {
                         "url": comm_url,
                         "title": comm_title,
-                        "date": comm.get("date", ""),
+                        "date": comm_date,
                         "domain": self._extract_domain(comm_url),
                         "official": (
                             comm.get("responsible_official_or_department")
@@ -1562,10 +1481,12 @@ class EODiagramGenerator(Base):
     """
 
     # -- colour palette for Mermaid styles --
-    STYLE_ROOT = "fill:#4c6ef5,stroke:#364fc7,color:#fff"
+    # Blue for the subject EO (the chapter topic)
+    STYLE_ROOT = "fill:#e1f5fe,stroke:#01579b,stroke-width:2px,color:#000"
+    # Neutral/White for all other nodes (rescinded, derived, read-with)
     STYLE_RESCINDED = "fill:#ffffff,stroke:#333333,color:#000"
-    STYLE_DERIVED = "fill:#51cf66,stroke:#2b8a3e,color:#fff"
-    STYLE_READ = "fill:#fcc419,stroke:#e67700,color:#000"
+    STYLE_DERIVED = "fill:#ffffff,stroke:#333333,color:#000"
+    STYLE_READ = "fill:#ffffff,stroke:#333333,color:#000"
 
     def _eo_label(
         self,
@@ -1638,20 +1559,6 @@ class EODiagramGenerator(Base):
             label = self._eo_label(rw_eo, registry, name_lookup)
             lines.append(f'  {root_id} --> {nid}["{label}"]')
             styles.append(f"  style {nid} {self.STYLE_READ}")
-
-        # Legend
-        lines.append("")
-        lines.append("  subgraph Legend")
-        lines.append('    direction LR')
-        lines.append('    L1["Subject EO"]')
-        lines.append('    L2["Rescinded / Superseded"]')
-        lines.append('    L3["Derives from / Derived by"]')
-        lines.append('    L4["Read with Subject"]')
-        lines.append("  end")
-        styles.append(f"  style L1 {self.STYLE_ROOT}")
-        styles.append(f"  style L2 {self.STYLE_RESCINDED}")
-        styles.append(f"  style L3 {self.STYLE_DERIVED}")
-        styles.append(f"  style L4 {self.STYLE_READ}")
 
         # Combine
         lines.append("")
@@ -1884,20 +1791,6 @@ class EODiagramGenerator(Base):
                     lines.append(edge_a)
                     emitted_edges.add(edge_a)
 
-        # Legend
-        lines.append("")
-        lines.append("  subgraph Legend")
-        lines.append("    direction LR")
-        lines.append('    L1["Active EO"]')
-        lines.append('    L2["Rescinded / Superseded"]')
-        lines.append('    L3["Derives from / Derived by"]')
-        lines.append('    L4["Read with"]')
-        lines.append("  end")
-        styles.append(f"  style L1 {self.STYLE_ROOT}")
-        styles.append(f"  style L2 {self.STYLE_RESCINDED}")
-        styles.append(f"  style L3 {self.STYLE_DERIVED}")
-        styles.append(f"  style L4 {self.STYLE_READ}")
-
         lines.append("")
         lines.extend(styles)
         diagram = "\n".join(lines)
@@ -1927,3 +1820,462 @@ class EODiagramGenerator(Base):
             "nodes": node_count,
             "edges": len(emitted_edges),
         }
+
+
+# ---------------------------------------------------------------------------
+# Phase 6 — ImplementationTableGenerator
+# ---------------------------------------------------------------------------
+
+_DATE_PARSE_FMTS = [
+    "%B %d, %Y",     # January 27, 2025
+    "%B %Y",         # January 2025
+    "%Y-%m-%d",      # 2025-01-27
+    "%m/%d/%Y",      # 01/27/2025
+    "%d %B %Y",      # 27 January 2025
+    "%Y",            # 2025
+]
+
+
+def _parse_date_loose(raw: str) -> datetime | None:
+    """Best-effort date parse from communication date strings."""
+    if not raw:
+        return None
+    raw = raw.strip()
+    for fmt in _DATE_PARSE_FMTS:
+        try:
+            return datetime.strptime(raw, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _eo_apa_cite(
+    eo_number: str,
+    year: str = "",
+    registry: EORegistry | None = None,
+) -> str:
+    """Format EO citation in APA inline style, linking to local chapter if available."""
+    text = f"Exec. Order No. {eo_number} ({year})" if year else f"Exec. Order No. {eo_number}"
+
+    # If registry is available, check for chapter link
+    if registry:
+        entry = registry.entries.get(eo_number)
+        if entry and entry.chapter_file:
+            # Markdown link relative to current file (assuming in same folder)
+            return f"[{text}]({entry.chapter_file})"
+
+    return text
+
+
+def _truncate(text: str, max_len: int = 120) -> str:
+    """Truncate text with ellipsis if needed."""
+    if not text or len(text) <= max_len:
+        return text or ""
+    return text[:max_len - 1] + "…"
+
+
+class ImplementationTableGenerator(Base):
+    """Generate time-ordered Markdown implementation tables from cached linkage records.
+
+    Produces per-chapter tables (one table per EO) and a cross-EO actions table
+    that groups communications implementing multiple EOs simultaneously.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+
+    # -- single-EO table -----------------------------------------------------
+
+    def generate(
+        self,
+        eo_number: str,
+        cache: EOImplementationCache,
+        name_lookup: EONameLookup | None = None,
+        registry: EORegistry | None = None,
+    ) -> str:
+        """Return a Markdown table for one EO's implementation communications.
+
+        Rows sorted chronologically. Returns empty string if no comms exist.
+        """
+        records = cache.by_eo(eo_number)
+        # Keep only records that have a communication block
+        rows = [r for r in records if r.get("communication")]
+        if not rows:
+            return ""
+
+        # Sort by sorted date (unknown dates sort last)
+        rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max)
+
+        header = (
+            "| Date | EO Linkage | Subsection | Official / Department | "
+            "Action / Decision | Source |\n"
+            "|------|-----------|------------|----------------------|"
+            "-------------------|--------|\n"
+        )
+        body_lines: list[str] = []
+        for rec in rows:
+            comm = rec["communication"]
+            date_str = comm.get("date", "—")
+            eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
+
+            # Use registry-aware linking
+            linkage = _eo_apa_cite(rec["eo_number"], eo_year, registry)
+
+            subsection = comm.get("subsection", "—") or "—"
+            official = comm.get("official", "—") or "—"
+            action = _truncate(comm.get("action_description", ""), 120)
+            url = comm.get("url", "")
+            domain = comm.get("domain", "")
+            source = f"[{domain}]({url})" if url and domain else domain or "—"
+
+            body_lines.append(
+                f"| {date_str} | {linkage} | {subsection} | {official} | "
+                f"{action} | {source} |"
+            )
+
+        return header + "\n".join(body_lines) + "\n"
+
+    # -- per-chapter tables --------------------------------------------------
+
+    def generate_for_chapters(
+        self,
+        registry: EORegistry,
+        cache: EOImplementationCache,
+        output_dir: str | Path,
+        name_lookup: EONameLookup | None = None,
+    ) -> list[dict[str, Any]]:
+        """Generate one implementation table per chapter.
+
+        For each chapter's primary EO, also includes communications linked to
+        any derived-from or read-with EOs from the precedence graph.
+
+        Returns a manifest list of ``{chapter_num, eo_number, path, rows}``.
+        """
+        prec = cache.precedence_graph()
+        tables_dir = Path(output_dir) / "tables"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+
+        manifest: list[dict[str, Any]] = []
+        total_rows = 0
+
+        for eo_number, entry in sorted(
+            registry.entries.items(),
+            key=lambda kv: kv[1].chapter_index,
+        ):
+            if not entry.chapter_file:
+                continue
+
+            # Determine set of EOs to include (primary + related)
+            related_eos = {eo_number}
+            eo_prec = prec.get(eo_number, {})
+            for der in eo_prec.get("derived_from", []):
+                related_eos.add(der)
+            for rw in eo_prec.get("read_with", []):
+                related_eos.add(rw)
+
+            # Collect rows for ALL related EOs
+            records: list[dict[str, Any]] = []
+            for num in related_eos:
+                records.extend(cache.by_eo(num))
+
+            # Format combined table
+            content = self.format_table(
+                records,
+                registry=registry,
+                title=f"Implementation Timeline (Includes related EOs)"
+            )
+
+            # Filter out empty tables (if it only returns empty string, not headers)
+            if not content.strip():
+                continue
+
+            num_rows = len([r for r in records if r.get("communication")])
+            total_rows += num_rows
+
+            chapter_num = entry.chapter_file.split("-")[0] if "-" in entry.chapter_file else entry.chapter_file.split(".")[0]
+            out_path = tables_dir / f"{chapter_num}_implementation.md"
+            out_path.write_text(content, encoding="utf-8")
+
+            manifest.append({
+                "chapter_num": chapter_num,
+                "eo_number": eo_number,
+                "included_eos": sorted(list(related_eos)),
+                "path": str(out_path),
+                "rows": num_rows,
+            })
+
+        self._logger.info(
+            "Generated %d implementation tables (%d total rows)",
+            len(manifest), total_rows,
+        )
+        return manifest
+
+    # -- cross-EO table ------------------------------------------------------
+
+    def generate_cross_eo(
+        self,
+        cache: EOImplementationCache,
+        registry: EORegistry,
+        output_dir: str | Path,
+    ) -> str:
+        """Generate a table for communications that link to multiple EOs."""
+        rows = [r for r in cache.load() if r.get("communication") and len(r.get("cross_eo", [])) > 0]
+        # Keep only records that have a communication block
+        rows = [r for r in rows if r.get("communication")]
+        rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max)
+
+        content = self.format_table(rows, registry=registry, title="Cross-EO Implementation Actions")
+
+        tables_dir = Path(output_dir) / "tables"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        out_path = tables_dir / "cross_eo_actions.md"
+        out_path.write_text(content, encoding="utf-8")
+
+        return str(out_path)
+
+    # -- generic formatter ---------------------------------------------------
+
+    def format_table(
+        self,
+        records: list[dict[str, Any]],
+        registry: EORegistry | None = None,
+        title: str = "",
+    ) -> str:
+        """Format a list of LinkageRecords into a Markdown table."""
+        # Keep only records that have a communication block
+        rows = [r for r in records if r.get("communication")]
+        if not rows:
+            return ""
+
+        # Sort by parsed date (unknown dates sort last)
+        rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max, reverse=True)
+
+        header = (
+            "| Date | EO Linkage | Subsection | Official / Department | "
+            "Action / Decision | Source |\n"
+            "|------|-----------|------------|----------------------|"
+            "-------------------|--------|\n"
+        )
+        body_lines: list[str] = []
+        # Dedup by record_id
+        seen_ids = set()
+
+        for rec in rows:
+            rid = rec.get("record_id", "")
+            if rid in seen_ids:
+                continue
+            seen_ids.add(rid)
+
+            comm = rec["communication"]
+            date_str = comm.get("date", "—")
+            eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
+
+            linkage = _eo_apa_cite(rec["eo_number"], eo_year, registry)
+
+            subsection = comm.get("subsection", "—") or "—"
+            official = comm.get("official", "—") or "—"
+            action = _truncate(comm.get("action_description", ""), 120)
+            url = comm.get("url", "")
+            domain = comm.get("domain", "")
+            source = f"[{domain}]({url})" if url and domain else domain or "—"
+
+            body_lines.append(
+                f"| {date_str} | {linkage} | {subsection} | {official} | "
+                f"{action} | {source} |"
+            )
+
+        return header + "\n".join(body_lines) + "\n"
+
+        tables_dir = Path(output_dir) / "tables"
+        tables_dir.mkdir(parents=True, exist_ok=True)
+        out_path = tables_dir / "cross_eo_actions.md"
+
+        if not cross_entries:
+            out_path.write_text(
+                "# Cross-EO Actions\n\nNo communications implementing "
+                "multiple EOs were found.\n",
+                encoding="utf-8",
+            )
+            self._logger.info("Cross-EO table: 0 multi-EO communications")
+            return {"path": str(out_path), "rows": 0}
+
+        # Sort by first record's date
+        cross_entries.sort(
+            key=lambda pair: _parse_date_loose(
+                pair[1][0]["communication"].get("date", "")
+            ) or datetime.max
+        )
+
+        header = (
+            "| Date | EO Linkages | Official / Department | "
+            "Action / Decision | Source |\n"
+            "|------|-----------|----------------------|"
+            "-------------------|--------|\n"
+        )
+        body_lines: list[str] = []
+        for url, recs in cross_entries:
+            # Use first record for shared fields
+            comm = recs[0]["communication"]
+            date_str = comm.get("date", "—")
+            official = comm.get("official", "—") or "—"
+            domain = comm.get("domain", "")
+            source = f"[{domain}]({url})" if domain else "—"
+
+            # Merge EO citations
+            eo_cites: list[str] = []
+            seen_eos: set[str] = set()
+            for rec in recs:
+                eo_num = rec["eo_number"]
+                if eo_num not in seen_eos:
+                    seen_eos.add(eo_num)
+                    yr = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
+                    eo_cites.append(_eo_apa_cite(eo_num, yr))
+            linkages = "; ".join(eo_cites)
+
+            # Merge action descriptions
+            actions = "; ".join(
+                _truncate(r["communication"].get("action_description", ""), 80)
+                for r in recs if r["communication"].get("action_description")
+            )
+            if not actions:
+                actions = "—"
+
+            body_lines.append(
+                f"| {date_str} | {linkages} | {official} | {actions} | {source} |"
+            )
+
+        heading = (
+            "# Cross-EO Actions\n\n"
+            f"Communications that implement or reference multiple EOs "
+            f"({len(cross_entries)} sources).\n\n"
+        )
+        out_path.write_text(heading + header + "\n".join(body_lines) + "\n", encoding="utf-8")
+
+        self._logger.info(
+            "Cross-EO table: %d multi-EO communications", len(cross_entries),
+        )
+        return {"path": str(out_path), "rows": len(cross_entries)}
+
+    # -- helper --------------------------------------------------------------
+
+    def _build_table_from_records(self, records: list[dict[str, Any]]) -> str:
+        """Build a markdown table from a list of pre-sorted records."""
+        header = (
+            "| Date | EO Linkage | Subsection | Official / Department | "
+            "Action / Decision | Source |\n"
+            "|------|-----------|------------|----------------------|"
+            "-------------------|--------|\n"
+        )
+        lines: list[str] = []
+        for rec in records:
+            comm = rec["communication"]
+            date_str = comm.get("date", "—")
+            eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
+            linkage = _eo_apa_cite(rec["eo_number"], eo_year)
+            subsection = comm.get("subsection", "—") or "—"
+            official = comm.get("official", "—") or "—"
+            action = _truncate(comm.get("action_description", ""), 120)
+            url = comm.get("url", "")
+            domain = comm.get("domain", "")
+            source = f"[{domain}]({url})" if url and domain else domain or "—"
+            lines.append(
+                f"| {date_str} | {linkage} | {subsection} | {official} | "
+                f"{action} | {source} |"
+            )
+        return header + "\n".join(lines) + "\n"
+
+# ---------------------------------------------------------------------------
+# Phase 7 — Chapter Integration
+# ---------------------------------------------------------------------------
+
+class ChapterEnricher(Base):
+    """Inject implementation sections into EO book chapters."""
+
+    SECTION_HEADER = "## Implementation Record"
+
+    def __init__(
+        self,
+        registry: EORegistry,
+        cache: EOImplementationCache,
+        diagram_gen: EODiagramGenerator,
+        table_gen: ImplementationTableGenerator,
+    ) -> None:
+        super().__init__()
+        self.registry = registry
+        self.cache = cache
+        self.diagram_gen = diagram_gen
+        self.table_gen = table_gen
+
+    def enrich_chapters(self, chapters_dir: str | Path) -> None:
+        """Process all markdown chapters and inject implementation records.
+
+        Iterates through the *already loaded* chapters in the registry to find
+        valid target files, then updates them in place.
+        """
+        base_dir = Path(chapters_dir)
+        if not base_dir.is_dir():
+            self._logger.error("Chapters directory not found: %s", base_dir)
+            return
+
+        # Pre-calculate precedence graph (dict form) for diagrams
+        # The cache returns dict already: {eo: {rescinds: [], ...}}
+        precedence_graph = self.cache.precedence_graph()
+
+        updated_count = 0
+
+        # Iterate over known EO entries that have a chapter file
+        for eo_number, entry in self.registry.entries.items():
+            if not entry.chapter_file:
+                continue
+
+            chapter_path = base_dir / entry.chapter_file
+            if not chapter_path.exists():
+                self._logger.warning("Chapter file missing: %s", chapter_path)
+                continue
+
+            self._logger.info("Enriching chapter for EO %s: %s",
+                            eo_number, entry.chapter_file)
+
+            # 1. Generate Diagram (Mermaid)
+            # Use static helper from diagram generator
+            merged_graph = self.diagram_gen._merge_supercessions(precedence_graph, self.registry)
+
+            diagram_body = self.diagram_gen.generate(
+                eo_number, merged_graph, self.registry
+            )
+
+            # Wrap in mermaid block
+            diagram_md = f"```mermaid\n{diagram_body}\n```"
+
+            # 2. Generate Table
+            table_md = self.table_gen.generate(eo_number, self.cache)
+            if not table_md:
+                 table_md = "_No official communications linked to this EO yet._"
+
+            # 3. Construct Section
+            implementation_section = (
+                f"\n\n{self.SECTION_HEADER}\n\n"
+                f"### EO Precedence\n\n"
+                f"{diagram_md}\n\n"
+                f"### Official Communications Timeline\n\n"
+                f"{table_md}\n"
+            )
+
+            # 4. Update File
+            try:
+                original_content = chapter_path.read_text(encoding="utf-8")
+
+                if self.SECTION_HEADER in original_content:
+                    # Replace existing section - assume it is at the end
+                    parts = original_content.split(self.SECTION_HEADER)
+                    new_content = parts[0].rstrip() + implementation_section
+                else:
+                    # Append to end
+                    new_content = original_content.rstrip() + implementation_section
+
+                chapter_path.write_text(new_content, encoding="utf-8")
+                updated_count += 1
+            except Exception as e:
+                self._logger.error("Failed to update chapter %s: %s", chapter_path.name, e)
+
+        self._logger.info("Enriched %d chapters with implementation records", updated_count)

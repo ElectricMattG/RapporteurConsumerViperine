@@ -32,12 +32,14 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from src.components.analysis.eo_linking import ArticleRecord  # noqa: E402
-from src.components.analysis.eo_linking import (ConversationBuilder,
-                                                CostTracker, EOChatDriver,
+from src.components.analysis.eo_linking import (ChapterEnricher,
+                                                ConversationBuilder,
+                                                EOChatDriver,
                                                 EODiagramGenerator,
                                                 EOImplementationCache,
                                                 EONameLookup, EORegistry,
                                                 GovMilExtractor,
+                                                ImplementationTableGenerator,
                                                 LinkageExtractor,
                                                 LinkReflectDriver,
                                                 TokenBudgetBatcher,
@@ -153,9 +155,8 @@ def run_phase2(
         qa_top_k=3,
     )
 
-    # 3. Conversation builder & cost tracker
+    # 3. Conversation builder
     builder = ConversationBuilder(output_dir=OUTPUT_DIR)
-    tracker = CostTracker()
 
     for batch_idx, batch in enumerate(batches):
         est_tokens = _estimate_batch_tokens(batch)
@@ -165,29 +166,21 @@ def run_phase2(
         log.info("  Index folders in batch: %s", ", ".join(sorted(folders)))
 
         chat_results = driver.query_batch(batch)
-        tracker.record(chat_results)
         conv_path = builder.build_and_save(batch_idx, chat_results)
 
         # Show a sample result from this batch
         for r in chat_results[:2]:
-            snippet = (r.get("llm_response") or "")[:200]
+            content_len = len(r.get("article_content") or "")
             log.info("  ├─ %s", r.get("article_title", "")[:60])
-            log.info("  │  domain=%s  eo_results=%d  event_results=%d",
-                     r.get("domain", ""), len(r.get("eo_results", [])),
-                     len(r.get("event_results", [])))
-            if snippet:
-                log.info("  │  response: %s...", snippet.replace("\n", " "))
+            log.info("  │  domain=%s  publisher=%s  date=%s  content=%d chars",
+                     r.get("domain", ""), r.get("publisher", ""),
+                     r.get("date", ""), content_len)
 
     # 4. Summary
-    cost = tracker.summary(model="gemini-3.1-pro-preview")
     log.info("-" * 60)
-    log.info("Phase 2 Results:")
-    log.info("  Batches:        %d", len(batches))
-    log.info("  RAG calls:      %d", cost["total_calls"])
-    log.info("  Total time:     %.1fs", cost["total_time_s"])
-    log.info("  Input tokens:   %d", cost["total_input_tokens"])
-    log.info("  Output tokens:  %d", cost["total_output_tokens"])
-    log.info("  Est. cost:      $%.4f", cost["estimated_cost_usd"])
+    log.info("Phase 2 Results (metadata-only, no LLM calls):")
+    log.info("  Batches:          %d", len(batches))
+    log.info("  Articles queried: %d", len(articles))
     log.info("-" * 60)
 
 
@@ -227,17 +220,6 @@ def run_phase3(
     log.info("EO grounding: %d chars (~%dk tokens)",
              len(eo_grounding), len(eo_grounding) // _CHARS_PER_TOKEN // 1000)
 
-    # Phase 5.5: Reconstitute full EO index via /query_metadata for REFLECT
-    from src.components.publisher.rapporteur_cli import \
-        _fetch_full_eo_grounding
-    eo_article_grounding = _fetch_full_eo_grounding(RAG_URL, PROJECT_ROOT)
-    if eo_article_grounding:
-        log.info("EO article grounding: %d chars (~%dk tokens)",
-                 len(eo_article_grounding),
-                 len(eo_article_grounding) // _CHARS_PER_TOKEN // 1000)
-    else:
-        log.warning("No EO article grounding available")
-
     completed = 0
     for batch_dir in batch_dirs:
         batch_idx = int(batch_dir.name.split("_")[1])
@@ -254,7 +236,6 @@ def run_phase3(
             batch_index=batch_idx,
             eo_grounding=eo_grounding,
             batch_conversations=batch_convs,
-            eo_article_grounding=eo_article_grounding,
         )
         if result.get("status") == "complete":
             completed += 1
@@ -283,11 +264,36 @@ def run_phase3(
 CACHE_PATH = Path(OUTPUT_DIR) / "eo_implementation_cache.jsonl"
 
 
-def run_phase4() -> None:
-    """Extract linkage records from REFLECT outputs and build cache."""
+def run_phase4(articles: list[ArticleRecord] | None = None) -> None:
+    """Extract linkage records from REFLECT outputs and build cache.
+
+    If `articles` is provided, their metadata (url, title, date, publisher) is used
+    to hydrate missing fields in the LLM output.
+    """
     log.info("=" * 60)
     log.info("PHASE 4 — Linkage Extraction & Cache Build")
     log.info("=" * 60)
+
+    # Build lookup map from passed articles
+    article_lookup: dict[str, dict[str, str]] = {}
+    if articles:
+        for a in articles:
+            meta = {
+                "url": a.source_url,
+                "title": a.title,
+                "domain": a.domain,
+                "date": a.doc_metadata.get("publication_date") or a.doc_metadata.get("date", ""),
+                "publisher": a.doc_metadata.get("publisher", "") or a.doc_metadata.get("author", ""),
+            }
+            if a.source_url:
+                article_lookup[a.source_url] = meta
+            if a.title:
+                article_lookup[a.title] = meta
+                norm_title = a.title.strip().lower()
+                if norm_title:
+                    article_lookup[norm_title] = meta
+        log.info("Built article lookup map with %d entries from %d articles",
+                 len(article_lookup), len(articles))
 
     output_dir = Path(OUTPUT_DIR)
     batch_dirs = sorted(output_dir.glob("batch_*"))
@@ -308,7 +314,11 @@ def run_phase4() -> None:
             continue
 
         reflect_text = reflect_path.read_text(encoding="utf-8")
-        records = extractor.extract(reflect_text, batch_id=batch_id)
+        records = extractor.extract(
+            reflect_text,
+            batch_id=batch_id,
+            article_lookup=article_lookup,
+        )
         total_extracted += len(records)
 
         if records:
@@ -439,12 +449,104 @@ def run_phase5(registry: EORegistry) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Phase 6
+# ---------------------------------------------------------------------------
+
+def run_phase6(registry: EORegistry) -> None:
+    """Generate implementation tables per chapter + cross-EO actions table."""
+    log.info("=" * 60)
+    log.info("PHASE 6 — Implementation Table Generation")
+    log.info("=" * 60)
+
+    cache = EOImplementationCache(cache_path=CACHE_PATH)
+    if not cache.load():
+        log.warning("Cache is empty — run Phase 4 first.")
+
+    # Build EO name lookup
+    names_path = Path(OUTPUT_DIR) / "eo_names.json"
+    name_lookup = EONameLookup(cache_path=names_path)
+    name_lookup.load()
+    name_lookup.populate(
+        impl_cache_path=CACHE_PATH,
+        eo_index_dir=PROJECT_ROOT / EO_INDEX_FOLDER,
+        chapters_dir=EO_BOOK_DIR,
+    )
+    name_lookup.save()
+
+    gen = ImplementationTableGenerator()
+
+    # Per-chapter tables
+    manifest = gen.generate_for_chapters(
+        registry=registry,
+        cache=cache,
+        output_dir=OUTPUT_DIR,
+        name_lookup=name_lookup,
+    )
+
+    total_rows = sum(e["rows"] for e in manifest)
+    for entry in manifest:
+        log.info("  ├─ %s  EO %s  %d rows  →  %s",
+                 entry["chapter_num"], entry["eo_number"],
+                 entry["rows"], entry["path"])
+
+    # Cross-EO actions table
+    cross_path = gen.generate_cross_eo(
+        cache=cache,
+        registry=registry,
+        output_dir=OUTPUT_DIR,
+    )
+
+    log.info("-" * 60)
+    log.info("Phase 6 Results:")
+    log.info("  Chapter tables:     %d", len(manifest))
+    log.info("  Total rows:         %d", total_rows)
+    log.info("  Cross-EO table:     %s", cross_path)
+    log.info("  Output dir:         %s/tables/", OUTPUT_DIR)
+    log.info("-" * 60)
+
+    # Show sample
+    if manifest:
+        sample_path = Path(manifest[0]["path"])
+        if sample_path.exists():
+            content = sample_path.read_text(encoding="utf-8")
+            log.info("Sample table (%s):", sample_path.name)
+            for line in content.split("\n")[:15]:
+                log.info("  %s", line)
+
+
+# ---------------------------------------------------------------------------
+# Phase 7
+# ---------------------------------------------------------------------------
+
+def run_phase7(registry: EORegistry) -> None:
+    """Inject implementation sections into EO book chapters."""
+    log.info("=" * 60)
+    log.info("PHASE 7 — Chapter Integration")
+    log.info("=" * 60)
+
+    # 1. Load Cache
+    cache = EOImplementationCache(str(CACHE_PATH))
+    if not cache.load():
+        log.error("Cache file not found or empty: %s", CACHE_PATH)
+        return
+
+    # 2. Init Generators
+    # Note: EODiagramGenerator implicitly uses default styles
+    diagram_gen = EODiagramGenerator()
+    table_gen = ImplementationTableGenerator()
+
+    # 3. Run Enricher
+    enricher = ChapterEnricher(registry, cache, diagram_gen, table_gen)
+    enricher.enrich_chapters(EO_BOOK_DIR)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Demo for EO Event Linking — Phase 1 + 2 + 3 + 4 + 5",
+        description="Demo for EO Event Linking — Phase 1 + 2 + 3 + 4 + 5 + 6",
     )
     parser.add_argument(
         "--live", action="store_true",
@@ -463,6 +565,14 @@ def main() -> None:
         help="Run Phase 5 Mermaid diagram generation",
     )
     parser.add_argument(
+        "--phase6", action="store_true",
+        help="Run Phase 6 implementation table generation",
+    )
+    parser.add_argument(
+        "--phase7", action="store_true",
+        help="Run Phase 7 chapter integration (inject sections)",
+    )
+    parser.add_argument(
         "-n", type=int, default=None,
         help="Limit Phase 2 to first N articles, or Phase 3 to first N batches",
     )
@@ -475,21 +585,43 @@ def main() -> None:
         if args.phase3:
             run_phase3(registry, max_batches=args.n)
         if args.phase4:
-            run_phase4()
+            run_phase4(gov_articles)
         if args.phase5:
             run_phase5(registry)
+        if args.phase6:
+            run_phase6(registry)
+        if args.phase7:
+            run_phase7(registry)
     elif args.phase3:
         run_phase3(registry, max_batches=args.n)
         if args.phase4:
-            run_phase4()
+            run_phase4(gov_articles)
         if args.phase5:
             run_phase5(registry)
+        if args.phase6:
+            run_phase6(registry)
+        if args.phase7:
+            run_phase7(registry)
     elif args.phase4:
-        run_phase4()
+        run_phase4(gov_articles)
         if args.phase5:
             run_phase5(registry)
+        if args.phase6:
+            run_phase6(registry)
+        if args.phase7:
+            run_phase7(registry)
     elif args.phase5:
         run_phase5(registry)
+        if args.phase6:
+            run_phase6(registry)
+        if args.phase7:
+            run_phase7(registry)
+    elif args.phase6:
+        run_phase6(registry)
+        if args.phase7:
+            run_phase7(registry)
+    elif args.phase7:
+        run_phase7(registry)
     else:
         # Dry-run: show what Phase 2 would do
         batcher = TokenBudgetBatcher(batch_size=BATCH_SIZE)
