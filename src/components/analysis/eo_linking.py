@@ -1046,6 +1046,30 @@ class LinkageExtractor(Base):
                         norm = comm_title.strip().lower()
                         if norm in article_lookup:
                             meta = article_lookup[norm]
+                    # 4. Fuzzy substring match: action description against
+                    #    article titles in the lookup
+                    if not meta:
+                        action_desc = (
+                            comm.get("action_decision_or_event")
+                            or comm.get("action_decision_event", "")
+                        )
+                        if action_desc:
+                            desc_lower = action_desc.lower()
+                            best_score = 0
+                            for lk_key, lk_meta in article_lookup.items():
+                                lk_title = lk_meta.get("title", "")
+                                if not lk_title or len(lk_title) < 10:
+                                    continue
+                                t_lower = lk_title.lower()
+                                # Check if significant portion of title appears in action
+                                words = [w for w in t_lower.split() if len(w) > 3]
+                                if not words:
+                                    continue
+                                hits = sum(1 for w in words if w in desc_lower)
+                                score = hits / len(words)
+                                if score > best_score and score >= 0.5:
+                                    best_score = score
+                                    meta = lk_meta
 
                     if meta:
                         if not comm_url:
@@ -1413,6 +1437,34 @@ class EONameLookup(Base):
 
 
 # ---------------------------------------------------------------------------
+# EO filtering — exclude / noise labelling
+# ---------------------------------------------------------------------------
+
+
+def filter_precedence_graph(
+    graph: dict[str, dict[str, list[str]]],
+    exclude_eos: set[str],
+) -> dict[str, dict[str, list[str]]]:
+    """Return a copy of *graph* with all references to *exclude_eos* removed.
+
+    - EOs in *exclude_eos* are dropped as top-level keys.
+    - References to excluded EOs are stripped from ``rescinds``,
+      ``derived_from``, and ``read_with`` lists.
+    """
+    if not exclude_eos:
+        return graph
+    filtered: dict[str, dict[str, list[str]]] = {}
+    for eo, prec in graph.items():
+        if eo in exclude_eos:
+            continue
+        filtered[eo] = {
+            k: [v for v in vals if v not in exclude_eos]
+            for k, vals in prec.items()
+        }
+    return filtered
+
+
+# ---------------------------------------------------------------------------
 # Phase 5 — EODiagramGenerator
 # ---------------------------------------------------------------------------
 
@@ -1519,8 +1571,11 @@ class EODiagramGenerator(Base):
         precedence_graph: dict[str, dict[str, list[str]]],
         registry: EORegistry,
         name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
     ) -> str:
         """Return a Mermaid markdown string for *eo_number*'s precedence."""
+        if exclude_eos:
+            precedence_graph = filter_precedence_graph(precedence_graph, exclude_eos)
         root_id = _node_id("ROOT", eo_number)
         lines: list[str] = ["graph LR"]
         styles: list[str] = []
@@ -1565,6 +1620,88 @@ class EODiagramGenerator(Base):
         lines.extend(styles)
         return "\n".join(lines)
 
+    # -- Focused dependency diagram ------------------------------------------
+
+    def generate_focused(
+        self,
+        root_eo: str,
+        precedence_graph: dict[str, dict[str, list[str]]],
+        registry: EORegistry,
+        name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
+    ) -> str:
+        """Generate a diagram showing *root_eo* and all forward-connected nodes.
+
+        Walks derived_from and read_with edges transitively to find all EOs
+        reachable from *root_eo*.
+        """
+        merged = self._merge_supercessions(precedence_graph, registry)
+        if exclude_eos:
+            merged = filter_precedence_graph(merged, exclude_eos)
+
+        # BFS to find all forward-connected nodes
+        visited: set[str] = set()
+        queue: list[str] = [root_eo]
+        while queue:
+            eo = queue.pop(0)
+            if eo in visited:
+                continue
+            visited.add(eo)
+            prec = merged.get(eo, {})
+            for der in prec.get("derived_from", []):
+                if der not in visited:
+                    queue.append(der)
+            for rw in prec.get("read_with", []):
+                if rw not in visited:
+                    queue.append(rw)
+
+        # Also check reverse: EOs that list root_eo in their derived_from
+        for eo, prec in merged.items():
+            if root_eo in prec.get("derived_from", []) and eo not in visited:
+                visited.add(eo)
+
+        lines: list[str] = ["graph LR"]
+        styles: list[str] = []
+        emitted_edges: set[str] = set()
+
+        # Emit all nodes
+        for eo in sorted(visited, key=lambda e: int(e) if e.isdigit() else 0):
+            nid = f"EO_{eo}"
+            label = self._eo_label(eo, registry, name_lookup)
+            lines.append(f'  {nid}["{label}"]')
+            style = self.STYLE_ROOT if eo == root_eo else self.STYLE_DERIVED
+            styles.append(f"  style {nid} {style}")
+
+        # Emit edges
+        for eo in sorted(visited, key=lambda e: int(e) if e.isdigit() else 0):
+            eo_num = int(eo) if eo.isdigit() else 0
+            prec = merged.get(eo, {})
+            for der in prec.get("derived_from", []):
+                if der not in visited:
+                    continue
+                der_num = int(der) if der.isdigit() else 0
+                nid_a, nid_b = f"EO_{eo}", f"EO_{der}"
+                if der_num < eo_num:
+                    edge = f"  {nid_b} --> {nid_a}"
+                else:
+                    edge = f"  {nid_a} --> {nid_b}"
+                if edge not in emitted_edges:
+                    lines.append(edge)
+                    emitted_edges.add(edge)
+            for rw in prec.get("read_with", []):
+                if rw not in visited:
+                    continue
+                nid_a, nid_b = f"EO_{eo}", f"EO_{rw}"
+                edge_a = f"  {nid_a} --- {nid_b}"
+                edge_b = f"  {nid_b} --- {nid_a}"
+                if edge_a not in emitted_edges and edge_b not in emitted_edges:
+                    lines.append(edge_a)
+                    emitted_edges.add(edge_a)
+
+        lines.append("")
+        lines.extend(styles)
+        return "\n".join(lines)
+
     # -- Chapter-level batch generation (5.2) --------------------------------
 
     def generate_for_chapters(
@@ -1573,6 +1710,7 @@ class EODiagramGenerator(Base):
         precedence_graph: dict[str, dict[str, list[str]]],
         output_dir: str | Path,
         name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Generate one diagram per chapter that has a primary EO.
 
@@ -1585,6 +1723,8 @@ class EODiagramGenerator(Base):
         # Merge registry supercessions into the precedence graph so chapters
         # whose EOs aren't yet in the cache still get rescission edges.
         merged = self._merge_supercessions(precedence_graph, registry)
+        if exclude_eos:
+            merged = filter_precedence_graph(merged, exclude_eos)
 
         manifest: list[dict[str, Any]] = []
         eo_heading_re = re.compile(r"(\d{5})")
@@ -1726,6 +1866,7 @@ class EODiagramGenerator(Base):
         registry: EORegistry,
         output_dir: str | Path,
         name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
     ) -> dict[str, Any]:
         """Generate a single Mermaid diagram containing ALL EOs and edges.
 
@@ -1733,6 +1874,8 @@ class EODiagramGenerator(Base):
         independent of any chapter mapping.  Returns a manifest dict.
         """
         merged = self._merge_supercessions(precedence_graph, registry)
+        if exclude_eos:
+            merged = filter_precedence_graph(merged, exclude_eos)
 
         lines: list[str] = ["graph LR"]
         styles: list[str] = []
@@ -1849,10 +1992,29 @@ def _parse_date_loose(raw: str) -> datetime | None:
     return None
 
 
+def _normalise_date(raw: str) -> str:
+    """Normalise a date string to YYYY-MM-DD format.  Falls back to raw."""
+    dt = _parse_date_loose(raw)
+    if dt is None:
+        return raw or "—"
+    # Year-only input → return just the year
+    if raw.strip().isdigit() and len(raw.strip()) == 4:
+        return raw.strip()
+    # Month+Year only (no day) → YYYY-MM
+    if dt.day == 1 and raw.strip().replace(",", "").split()[-1].isdigit():
+        # Check if original string had a day component
+        tokens = raw.strip().replace(",", "").split()
+        has_day = any(t.isdigit() and len(t) <= 2 for t in tokens[:-1])
+        if not has_day:
+            return dt.strftime("%Y-%m")
+    return dt.strftime("%Y-%m-%d")
+
+
 def _eo_apa_cite(
     eo_number: str,
     year: str = "",
     registry: EORegistry | None = None,
+    name_lookup: EONameLookup | None = None,
 ) -> str:
     """Format EO citation in APA inline style, linking to local chapter if available."""
     text = f"Exec. Order No. {eo_number} ({year})" if year else f"Exec. Order No. {eo_number}"
@@ -1861,10 +2023,23 @@ def _eo_apa_cite(
     if registry:
         entry = registry.entries.get(eo_number)
         if entry and entry.chapter_file:
-            # Markdown link relative to current file (assuming in same folder)
             return f"[{text}]({entry.chapter_file})"
 
     return text
+
+
+def _eo_name(eo_number: str, name_lookup: EONameLookup | None = None,
+             registry: EORegistry | None = None) -> str:
+    """Return the official EO name via name_lookup or registry."""
+    if name_lookup:
+        name = name_lookup.get(eo_number)
+        if name:
+            return _clean_eo_title(name)
+    if registry:
+        entry = registry.entries.get(eo_number)
+        if entry and entry.title:
+            return _clean_eo_title(entry.title)
+    return ""
 
 
 def _truncate(text: str, max_len: int = 120) -> str:
@@ -1895,45 +2070,13 @@ class ImplementationTableGenerator(Base):
     ) -> str:
         """Return a Markdown table for one EO's implementation communications.
 
-        Rows sorted chronologically. Returns empty string if no comms exist.
+        Rows sorted chronologically earliest→latest. Returns empty string if no comms exist.
         """
         records = cache.by_eo(eo_number)
-        # Keep only records that have a communication block
         rows = [r for r in records if r.get("communication")]
         if not rows:
             return ""
-
-        # Sort by sorted date (unknown dates sort last)
-        rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max)
-
-        header = (
-            "| Date | EO Linkage | Subsection | Official / Department | "
-            "Action / Decision | Source |\n"
-            "|------|-----------|------------|----------------------|"
-            "-------------------|--------|\n"
-        )
-        body_lines: list[str] = []
-        for rec in rows:
-            comm = rec["communication"]
-            date_str = comm.get("date", "—")
-            eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
-
-            # Use registry-aware linking
-            linkage = _eo_apa_cite(rec["eo_number"], eo_year, registry)
-
-            subsection = comm.get("subsection", "—") or "—"
-            official = comm.get("official", "—") or "—"
-            action = _truncate(comm.get("action_description", ""), 120)
-            url = comm.get("url", "")
-            domain = comm.get("domain", "")
-            source = f"[{domain}]({url})" if url and domain else domain or "—"
-
-            body_lines.append(
-                f"| {date_str} | {linkage} | {subsection} | {official} | "
-                f"{action} | {source} |"
-            )
-
-        return header + "\n".join(body_lines) + "\n"
+        return self.format_table(rows, registry=registry, name_lookup=name_lookup)
 
     # -- per-chapter tables --------------------------------------------------
 
@@ -1943,6 +2086,7 @@ class ImplementationTableGenerator(Base):
         cache: EOImplementationCache,
         output_dir: str | Path,
         name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
     ) -> list[dict[str, Any]]:
         """Generate one implementation table per chapter.
 
@@ -1952,6 +2096,8 @@ class ImplementationTableGenerator(Base):
         Returns a manifest list of ``{chapter_num, eo_number, path, rows}``.
         """
         prec = cache.precedence_graph()
+        if exclude_eos:
+            prec = filter_precedence_graph(prec, exclude_eos)
         tables_dir = Path(output_dir) / "tables"
         tables_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1973,16 +2119,22 @@ class ImplementationTableGenerator(Base):
             for rw in eo_prec.get("read_with", []):
                 related_eos.add(rw)
 
+            # Remove excluded EOs from related set
+            if exclude_eos:
+                related_eos -= exclude_eos
+
             # Collect rows for ALL related EOs
             records: list[dict[str, Any]] = []
             for num in related_eos:
                 records.extend(cache.by_eo(num))
 
-            # Format combined table
+            # Format combined table — primary_eo sorts chapter's EO to top
             content = self.format_table(
                 records,
                 registry=registry,
-                title=f"Implementation Timeline (Includes related EOs)"
+                name_lookup=name_lookup,
+                title=f"Implementation Timeline (Includes related EOs)",
+                primary_eo=eo_number,
             )
 
             # Filter out empty tables (if it only returns empty string, not headers)
@@ -2017,6 +2169,7 @@ class ImplementationTableGenerator(Base):
         cache: EOImplementationCache,
         registry: EORegistry,
         output_dir: str | Path,
+        name_lookup: EONameLookup | None = None,
     ) -> str:
         """Generate a table for communications that link to multiple EOs."""
         rows = [r for r in cache.load() if r.get("communication") and len(r.get("cross_eo", [])) > 0]
@@ -2024,7 +2177,7 @@ class ImplementationTableGenerator(Base):
         rows = [r for r in rows if r.get("communication")]
         rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max)
 
-        content = self.format_table(rows, registry=registry, title="Cross-EO Implementation Actions")
+        content = self.format_table(rows, registry=registry, name_lookup=name_lookup, title="Cross-EO Implementation Actions")
 
         tables_dir = Path(output_dir) / "tables"
         tables_dir.mkdir(parents=True, exist_ok=True)
@@ -2039,26 +2192,48 @@ class ImplementationTableGenerator(Base):
         self,
         records: list[dict[str, Any]],
         registry: EORegistry | None = None,
+        name_lookup: EONameLookup | None = None,
         title: str = "",
+        primary_eo: str = "",
+        exclude_eos: set[str] | None = None,
     ) -> str:
-        """Format a list of LinkageRecords into a Markdown table."""
+        """Format a list of LinkageRecords into a Markdown table.
+
+        Columns: Date | EO Linkage | EO Name | Official / Department |
+                 Action / Decision | Source |
+                 Media (Spin) | Media (Factualness) | Media (Convergence) | Media (Agenda)
+
+        When *primary_eo* is set, rows for that EO appear first (marked
+        with a blue indicator) followed by linked EO rows.  Within each
+        group rows are sorted earliest → latest.
+        """
         # Keep only records that have a communication block
         rows = [r for r in records if r.get("communication")]
+        # Exclude filtered EOs
+        if exclude_eos:
+            rows = [r for r in rows if r.get("eo_number") not in exclude_eos]
         if not rows:
             return ""
 
-        # Sort by parsed date (unknown dates sort last)
-        rows.sort(key=lambda r: _parse_date_loose(r["communication"].get("date", "")) or datetime.max, reverse=True)
+        # Sort: primary-EO rows first, then others; within each group → earliest→latest
+        def _sort_key(r: dict) -> tuple:
+            is_primary = 0 if (primary_eo and r.get("eo_number") == primary_eo) else 1
+            dt = _parse_date_loose(r["communication"].get("date", "")) or datetime.max
+            return (is_primary, dt)
+
+        rows.sort(key=_sort_key)
 
         header = (
-            "| Date | EO Linkage | Subsection | Official / Department | "
-            "Action / Decision | Source |\n"
-            "|------|-----------|------------|----------------------|"
-            "-------------------|--------|\n"
+            "| Date | EO Linkage | EO Name | Official / Department | "
+            "Action / Decision | Source | "
+            "Media (Spin) | Media (Factualness) | Media (Convergence) | Media (Agenda) |\n"
+            "|------|-----------|---------|----------------------|"
+            "-------------------|--------|"
+            "-------------|-------------------|---------------------|----------------|\n"
         )
         body_lines: list[str] = []
         # Dedup by record_id
-        seen_ids = set()
+        seen_ids: set[str] = set()
 
         for rec in rows:
             rid = rec.get("record_id", "")
@@ -2067,122 +2242,39 @@ class ImplementationTableGenerator(Base):
             seen_ids.add(rid)
 
             comm = rec["communication"]
-            date_str = comm.get("date", "—")
+            date_str = _normalise_date(comm.get("date", ""))
             eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
 
-            linkage = _eo_apa_cite(rec["eo_number"], eo_year, registry)
+            linkage = _eo_apa_cite(rec["eo_number"], eo_year, registry, name_lookup)
+            eo_name = _eo_name(rec["eo_number"], name_lookup, registry) or rec.get("eo_title", "") or "—"
 
-            subsection = comm.get("subsection", "—") or "—"
             official = comm.get("official", "—") or "—"
-            action = _truncate(comm.get("action_description", ""), 120)
+            action = comm.get("action_description", "") or "—"
             url = comm.get("url", "")
             domain = comm.get("domain", "")
             source = f"[{domain}]({url})" if url and domain else domain or "—"
 
+            # Visual marker: primary EO rows get a blue indicator
+            if primary_eo and rec.get("eo_number") == primary_eo:
+                marker = "🔵 "
+            else:
+                marker = ""
+
             body_lines.append(
-                f"| {date_str} | {linkage} | {subsection} | {official} | "
-                f"{action} | {source} |"
+                f"| {marker}{date_str} | {linkage} | {eo_name} | {official} | "
+                f"{action} | {source} | "
+                f"— | — | — | — |"
             )
 
         return header + "\n".join(body_lines) + "\n"
 
-        tables_dir = Path(output_dir) / "tables"
-        tables_dir.mkdir(parents=True, exist_ok=True)
-        out_path = tables_dir / "cross_eo_actions.md"
-
-        if not cross_entries:
-            out_path.write_text(
-                "# Cross-EO Actions\n\nNo communications implementing "
-                "multiple EOs were found.\n",
-                encoding="utf-8",
-            )
-            self._logger.info("Cross-EO table: 0 multi-EO communications")
-            return {"path": str(out_path), "rows": 0}
-
-        # Sort by first record's date
-        cross_entries.sort(
-            key=lambda pair: _parse_date_loose(
-                pair[1][0]["communication"].get("date", "")
-            ) or datetime.max
-        )
-
-        header = (
-            "| Date | EO Linkages | Official / Department | "
-            "Action / Decision | Source |\n"
-            "|------|-----------|----------------------|"
-            "-------------------|--------|\n"
-        )
-        body_lines: list[str] = []
-        for url, recs in cross_entries:
-            # Use first record for shared fields
-            comm = recs[0]["communication"]
-            date_str = comm.get("date", "—")
-            official = comm.get("official", "—") or "—"
-            domain = comm.get("domain", "")
-            source = f"[{domain}]({url})" if domain else "—"
-
-            # Merge EO citations
-            eo_cites: list[str] = []
-            seen_eos: set[str] = set()
-            for rec in recs:
-                eo_num = rec["eo_number"]
-                if eo_num not in seen_eos:
-                    seen_eos.add(eo_num)
-                    yr = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
-                    eo_cites.append(_eo_apa_cite(eo_num, yr))
-            linkages = "; ".join(eo_cites)
-
-            # Merge action descriptions
-            actions = "; ".join(
-                _truncate(r["communication"].get("action_description", ""), 80)
-                for r in recs if r["communication"].get("action_description")
-            )
-            if not actions:
-                actions = "—"
-
-            body_lines.append(
-                f"| {date_str} | {linkages} | {official} | {actions} | {source} |"
-            )
-
-        heading = (
-            "# Cross-EO Actions\n\n"
-            f"Communications that implement or reference multiple EOs "
-            f"({len(cross_entries)} sources).\n\n"
-        )
-        out_path.write_text(heading + header + "\n".join(body_lines) + "\n", encoding="utf-8")
-
-        self._logger.info(
-            "Cross-EO table: %d multi-EO communications", len(cross_entries),
-        )
-        return {"path": str(out_path), "rows": len(cross_entries)}
-
     # -- helper --------------------------------------------------------------
 
-    def _build_table_from_records(self, records: list[dict[str, Any]]) -> str:
+    def _build_table_from_records(self, records: list[dict[str, Any]],
+                                   registry: EORegistry | None = None,
+                                   name_lookup: EONameLookup | None = None) -> str:
         """Build a markdown table from a list of pre-sorted records."""
-        header = (
-            "| Date | EO Linkage | Subsection | Official / Department | "
-            "Action / Decision | Source |\n"
-            "|------|-----------|------------|----------------------|"
-            "-------------------|--------|\n"
-        )
-        lines: list[str] = []
-        for rec in records:
-            comm = rec["communication"]
-            date_str = comm.get("date", "—")
-            eo_year = rec.get("eo_date", "")[:4] if rec.get("eo_date") else ""
-            linkage = _eo_apa_cite(rec["eo_number"], eo_year)
-            subsection = comm.get("subsection", "—") or "—"
-            official = comm.get("official", "—") or "—"
-            action = _truncate(comm.get("action_description", ""), 120)
-            url = comm.get("url", "")
-            domain = comm.get("domain", "")
-            source = f"[{domain}]({url})" if url and domain else domain or "—"
-            lines.append(
-                f"| {date_str} | {linkage} | {subsection} | {official} | "
-                f"{action} | {source} |"
-            )
-        return header + "\n".join(lines) + "\n"
+        return self.format_table(records, registry=registry, name_lookup=name_lookup)
 
 # ---------------------------------------------------------------------------
 # Phase 7 — Chapter Integration
@@ -2199,12 +2291,16 @@ class ChapterEnricher(Base):
         cache: EOImplementationCache,
         diagram_gen: EODiagramGenerator,
         table_gen: ImplementationTableGenerator,
+        name_lookup: EONameLookup | None = None,
+        exclude_eos: set[str] | None = None,
     ) -> None:
         super().__init__()
         self.registry = registry
         self.cache = cache
         self.diagram_gen = diagram_gen
         self.table_gen = table_gen
+        self.name_lookup = name_lookup
+        self.exclude_eos = exclude_eos or set()
 
     def enrich_chapters(self, chapters_dir: str | Path) -> None:
         """Process all markdown chapters and inject implementation records.
@@ -2239,6 +2335,8 @@ class ChapterEnricher(Base):
             # 1. Generate Diagram (Mermaid)
             # Use static helper from diagram generator
             merged_graph = self.diagram_gen._merge_supercessions(precedence_graph, self.registry)
+            if self.exclude_eos:
+                merged_graph = filter_precedence_graph(merged_graph, self.exclude_eos)
 
             diagram_body = self.diagram_gen.generate(
                 eo_number, merged_graph, self.registry
@@ -2247,8 +2345,28 @@ class ChapterEnricher(Base):
             # Wrap in mermaid block
             diagram_md = f"```mermaid\n{diagram_body}\n```"
 
-            # 2. Generate Table
-            table_md = self.table_gen.generate(eo_number, self.cache)
+            # 2. Generate Table — include related EOs with primary shading
+            related_eos = {eo_number}
+            eo_prec = precedence_graph.get(eo_number, {})
+            for der in eo_prec.get("derived_from", []):
+                related_eos.add(der)
+            for rw in eo_prec.get("read_with", []):
+                related_eos.add(rw)
+
+            # Remove excluded EOs from related set
+            if self.exclude_eos:
+                related_eos -= self.exclude_eos
+
+            records: list[dict[str, Any]] = []
+            for num in related_eos:
+                records.extend(self.cache.by_eo(num))
+
+            table_md = self.table_gen.format_table(
+                records,
+                registry=self.registry,
+                name_lookup=self.name_lookup,
+                primary_eo=eo_number,
+            )
             if not table_md:
                  table_md = "_No official communications linked to this EO yet._"
 

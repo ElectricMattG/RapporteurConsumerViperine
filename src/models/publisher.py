@@ -161,6 +161,7 @@ class EOLinkingConfig:
     analysis_location: str = "global"
     output_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"
     shared_volume: str = "/mnt/workspace_2"
+    exclude_eos: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +374,7 @@ class PipelineConfig:
             output_cache_path=eo.get("output_cache_path",
                                      "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"),
             shared_volume=eo.get("shared_volume", "/mnt/workspace_2"),
+            exclude_eos=eo.get("exclude_eos", []),
         )
 
         return cfg

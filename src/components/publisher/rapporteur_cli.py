@@ -5672,6 +5672,8 @@ def build_parser() -> argparse.ArgumentParser:
     opts.add_argument("--frontend-url", default=None,        help="Override frontend URL from config")
     opts.add_argument("--edit-chapter", default=None,        help="Target a specific chapter for editorial review (filename substring)")
     opts.add_argument("--edit-instructions", default=None,   help="Custom editorial instructions for targeted chapter edit")
+    opts.add_argument("--exclude-eos",  nargs="*", default=None,
+                      help="EO numbers to exclude from diagrams and tables (e.g. --exclude-eos 14165 14370)")
     opts.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     return parser
@@ -5773,6 +5775,10 @@ def main(argv: list[str] | None = None) -> None:
     # Handle --force
     if args.force:
         cfg.force = True
+
+    # Handle --exclude-eos
+    if args.exclude_eos is not None:
+        cfg.eo_linking.exclude_eos = args.exclude_eos
 
     if not selected:
         parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --cite, --introduce, --eo-link, --publish, or --all.")

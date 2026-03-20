@@ -313,11 +313,38 @@ def run_phase4(articles: list[ArticleRecord] | None = None) -> None:
             log.warning("%s — no reflect.md, skipping.", batch_id)
             continue
 
+        # Merge per-batch conversation.json metadata into article_lookup
+        batch_lookup = dict(article_lookup)
+        conv_path = batch_dir / "conversation.json"
+        if conv_path.exists():
+            try:
+                conv_entries = json.loads(conv_path.read_text(encoding="utf-8"))
+                for entry in conv_entries:
+                    meta = entry.get("metadata", {})
+                    a_url = meta.get("article_url", "")
+                    a_title = meta.get("article_title", "")
+                    m = {
+                        "url": a_url,
+                        "title": a_title,
+                        "domain": meta.get("domain", ""),
+                        "date": meta.get("date", ""),
+                        "publisher": meta.get("publisher", ""),
+                    }
+                    if a_url and a_url not in batch_lookup:
+                        batch_lookup[a_url] = m
+                    if a_title and a_title not in batch_lookup:
+                        batch_lookup[a_title] = m
+                        norm = a_title.strip().lower()
+                        if norm and norm not in batch_lookup:
+                            batch_lookup[norm] = m
+            except (json.JSONDecodeError, OSError):
+                pass
+
         reflect_text = reflect_path.read_text(encoding="utf-8")
         records = extractor.extract(
             reflect_text,
             batch_id=batch_id,
-            article_lookup=article_lookup,
+            article_lookup=batch_lookup,
         )
         total_extracted += len(records)
 
@@ -376,7 +403,7 @@ def run_phase4(articles: list[ArticleRecord] | None = None) -> None:
 # ---------------------------------------------------------------------------
 
 
-def run_phase5(registry: EORegistry) -> None:
+def run_phase5(registry: EORegistry, exclude_eos: set[str] | None = None) -> None:
     """Generate Mermaid precedence diagrams per chapter."""
     log.info("=" * 60)
     log.info("PHASE 5 — Mermaid Diagram Generation")
@@ -407,6 +434,7 @@ def run_phase5(registry: EORegistry) -> None:
         precedence_graph=prec_graph,
         output_dir=OUTPUT_DIR,
         name_lookup=name_lookup,
+        exclude_eos=exclude_eos,
     )
 
     total_nodes = 0
@@ -433,9 +461,30 @@ def run_phase5(registry: EORegistry) -> None:
         registry=registry,
         output_dir=OUTPUT_DIR,
         name_lookup=name_lookup,
+        exclude_eos=exclude_eos,
     )
     log.info("Unified diagram: %d nodes, %d edges  →  %s",
              unified["nodes"], unified["edges"], unified["path"])
+
+    # Focused dependency diagrams for key EOs
+    diagrams_dir = Path(OUTPUT_DIR) / "diagrams"
+    merged = gen._merge_supercessions(prec_graph, registry)
+    for focus_eo in ["14192", "14157", "14183"]:
+        diagram = gen.generate_focused(
+            root_eo=focus_eo,
+            precedence_graph=prec_graph,
+            registry=registry,
+            name_lookup=name_lookup,
+            exclude_eos=exclude_eos,
+        )
+        out_path = diagrams_dir / f"focused_{focus_eo}.md"
+        header = f"# EO {focus_eo} — Focused Dependency Diagram\n\n"
+        out_path.write_text(
+            header + "```mermaid\n" + diagram + "\n```\n",
+            encoding="utf-8",
+        )
+        node_count = gen._count_nodes(diagram)
+        log.info("Focused EO %s: %d nodes  →  %s", focus_eo, node_count, out_path)
 
     # Show a sample diagram
     if manifest:
@@ -452,7 +501,7 @@ def run_phase5(registry: EORegistry) -> None:
 # Phase 6
 # ---------------------------------------------------------------------------
 
-def run_phase6(registry: EORegistry) -> None:
+def run_phase6(registry: EORegistry, exclude_eos: set[str] | None = None) -> None:
     """Generate implementation tables per chapter + cross-EO actions table."""
     log.info("=" * 60)
     log.info("PHASE 6 — Implementation Table Generation")
@@ -481,6 +530,7 @@ def run_phase6(registry: EORegistry) -> None:
         cache=cache,
         output_dir=OUTPUT_DIR,
         name_lookup=name_lookup,
+        exclude_eos=exclude_eos,
     )
 
     total_rows = sum(e["rows"] for e in manifest)
@@ -494,6 +544,7 @@ def run_phase6(registry: EORegistry) -> None:
         cache=cache,
         registry=registry,
         output_dir=OUTPUT_DIR,
+        name_lookup=name_lookup,
     )
 
     log.info("-" * 60)
@@ -518,7 +569,7 @@ def run_phase6(registry: EORegistry) -> None:
 # Phase 7
 # ---------------------------------------------------------------------------
 
-def run_phase7(registry: EORegistry) -> None:
+def run_phase7(registry: EORegistry, exclude_eos: set[str] | None = None) -> None:
     """Inject implementation sections into EO book chapters."""
     log.info("=" * 60)
     log.info("PHASE 7 — Chapter Integration")
@@ -531,12 +582,22 @@ def run_phase7(registry: EORegistry) -> None:
         return
 
     # 2. Init Generators
-    # Note: EODiagramGenerator implicitly uses default styles
     diagram_gen = EODiagramGenerator()
     table_gen = ImplementationTableGenerator()
+    names_path = Path(OUTPUT_DIR) / "eo_names.json"
+    name_lookup = EONameLookup(cache_path=names_path)
+    name_lookup.load()
+    name_lookup.populate(
+        impl_cache_path=CACHE_PATH,
+        eo_index_dir=PROJECT_ROOT / EO_INDEX_FOLDER,
+        chapters_dir=EO_BOOK_DIR,
+    )
+    name_lookup.save()
 
     # 3. Run Enricher
-    enricher = ChapterEnricher(registry, cache, diagram_gen, table_gen)
+    enricher = ChapterEnricher(registry, cache, diagram_gen, table_gen,
+                               name_lookup=name_lookup,
+                               exclude_eos=exclude_eos)
     enricher.enrich_chapters(EO_BOOK_DIR)
 
 
@@ -576,9 +637,17 @@ def main() -> None:
         "-n", type=int, default=None,
         help="Limit Phase 2 to first N articles, or Phase 3 to first N batches",
     )
+    parser.add_argument(
+        "--exclude-eos", nargs="*", default=None,
+        help="EO numbers to exclude from diagrams and tables (e.g. --exclude-eos 14165 14370)",
+    )
     args = parser.parse_args()
 
     gov_articles, registry = run_phase1()
+
+    exclude = set(args.exclude_eos) if args.exclude_eos else None
+    if exclude:
+        log.info("Excluding EOs from output: %s", ", ".join(sorted(exclude)))
 
     if args.live:
         run_phase2(gov_articles, max_articles=args.n)
@@ -587,41 +656,41 @@ def main() -> None:
         if args.phase4:
             run_phase4(gov_articles)
         if args.phase5:
-            run_phase5(registry)
+            run_phase5(registry, exclude_eos=exclude)
         if args.phase6:
-            run_phase6(registry)
+            run_phase6(registry, exclude_eos=exclude)
         if args.phase7:
-            run_phase7(registry)
+            run_phase7(registry, exclude_eos=exclude)
     elif args.phase3:
         run_phase3(registry, max_batches=args.n)
         if args.phase4:
             run_phase4(gov_articles)
         if args.phase5:
-            run_phase5(registry)
+            run_phase5(registry, exclude_eos=exclude)
         if args.phase6:
-            run_phase6(registry)
+            run_phase6(registry, exclude_eos=exclude)
         if args.phase7:
-            run_phase7(registry)
+            run_phase7(registry, exclude_eos=exclude)
     elif args.phase4:
         run_phase4(gov_articles)
         if args.phase5:
-            run_phase5(registry)
+            run_phase5(registry, exclude_eos=exclude)
         if args.phase6:
-            run_phase6(registry)
+            run_phase6(registry, exclude_eos=exclude)
         if args.phase7:
-            run_phase7(registry)
+            run_phase7(registry, exclude_eos=exclude)
     elif args.phase5:
-        run_phase5(registry)
+        run_phase5(registry, exclude_eos=exclude)
         if args.phase6:
-            run_phase6(registry)
+            run_phase6(registry, exclude_eos=exclude)
         if args.phase7:
-            run_phase7(registry)
+            run_phase7(registry, exclude_eos=exclude)
     elif args.phase6:
-        run_phase6(registry)
+        run_phase6(registry, exclude_eos=exclude)
         if args.phase7:
-            run_phase7(registry)
+            run_phase7(registry, exclude_eos=exclude)
     elif args.phase7:
-        run_phase7(registry)
+        run_phase7(registry, exclude_eos=exclude)
     else:
         # Dry-run: show what Phase 2 would do
         batcher = TokenBudgetBatcher(batch_size=BATCH_SIZE)

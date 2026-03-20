@@ -6,6 +6,8 @@ Orchestrates the EO linking pipeline:
   Phase 3: LINK-REFLECT prompt tuple per batch via Gemini
   Phase 4: extract linkage records from REFLECT, build implementation cache
   Phase 5: generate Mermaid precedence diagrams per chapter
+  Phase 6: generate implementation tables per chapter + cross-EO actions
+  Phase 7: inject implementation sections into EO book chapters
 """
 
 from __future__ import annotations
@@ -14,13 +16,15 @@ import json
 from pathlib import Path
 
 from src.components.analysis.eo_linking import (_RAG_PRICING, ArticleRecord,
+                                                ChapterEnricher,
                                                 ConversationBuilder,
                                                 CostTracker, EOChatDriver,
                                                 EODiagramGenerator,
                                                 EOImplementationCache,
                                                 EONameLookup, EORegistry,
-                                                GovMilExtractor, IndexLoader,
-                                                LinkageExtractor,
+                                                GovMilExtractor,
+                                                ImplementationTableGenerator,
+                                                IndexLoader, LinkageExtractor,
                                                 LinkReflectDriver,
                                                 TokenBudgetBatcher,
                                                 load_index_catalog)
@@ -38,6 +42,8 @@ class EOLinkStage(Base):
     Phase 3 — LINK-REFLECT two-call LLM synthesis per batch.
     Phase 4 — Linkage extraction and implementation cache build.
     Phase 5 — Mermaid precedence diagram generation per chapter.
+    Phase 6 — implementation tables per chapter + cross-EO actions.
+    Phase 7 — inject implementation sections into EO book chapters.
     """
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -249,11 +255,13 @@ class EOLinkStage(Base):
 
         diagram_gen = EODiagramGenerator()
         prec_graph = cache.precedence_graph()
+        exclude = set(eo_cfg.exclude_eos) if eo_cfg.exclude_eos else None
         manifest = diagram_gen.generate_for_chapters(
             registry=registry,
             precedence_graph=prec_graph,
             output_dir=output_dir,
             name_lookup=name_lookup,
+            exclude_eos=exclude,
         )
 
         total_warnings = sum(len(m["warnings"]) for m in manifest)
@@ -264,4 +272,49 @@ class EOLinkStage(Base):
                           sum(m["nodes"] for m in manifest))
         self._logger.info("  Warnings:           %d", total_warnings)
         self._logger.info("  Output dir:         %s/diagrams/", output_dir)
+        self._logger.info("=" * 60)
+
+        # -- Phase 6: Implementation Table Generation -----------------------
+        self._logger.info("Starting Phase 6 — Implementation Tables...")
+
+        table_gen = ImplementationTableGenerator()
+        table_manifest = table_gen.generate_for_chapters(
+            registry=registry,
+            cache=cache,
+            output_dir=output_dir,
+            name_lookup=name_lookup,
+            exclude_eos=exclude,
+        )
+
+        total_rows = sum(e["rows"] for e in table_manifest)
+
+        cross_path = table_gen.generate_cross_eo(
+            cache=cache,
+            registry=registry,
+            output_dir=output_dir,
+            name_lookup=name_lookup,
+        )
+
+        self._logger.info("=" * 60)
+        self._logger.info("EO Linking — Phase 6 Summary")
+        self._logger.info("  Chapter tables:     %d", len(table_manifest))
+        self._logger.info("  Total rows:         %d", total_rows)
+        self._logger.info("  Cross-EO table:     %s", cross_path)
+        self._logger.info("  Output dir:         %s/tables/", output_dir)
+        self._logger.info("=" * 60)
+
+        # -- Phase 7: Chapter Integration -----------------------------------
+        self._logger.info("Starting Phase 7 — Chapter Integration...")
+
+        enricher = ChapterEnricher(
+            registry, cache, diagram_gen, table_gen,
+            name_lookup=name_lookup,
+            exclude_eos=exclude,
+        )
+        enricher.enrich_chapters(eo_cfg.eo_book_dir)
+
+        self._logger.info("=" * 60)
+        self._logger.info("EO Linking — Phase 7 Summary")
+        self._logger.info("  Chapters enriched:  %d", len(registry.chapter_texts))
+        self._logger.info("  Book dir:           %s", eo_cfg.eo_book_dir)
         self._logger.info("=" * 60)
