@@ -366,6 +366,13 @@ defaults = {
         "max_images_per_page": 50,                # Maximum images to extract from each page
         "linked_batch_size": 50,                  # Batch size for linked content URL processing
     },
+    "redis": {
+        # Redis configuration for LLM response caching
+        "host": "redis.rag-service.svc.cluster.local",  # Redis hostname
+        "port": 6379,  # Redis port
+        "password": "",  # Set via REDIS_PASSWORD env var or config
+        "llm_cache_ttl_seconds": 432000,  # 5 days TTL for cached LLM responses
+    },
 }
 
 

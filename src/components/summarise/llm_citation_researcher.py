@@ -119,7 +119,7 @@ class CitationResearchClient(Base):
         # Import Gemini client
         try:
             sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../'))
-            from clients.llm_gcp_client import GeminiLLMClient
+            from _clients.llm_gcp_client import GeminiLLMClient
         except ImportError as e:
             raise ImportError(f"Failed to import GeminiLLMClient: {e}")
 
@@ -127,7 +127,16 @@ class CitationResearchClient(Base):
 
         # Initialize Gemini client
         try:
-            self.client = GeminiLLMClient(model_name=self.model_name)
+            from clients.llm_cache_client import CachedLLMClient
+            from config import app_conf
+            _inner = GeminiLLMClient(model_name=self.model_name)
+            self.client = CachedLLMClient(
+                _inner,
+                redis_host=app_conf.get("redis.host") or "",
+                redis_port=int(app_conf.get("redis.port") or 6379),
+                redis_password=app_conf.get("redis.password") or None,
+                ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
+            )
             self.is_reasoning_model = False  # Gemini doesn't have separate reasoning API
 
             self._logger.info(f"   🤖 Model: {self.model_name}")

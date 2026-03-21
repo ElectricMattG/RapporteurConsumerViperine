@@ -31,8 +31,9 @@ from pydantic import BaseModel, Field, field_validator
 # Add src to path
 sys.path.insert(0, str(Path(__file__).parent / "src"))
 
-from src.clients.embedding_client import EmbeddingServiceClient
-from src.clients.llm_gcp_client import GeminiLLMClient
+from src._clients.embedding_client import EmbeddingServiceClient
+from src._clients.llm_gcp_client import GeminiLLMClient
+from src.clients.llm_cache_client import CachedLLMClient
 from src.prompts.q_a import build_qa_refinement_prompt
 from src.prompts.summaries import build_summary_prompt
 
@@ -1435,7 +1436,15 @@ async def startup_event():
     state.embedding_client = EmbeddingServiceClient()
 
     logger.info("🔧 Initializing LLM client...")
-    state.llm_client = GeminiLLMClient()
+    from src.config import app_conf
+    _inner = GeminiLLMClient()
+    state.llm_client = CachedLLMClient(
+        _inner,
+        redis_host=app_conf.get("redis.host") or "",
+        redis_port=int(app_conf.get("redis.port") or 6379),
+        redis_password=app_conf.get("redis.password") or None,
+        ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
+    )
 
     state.index_loaded = True
     state.startup_time = datetime.now()

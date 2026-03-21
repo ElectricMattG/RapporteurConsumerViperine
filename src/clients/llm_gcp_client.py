@@ -7,12 +7,13 @@ using the google-genai SDK. Compatible interface with SimpleLLMClient.
 """
 import asyncio
 import json
+import logging
 import os
 import random
 import re
 import sys
 import time
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from google import genai
 from google.genai import types
@@ -54,7 +55,7 @@ class GeminiLLMClient(Base):
 
         # LLM generation parameters from config (compatible with SimpleLLMClient)
         self.max_length = self._app_config.get('llm.max_length') or 500
-        self.temperature = self._app_config.get('llm.temperature') or 0.5
+        self.temperature = self._app_config.get('llm.temperature') or 0.7
         self.top_p = self._app_config.get('llm.top_p') or 0.9
         self.max_retries = self._app_config.get('llm.max_retries') or 3
         self.retry_delay = self._app_config.get('llm.retry_delay') or 1.0
@@ -62,6 +63,28 @@ class GeminiLLMClient(Base):
 
         # Gemini-specific settings
         self.timeout = self._app_config.get('gemini.timeout') or 60
+
+        # ── Per-stage model overrides (V17) ──────────────────────────
+        # Reads bboa.models dict: {"event_detection": "gemini-2.5-pro", ...}
+        # If missing or empty, all stages use self.model_name.
+        try:
+            raw = self._app_config.get('bboa.models')
+            if isinstance(raw, dict):
+                self._stage_models: Dict[str, str] = dict(raw)
+            elif hasattr(raw, 'as_dict'):
+                self._stage_models = raw.as_dict()
+            else:
+                self._stage_models = {}
+        except (KeyError, TypeError):
+            self._stage_models = {}
+
+        # Token usage tracking (Phase U8)
+        self._total_usage: Dict[str, int] = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "calls": 0,
+        }
+        self._cost_tracker: Optional[Any] = None  # LLMCostTracker instance
 
         # Initialize Gemini client
         try:
@@ -73,6 +96,8 @@ class GeminiLLMClient(Base):
             self._logger.info(f"   🌐 GCP Project: {self.project_id}")
             self._logger.info(f"   📍 Location: {self.location}")
             self._logger.info(f"   🤖 Model: {self.model_name}")
+            if self._stage_models:
+                self._logger.info(f"   🔀 Stage model overrides: {self._stage_models}")
             self._logger.debug(f"   ⚙️  Config - timeout: {self.timeout}s, temp: {self.temperature}, top_p: {self.top_p}")
             self._logger.debug(f"   📏 Max context chars: {self.max_context_chars}")
         except Exception as e:
@@ -129,9 +154,33 @@ class GeminiLLMClient(Base):
 
         return True
 
+    @property
+    def cost_tracker(self) -> Optional[Any]:
+        """Get the attached cost tracker (if any)."""
+        return self._cost_tracker
+
+    @cost_tracker.setter
+    def cost_tracker(self, tracker: Any) -> None:
+        """Attach an LLMCostTracker to record per-call costs."""
+        self._cost_tracker = tracker
+
+    def get_usage(self) -> Dict[str, int]:
+        """Return accumulated token usage since last reset."""
+        return dict(self._total_usage)
+
+    def reset_usage(self) -> None:
+        """Reset accumulated token counters to zero."""
+        self._total_usage = {
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "calls": 0,
+        }
+
     async def generate_content(self, prompt: str, temperature: Optional[float] = None,
                         max_tokens: Optional[int] = None, enable_search: bool = False,
-                        return_grounding_metadata: bool = False, response_mime_type: Optional[str] = None) -> str:
+                        return_grounding_metadata: bool = False,
+                        response_mime_type: Optional[str] = None,
+                        stage: Optional[str] = None) -> str:
         """Generate content using Gemini with specified parameters (async).
 
         Args:
@@ -180,24 +229,74 @@ class GeminiLLMClient(Base):
             try:
                 # Run blocking Gemini API call in thread pool to avoid blocking event loop
                 # This enables true concurrent processing of multiple requests
+                # Resolve effective model for this stage (V17)
+                effective_model = self._stage_models.get(stage, self.model_name) if stage else self.model_name
+
                 loop = asyncio.get_event_loop()
                 response = await loop.run_in_executor(
                     None,  # Use default ThreadPoolExecutor
                     lambda: self.client.models.generate_content(
-                        model=self.model_name,
+                        model=effective_model,
                         contents=prompt,
                         config=config
                     )
                 )
 
-                # Extract text and optional grounding metadata
-                text = response.text
+                # ── Token usage tracking (Phase U8) ──────────
+                input_tokens = 0
+                output_tokens = 0
+                if hasattr(response, 'usage_metadata') and response.usage_metadata:
+                    meta = response.usage_metadata
+                    input_tokens = getattr(meta, 'prompt_token_count', 0) or 0
+                    output_tokens = getattr(meta, 'candidates_token_count', 0) or 0
+                    self._total_usage["input_tokens"] += input_tokens
+                    self._total_usage["output_tokens"] += output_tokens
+                    self._total_usage["calls"] += 1
 
-                # Log finish reason to diagnose truncation
-                if hasattr(response, 'candidates') and response.candidates:
-                    candidate = response.candidates[0]
-                    finish_reason = candidate.finish_reason if hasattr(candidate, 'finish_reason') else 'UNKNOWN'
-                    self._logger.info(f"   🏁 Gemini finish_reason: {finish_reason}")
+                if self._cost_tracker is not None:
+                    try:
+                        self._cost_tracker.record_call(
+                            model=effective_model,
+                            stage=stage or "unknown",
+                            input_tokens=input_tokens,
+                            output_tokens=output_tokens,
+                            search_grounding=enable_search,
+                        )
+                    except Exception:  # pragma: no cover
+                        pass  # Never let cost tracking break the pipeline
+
+                # Extract text and optional grounding metadata
+                # Check if response has valid candidates
+                if not hasattr(response, 'candidates') or not response.candidates:
+                    error_msg = "No response candidates generated"
+                    # Check for safety blocks
+                    if hasattr(response, 'prompt_feedback'):
+                        feedback = response.prompt_feedback
+                        if hasattr(feedback, 'block_reason'):
+                            error_msg = f"Response blocked: {feedback.block_reason}"
+                    self._logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)
+
+                # Safely extract text from the first candidate
+                candidate = response.candidates[0]
+                if not hasattr(candidate, 'content') or not candidate.content:
+                    self._logger.error("❌ Response candidate has no content")
+                    raise Exception("Response candidate has no content")
+
+                # Get text from parts
+                text_parts = []
+                if hasattr(candidate.content, 'parts') and candidate.content.parts:
+                    for part in candidate.content.parts:
+                        if hasattr(part, 'text') and part.text:
+                            text_parts.append(part.text)
+
+                text = ''.join(text_parts) if text_parts else None
+
+                if not text:
+                    # Check for finish reason (may indicate safety filter or other issue)
+                    finish_reason = getattr(candidate, 'finish_reason', 'UNKNOWN')
+                    self._logger.error(f"❌ Empty response (finish_reason: {finish_reason})")
+                    raise Exception(f"Empty response from model (finish_reason: {finish_reason})")
 
                 # If search was enabled and metadata requested, return full response
                 if return_grounding_metadata and enable_search:

@@ -819,12 +819,21 @@ class LinkReflectDriver(Base):
         }
 
     def _get_client(self):
-        """Lazy-init the Gemini client."""
+        """Lazy-init the Gemini client, wrapped with Redis cache."""
         if self._client is None:
-            from src.clients.llm_gcp_client import GeminiLLMClient
-            self._client = GeminiLLMClient(
+            from src._clients.llm_gcp_client import GeminiLLMClient
+            from src.clients.llm_cache_client import CachedLLMClient
+            from src.config import app_conf
+            _inner = GeminiLLMClient(
                 model_name=self.model_name,
                 location=self.location,
+            )
+            self._client = CachedLLMClient(
+                _inner,
+                redis_host=app_conf.get("redis.host") or "",
+                redis_port=int(app_conf.get("redis.port") or 6379),
+                redis_password=app_conf.get("redis.password") or None,
+                ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
             )
         return self._client
 

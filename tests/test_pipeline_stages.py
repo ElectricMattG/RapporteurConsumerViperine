@@ -349,15 +349,21 @@ class TestPublishStage:
         assert result.count("## Second") == 1
         assert result.startswith("# First")
 
-    def test_strip_mermaid_blocks(self):
+    def test_render_mermaid_blocks(self, tmp_path):
         from src.components.publisher.rapporteur_cli import PublishStage
 
+        cfg = _make_config(tmp_path)
+        stage = PublishStage(cfg)
+        src_dir = tmp_path / "_sphinx_src"
+        src_dir.mkdir()
+
         text = "Before\n\n```mermaid\ngraph LR\nA --> B\n```\n\nAfter"
-        result = PublishStage._strip_mermaid_blocks(text)
-        assert "mermaid" not in result
+        result = stage._render_mermaid_blocks(text, src_dir)
+        assert "```mermaid" not in result
         assert "Before" in result
         assert "After" in result
-        assert "Diagram omitted" in result
+        # Either rendered to image or fell back to placeholder
+        assert ("_diagrams/" in result or "Diagram" in result)
 
     def test_no_manifest_returns(self, tmp_path):
         from src.components.publisher.rapporteur_cli import PublishStage
@@ -395,3 +401,326 @@ class TestPublishStage:
 
         result = PublishStage._pdf_page_count(tmp_path / "nonexistent.pdf")
         assert result is None
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PublishStage — chapter ordering
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestSortChapterEntries:
+    def test_intro_comes_first(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        entries = [
+            {"filename": "03-body.md"},
+            {"filename": "00-introduction.md"},
+            {"filename": "01-start.md"},
+        ]
+        result = PublishStage._sort_chapter_entries(entries)
+        assert result[0]["filename"] == "00-introduction.md"
+
+    def test_natural_numeric_order(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        entries = [
+            {"filename": "02-second.md"},
+            {"filename": "01-first.md"},
+            {"filename": "03-third.md"},
+        ]
+        result = PublishStage._sort_chapter_entries(entries)
+        fnames = [e["filename"] for e in result]
+        assert fnames == ["01-first.md", "02-second.md", "03-third.md"]
+
+    def test_introduction_by_name(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        entries = [
+            {"filename": "05-conclusion.md"},
+            {"filename": "introduction.md"},
+            {"filename": "01-chapter.md"},
+        ]
+        result = PublishStage._sort_chapter_entries(entries)
+        assert result[0]["filename"] == "introduction.md"
+
+    def test_section_intros_after_intro(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        entries = [
+            {"filename": "03-body.md"},
+            {"filename": "part-1-intro.md"},
+            {"filename": "00-introduction.md"},
+        ]
+        result = PublishStage._sort_chapter_entries(entries)
+        assert result[0]["filename"] == "00-introduction.md"
+        assert result[1]["filename"] == "part-1-intro.md"
+        assert result[2]["filename"] == "03-body.md"
+
+    def test_empty_list(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        assert PublishStage._sort_chapter_entries([]) == []
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PublishStage — reference extraction and APA formatting
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestExtractReferences:
+    def _make_stage(self, tmp_path):
+        from src.components.publisher.rapporteur_cli import PublishStage
+        cfg = _make_config(tmp_path)
+        return PublishStage(cfg)
+
+    def test_extracts_ref_lines(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        text = (
+            "# Chapter\n\nBody text.\n\n"
+            "## References\n\n"
+            "- **Author A** (2025). *Title A*. Publisher. [url](url)\n"
+            "- **Author B** (2026). *Title B*. Publisher. [url2](url2)\n"
+        )
+        clean, refs = stage._extract_references(text)
+        assert len(refs) == 2
+        assert "Author A" in refs[0]
+        assert "## References" not in clean
+
+    def test_strips_top_sources(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        text = (
+            "# Chapter\n\nBody.\n\n"
+            "## Top Sources\n\n"
+            "1. Source one\n2. Source two\n\n"
+            "## References\n\n"
+            "- **Author** (2025). *Title*. Pub. [u](u)\n"
+        )
+        clean, refs = stage._extract_references(text)
+        assert "## Top Sources" not in clean
+        assert "## References" not in clean
+        assert len(refs) == 1
+
+    def test_no_refs_returns_empty(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        text = "# Chapter\n\nJust body text.\n"
+        clean, refs = stage._extract_references(text)
+        assert refs == []
+        assert "Just body text" in clean
+
+    def test_preserves_body_text(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        text = (
+            "# Chapter\n\nImportant content here.\n\n"
+            "## Section\n\nMore content.\n\n"
+            "## References\n\n"
+            "- **A** (2025). *T*. P. [u](u)\n"
+        )
+        clean, refs = stage._extract_references(text)
+        assert "Important content here" in clean
+        assert "More content" in clean
+
+
+class TestParseRefLine:
+    def test_full_line(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        line = "- **John Doe** (March 2025). *Article Title*. The Publisher. [https://example.com](https://example.com)"
+        result = PublishStage._parse_ref_line(line)
+        assert result["author"] == "John Doe"
+        assert result["date"] == "March 2025"
+        assert result["title"] == "Article Title"
+        assert result["publisher"] == "The Publisher"
+        assert result["url"] == "https://example.com"
+
+    def test_no_date(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        line = "- **Unknown**. *Some Title*. Publisher. [https://x.com](https://x.com)"
+        result = PublishStage._parse_ref_line(line)
+        assert result["author"] == "Unknown"
+        assert "date" not in result
+
+    def test_no_url(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        line = "- **Author** (2025). *Title*. Publisher Name"
+        result = PublishStage._parse_ref_line(line)
+        assert result["author"] == "Author"
+        assert "url" not in result
+        assert result["publisher"] == "Publisher Name"
+
+    def test_minimal_line(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        line = "- **Author** (2025)."
+        result = PublishStage._parse_ref_line(line)
+        assert result["author"] == "Author"
+        assert result["date"] == "2025"
+
+
+class TestFormatApaReferences:
+    def _make_stage(self, tmp_path):
+        from src.components.publisher.rapporteur_cli import PublishStage
+        cfg = _make_config(tmp_path)
+        return PublishStage(cfg)
+
+    def test_deduplicates_by_url(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        refs = [
+            "- **Author** (2025). *Title*. Pub. [https://example.com/a](https://example.com/a)",
+            "- **Author** (2025). *Title*. Pub. [https://example.com/a](https://example.com/a)",
+            "- **Other** (2026). *Other*. Pub. [https://example.com/b](https://example.com/b)",
+        ]
+        result = stage._format_apa_references(refs)
+        # Should have 2 unique refs, not 3
+        assert result.count("\n- ") == 2
+
+    def test_sorted_by_surname(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        refs = [
+            "- **Zoe Smith** (2025). *Title*. Pub. [https://a.com](https://a.com)",
+            "- **Alice Jones** (2025). *Title*. Pub. [https://b.com](https://b.com)",
+        ]
+        result = stage._format_apa_references(refs)
+        lines = [l for l in result.split('\n') if l.startswith('- ')]
+        assert "Alice Jones" in lines[0]
+        assert "Zoe Smith" in lines[1]
+
+    def test_apa_format(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        refs = [
+            "- **Author Name** (March 2025). *Article Title*. The Guardian. [https://x.com](https://x.com)",
+        ]
+        result = stage._format_apa_references(refs)
+        assert "# References" in result
+        assert "APA 7th" in result
+        assert "Author Name. (March 2025)." in result
+        assert "*Article Title.*" in result
+
+    def test_empty_refs(self, tmp_path):
+        stage = self._make_stage(tmp_path)
+        result = stage._format_apa_references([])
+        assert "# References" in result
+
+
+# ══════════════════════════════════════════════════════════════════════
+# PublishStage — diagram repositioning
+# ══════════════════════════════════════════════════════════════════════
+
+
+class TestRepositionDiagrams:
+    def test_moves_impl_record_after_exec_summary(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        text = (
+            "# Chapter Title\n"
+            "> **Executive Summary:** This is the summary.\n"
+            "\n"
+            "## Section 1\n\nBody text.\n"
+            "\n"
+            "## Implementation Record\n"
+            "\n"
+            "### EO Precedence\n"
+            "\n"
+            "```mermaid\ngraph LR\nA --> B\n```\n"
+        )
+        result = stage._reposition_diagrams(text)
+        # Implementation Record should appear before Section 1
+        impl_pos = result.find("## Implementation Record")
+        section_pos = result.find("## Section 1")
+        assert impl_pos < section_pos
+        # And after the exec summary
+        summary_pos = result.find("Executive Summary")
+        assert impl_pos > summary_pos
+
+    def test_no_impl_record_unchanged(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        text = "# Chapter\n\nBody text only.\n"
+        assert stage._reposition_diagrams(text) == text
+
+    def test_no_exec_summary_fallback(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        text = (
+            "# Chapter\n"
+            "## Section 1\n\nBody.\n"
+            "\n"
+            "## Implementation Record\n"
+            "\n"
+            "### EO Precedence\n"
+            "\n"
+            "Diagram here\n"
+        )
+        result = stage._reposition_diagrams(text)
+        # Should still contain both sections
+        assert "## Implementation Record" in result
+        assert "## Section 1" in result
+
+    def test_multiple_blockquotes(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        text = (
+            "# Chapter Title\n"
+            "> **Executive Summary:** First summary.\n"
+            "\n"
+            "> **Executive Summary:** Second summary.\n"
+            "\n"
+            "## Section 1\n\nBody.\n"
+            "\n"
+            "## Implementation Record\n"
+            "\n"
+            "Diagram content.\n"
+        )
+        result = stage._reposition_diagrams(text)
+        impl_pos = result.find("## Implementation Record")
+        section_pos = result.find("## Section 1")
+        assert impl_pos < section_pos
+
+
+class TestAddDiagramCaptions:
+    def test_adds_caption_to_mermaid(self, tmp_path):
+        from unittest.mock import patch
+
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        cfg = _make_config(tmp_path)
+        stage = PublishStage(cfg)
+
+        text = "# Chapter\n\n```mermaid\ngraph LR\nA --> B\n```\n\nAfter"
+        with patch.object(stage, '_generate_diagram_caption', return_value="Test caption"):
+            result = stage._add_diagram_captions(text)
+        assert "*Test caption*" in result
+        assert "```mermaid" in result
+
+    def test_no_mermaid_unchanged(self, tmp_path):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        cfg = _make_config(tmp_path)
+        stage = PublishStage(cfg)
+
+        text = "# Chapter\n\nNo diagrams here.\n"
+        result = stage._add_diagram_captions(text)
+        assert result == text
+
+
+class TestCalculateCostPublish:
+    def test_flash_pricing(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        stage._logger = __import__("logging").getLogger("test")
+        cost = stage._calculate_cost("gemini-2.5-flash", 1_000_000, 1_000_000)
+        assert cost == pytest.approx(0.30 + 2.50)
+
+    def test_unknown_model_fallback(self):
+        from src.components.publisher.rapporteur_cli import PublishStage
+
+        stage = object.__new__(PublishStage)
+        stage._logger = __import__("logging").getLogger("test")
+        cost = stage._calculate_cost("unknown-model", 1_000_000, 0)
+        assert cost == pytest.approx(0.30)  # falls back to flash pricing

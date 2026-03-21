@@ -206,7 +206,7 @@ class OpenAILLMClient(Base):
                     messages=[
                         {"role": "user", "content": prompt}
                     ],
-                    temperature=0.5,  # Default for non-reasoning models
+                    temperature=0.7,  # Default for non-reasoning models
                     top_p=0.9,
                     max_tokens=max_tokens if max_tokens is not None else self.max_length,
                 )

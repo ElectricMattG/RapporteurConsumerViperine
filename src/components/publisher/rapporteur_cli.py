@@ -85,6 +85,64 @@ def _gemini_location(model: str) -> str | None:
 
 
 # ---------------------------------------------------------------------------
+# LLM response cache helpers  (sync, uses centralized Redis config)
+# ---------------------------------------------------------------------------
+
+import hashlib as _hashlib
+
+
+def _llm_cache_key(model: str, prompt: str) -> str:
+    """Deterministic cache key: first 32 hex chars of sha256(model|prompt)."""
+    return _hashlib.sha256(f"{model}|{prompt}".encode()).hexdigest()[:32]
+
+
+def _get_redis_sync():
+    """Return a **sync** Redis client using centralized config, or None."""
+    try:
+        from src.config import app_conf
+        host = app_conf.get("redis.host") or ""
+        if not host:
+            return None
+        import redis as _redis
+        return _redis.Redis(
+            host=host,
+            port=int(app_conf.get("redis.port") or 6379),
+            password=app_conf.get("redis.password") or None,
+            decode_responses=False,
+        )
+    except Exception:
+        return None
+
+
+def _llm_cache_get(model: str, prompt: str) -> str | None:
+    """Check Redis for a cached LLM response. Returns text or None."""
+    r = _get_redis_sync()
+    if r is None:
+        return None
+    try:
+        val = r.get(_llm_cache_key(model, prompt))
+        if val is not None:
+            log.debug("LLM cache HIT  key=%s…", _llm_cache_key(model, prompt)[:12])
+            return val.decode("utf-8") if isinstance(val, bytes) else val
+    except Exception:
+        log.debug("Redis GET failed; falling through to LLM")
+    return None
+
+
+def _llm_cache_set(model: str, prompt: str, result: str) -> None:
+    """Store an LLM response in Redis with the configured TTL."""
+    r = _get_redis_sync()
+    if r is None:
+        return
+    try:
+        from src.config import app_conf
+        ttl = int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000)
+        r.setex(_llm_cache_key(model, prompt), ttl, result)
+    except Exception:
+        log.debug("Redis SETEX failed; result not cached")
+
+
+# ---------------------------------------------------------------------------
 # Phase 5.5 — Full EO index grounding (shared helper)
 # ---------------------------------------------------------------------------
 
@@ -1668,7 +1726,7 @@ class FormatStage(Base):
 
         from google.genai import types as genai_types
 
-        from src.clients.llm_gcp_client import GeminiLLMClient
+        from src._clients.llm_gcp_client import GeminiLLMClient
         client = GeminiLLMClient(model_name=fmt.model, location=_gemini_location(fmt.model))
 
         table_counter = 0     # running table number
@@ -1866,7 +1924,14 @@ class FormatStage(Base):
 
         Uses the underlying google-genai client directly so we can read
         ``response.usage_metadata`` for token counts.
+        Checks Redis cache first; stores responses on miss.
         """
+        # --- Redis cache check ---
+        cached = _llm_cache_get(client.model_name, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         from google.genai import types as genai_types
         config = genai_types.GenerateContentConfig(
             temperature=0.2,
@@ -1885,6 +1950,11 @@ class FormatStage(Base):
             usage["input"] = getattr(um, "prompt_token_count", 0) or 0
             usage["output"] = getattr(um, "candidates_token_count", 0) or 0
             usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+
+        # --- Redis cache store ---
+        if text:
+            _llm_cache_set(client.model_name, prompt, text)
+
         return text, usage
 
     def _log_usage(self, label: str, usage: dict, model: str) -> None:
@@ -2281,13 +2351,20 @@ class ConcludeStage(Base):
         """Call the configured LLM provider and return (text, usage_dict).
 
         Supports dual-provider: OpenAI (Responses API) or Gemini.
+        Checks Redis cache first; stores responses on miss.
         """
+        # --- Redis cache check ---
+        cached = _llm_cache_get(co.model, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         import asyncio
 
         usage: dict = {"input": 0, "output": 0, "thinking": 0}
 
         if co.provider == "openai":
-            from src.clients.llm_openai_client import OpenAILLMClient
+            from src._clients.llm_openai_client import OpenAILLMClient
 
             client = OpenAILLMClient(model_name=co.model)
             max_tokens = 16_000
@@ -2318,13 +2395,15 @@ class ConcludeStage(Base):
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
 
+            if text:
+                _llm_cache_set(co.model, prompt, text)
             return text, usage
 
         else:
             # Gemini provider
             from google.genai import types as genai_types
 
-            from src.clients.llm_gcp_client import GeminiLLMClient
+            from src._clients.llm_gcp_client import GeminiLLMClient
 
             client = GeminiLLMClient(model_name=co.model, location=_gemini_location(co.model))
             max_tokens = 16_000
@@ -2346,6 +2425,8 @@ class ConcludeStage(Base):
                 usage["output"] = getattr(um, "candidates_token_count", 0) or 0
                 usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
 
+            if text:
+                _llm_cache_set(co.model, prompt, text)
             return text, usage
 
     # -- prompt builders ----------------------------------------------------
@@ -3317,7 +3398,14 @@ class EditStage(Base):
         """Call the configured LLM provider and return (text, usage_dict).
 
         Supports dual-provider: OpenAI (Responses API) or Gemini.
+        Checks Redis cache first; stores responses on miss.
         """
+        # --- Redis cache check ---
+        cached = _llm_cache_get(ec.model, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         import asyncio
 
         from src.models.publisher import EditConfig as _EC  # noqa: F811
@@ -3325,7 +3413,7 @@ class EditStage(Base):
         usage: dict = {"input": 0, "output": 0, "thinking": 0}
 
         if ec.provider == "openai":
-            from src.clients.llm_openai_client import OpenAILLMClient
+            from src._clients.llm_openai_client import OpenAILLMClient
 
             client = OpenAILLMClient(model_name=ec.model)
             max_tokens = 16_000
@@ -3353,13 +3441,15 @@ class EditStage(Base):
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
 
+            if text:
+                _llm_cache_set(ec.model, prompt, text)
             return text, usage
 
         else:
             # Gemini provider
             from google.genai import types as genai_types
 
-            from src.clients.llm_gcp_client import GeminiLLMClient
+            from src._clients.llm_gcp_client import GeminiLLMClient
 
             client = GeminiLLMClient(model_name=ec.model, location=_gemini_location(ec.model))
             max_tokens = 16_000
@@ -3381,6 +3471,8 @@ class EditStage(Base):
                 usage["output"] = getattr(um, "candidates_token_count", 0) or 0
                 usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
 
+            if text:
+                _llm_cache_set(ec.model, prompt, text)
             return text, usage
 
     # -- prompt builders ----------------------------------------------------
@@ -4788,13 +4880,20 @@ class IntroduceStage(Base):
     def _generate_with_usage(
         self, ic: IntroduceConfig, prompt: str,
     ) -> tuple[str, dict]:
-        """Call the configured LLM provider and return (text, usage_dict)."""
+        """Call the configured LLM provider and return (text, usage_dict).
+        Checks Redis cache first; stores responses on miss."""
+        # --- Redis cache check ---
+        cached = _llm_cache_get(ic.model, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         import asyncio
 
         usage: dict = {"input": 0, "output": 0, "thinking": 0}
 
         if ic.provider == "openai":
-            from src.clients.llm_openai_client import OpenAILLMClient
+            from src._clients.llm_openai_client import OpenAILLMClient
 
             client = OpenAILLMClient(model_name=ic.model)
 
@@ -4821,12 +4920,14 @@ class IntroduceStage(Base):
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
 
+            if text:
+                _llm_cache_set(ic.model, prompt, text)
             return text, usage
 
         else:
             from google.genai import types as genai_types
 
-            from src.clients.llm_gcp_client import GeminiLLMClient
+            from src._clients.llm_gcp_client import GeminiLLMClient
 
             client = GeminiLLMClient(model_name=ic.model, location=_gemini_location(ic.model))
 
@@ -4847,6 +4948,8 @@ class IntroduceStage(Base):
                 usage["output"] = getattr(um, "candidates_token_count", 0) or 0
                 usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
 
+            if text:
+                _llm_cache_set(ic.model, prompt, text)
             return text, usage
 
     # -- prompt builders ----------------------------------------------------
@@ -5505,11 +5608,17 @@ class SectionConcludeStage(Base):
     # -- LLM generation (reuse pattern from ConcludeStage) -----------------
 
     def _generate_with_usage(self, co: ConcludeConfig, prompt: str) -> tuple[str, dict]:
+        # --- Redis cache check ---
+        cached = _llm_cache_get(co.model, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         import asyncio
         usage: dict = {"input": 0, "output": 0, "thinking": 0}
 
         if co.provider == "openai":
-            from src.clients.llm_openai_client import OpenAILLMClient
+            from src._clients.llm_openai_client import OpenAILLMClient
             client = OpenAILLMClient(model_name=co.model)
             loop = asyncio.new_event_loop()
             try:
@@ -5531,11 +5640,13 @@ class SectionConcludeStage(Base):
                 details = getattr(resp_usage, "output_tokens_details", None)
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+            if text:
+                _llm_cache_set(co.model, prompt, text)
             return text, usage
         else:
             from google.genai import types as genai_types
 
-            from src.clients.llm_gcp_client import GeminiLLMClient
+            from src._clients.llm_gcp_client import GeminiLLMClient
             client = GeminiLLMClient(model_name=co.model, location=_gemini_location(co.model))
             config = genai_types.GenerateContentConfig(
                 temperature=0.2, top_p=client.top_p, max_output_tokens=16_000,
@@ -5549,6 +5660,8 @@ class SectionConcludeStage(Base):
                 usage["input"] = getattr(um, "prompt_token_count", 0) or 0
                 usage["output"] = getattr(um, "candidates_token_count", 0) or 0
                 usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+            if text:
+                _llm_cache_set(co.model, prompt, text)
             return text, usage
 
     # -- prompt builders ---------------------------------------------------
@@ -6024,11 +6137,17 @@ class SectionIntroduceStage(Base):
     # -- LLM generation ---------------------------------------------------
 
     def _generate_with_usage(self, ic: IntroduceConfig, prompt: str) -> tuple[str, dict]:
+        # --- Redis cache check ---
+        cached = _llm_cache_get(ic.model, prompt)
+        if cached is not None:
+            self._logger.info("    ⚡ Cache hit — skipping LLM call")
+            return cached, {"input": 0, "output": 0, "thinking": 0}
+
         import asyncio
         usage: dict = {"input": 0, "output": 0, "thinking": 0}
 
         if ic.provider == "openai":
-            from src.clients.llm_openai_client import OpenAILLMClient
+            from src._clients.llm_openai_client import OpenAILLMClient
             client = OpenAILLMClient(model_name=ic.model)
             loop = asyncio.new_event_loop()
             try:
@@ -6050,11 +6169,13 @@ class SectionIntroduceStage(Base):
                 details = getattr(resp_usage, "output_tokens_details", None)
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+            if text:
+                _llm_cache_set(ic.model, prompt, text)
             return text, usage
         else:
             from google.genai import types as genai_types
 
-            from src.clients.llm_gcp_client import GeminiLLMClient
+            from src._clients.llm_gcp_client import GeminiLLMClient
             client = GeminiLLMClient(model_name=ic.model, location=_gemini_location(ic.model))
             config = genai_types.GenerateContentConfig(
                 temperature=0.2, top_p=client.top_p, max_output_tokens=16_000,
@@ -6068,6 +6189,8 @@ class SectionIntroduceStage(Base):
                 usage["input"] = getattr(um, "prompt_token_count", 0) or 0
                 usage["output"] = getattr(um, "candidates_token_count", 0) or 0
                 usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+            if text:
+                _llm_cache_set(ic.model, prompt, text)
             return text, usage
 
     # -- prompt builders ---------------------------------------------------
@@ -6364,6 +6487,42 @@ class PublishStage(Base):
         r'\n---\n\*Generated by Rapporteur CLI[^*]*\*\s*$'
     )
 
+    # Regex to match the ## References section (and everything after it until
+    # the next ## heading or ## Implementation Record, whichever comes first)
+    _REFS_SECTION_RE = re.compile(
+        r'\n## References\n.*?(?=\n## (?!References)|\Z)',
+        re.DOTALL,
+    )
+
+    # Regex to match the ## Top Sources section
+    _TOP_SOURCES_SECTION_RE = re.compile(
+        r'\n## Top Sources\n.*?(?=\n## |\Z)',
+        re.DOTALL,
+    )
+
+    # Regex to match ## Implementation Record and everything below it
+    _IMPL_RECORD_RE = re.compile(
+        r'\n## Implementation Record\n.*',
+        re.DOTALL,
+    )
+
+    # Parse a single reference line:
+    # - **Author** (Date). *Title*. Publisher. [url](url)
+    _REF_LINE_RE = re.compile(
+        r'^- \*\*(?P<author>[^*]+)\*\*'
+        r'(?:\s*\((?P<date>[^)]*)\))?\.?'
+        r'(?:\s*\*(?P<title>[^*]+)\*\.?)?'
+        r'(?:\s*(?P<publisher>[^[]+?)\.)?'
+        r'(?:\s*\[(?P<url>[^\]]+)\]\([^)]+\))?',
+    )
+
+    _PRICING = {
+        "gemini-2.5-pro":            {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":          {"input": 0.30,  "output":  2.50},
+        "gemini-2.5-flash-lite":     {"input": 0.10,  "output":  0.40},
+        "gemini-3.1-pro-preview":    {"input": 1.25,  "output": 10.00},
+    }
+
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
         super().__init__()
         self.cfg = cfg
@@ -6418,9 +6577,14 @@ class PublishStage(Base):
             _shutil.rmtree(src_dir)
         src_dir.mkdir()
 
+        # Sort chapter entries: intro (00-) first, then numbered, then
+        # conclusion (typically 10- or highest-numbered), references last.
+        sorted_entries = self._sort_chapter_entries(chapter_entries)
+
         chapter_stems: list[str] = []
+        all_ref_lines: list[str] = []
         word_count = 0
-        for entry in chapter_entries:
+        for entry in sorted_entries:
             chapter_file = chapters_dir / entry["filename"]
             if not chapter_file.exists():
                 self._logger.warning(
@@ -6435,8 +6599,29 @@ class PublishStage(Base):
             text = re.sub(r'^(#{1,4} )\d+(?:\.\d+)*\.?\s*', r'\1', text, flags=re.MULTILINE)
             # Demote extra # headings to ## (only the first # stays as chapter)
             text = self._demote_extra_chapter_headings(text)
-            # Convert ```mermaid fences to plain text for PDF (mmdc needs Chrome)
-            text = self._strip_mermaid_blocks(text)
+
+            # --- Collect and strip per-chapter references -----------------
+            if self.cfg.publish.collect_references:
+                text, refs = self._extract_references(text)
+                all_ref_lines.extend(refs)
+
+            # --- Strip Implementation Record prose, but keep diagrams --
+            impl_match = self._IMPL_RECORD_RE.search(text)
+            if impl_match:
+                impl_section = impl_match.group(0)
+                # Extract any mermaid blocks from the Implementation Record
+                impl_diagrams = self._MERMAID_BLOCK_RE.findall(impl_section)
+                text = self._IMPL_RECORD_RE.sub('', text).rstrip()
+                # Re-append the diagrams at the end of the chapter
+                for diag in impl_diagrams:
+                    text += f'\n\n```mermaid\n{diag}```'
+
+            # --- Generate LLM captions for mermaid diagrams ---------------
+            if self.cfg.publish.diagram_captions and not self.dry_run:
+                text = self._add_diagram_captions(text)
+
+            # Render ```mermaid fences to PNG images for PDF inclusion
+            text = self._render_mermaid_blocks(text, src_dir)
             (src_dir / entry["filename"]).write_text(text + '\n', encoding="utf-8")
             chapter_stems.append(chapter_file.stem)
             word_count += len(text.split())
@@ -6444,6 +6629,17 @@ class PublishStage(Base):
         if not chapter_stems:
             self._logger.error("  No chapter files found")
             return
+
+        # -- 1b. Write collected references chapter ------------------------
+        if self.cfg.publish.collect_references and all_ref_lines:
+            refs_md = self._format_apa_references(all_ref_lines)
+            refs_filename = "99-references.md"
+            (src_dir / refs_filename).write_text(refs_md + '\n', encoding="utf-8")
+            chapter_stems.append("99-references")
+            self._logger.info(
+                "  Collected %d unique references into %s",
+                refs_md.count('\n- '), refs_filename,
+            )
 
         self._logger.info(
             "  Prepared %d chapters (%d words)", len(chapter_stems), word_count
@@ -6560,6 +6756,329 @@ class PublishStage(Base):
             encoding="utf-8",
         )
         self._logger.info("  Updated manifest.json with publish metadata")
+
+    # ------------------------------------------------------------------
+    # Chapter ordering
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _sort_chapter_entries(entries: list[dict]) -> list[dict]:
+        """Sort chapter entries: intro first, numbered chapters in order,
+        conclusion/section intros in natural position."""
+        def _sort_key(entry: dict) -> tuple[int, str]:
+            fn = entry.get("filename", "")
+            # Introduction always first
+            if fn.startswith("00-") or "introduction" in fn.lower():
+                return (0, fn)
+            # Section/part intro files (part-1-intro etc.)
+            if "part-" in fn and "intro" in fn.lower():
+                return (1, fn)
+            # Regular numbered chapters — sort by filename (numeric prefix)
+            return (2, fn)
+        return sorted(entries, key=_sort_key)
+
+    # ------------------------------------------------------------------
+    # Reference collection and APA formatting
+    # ------------------------------------------------------------------
+
+    def _extract_references(self, text: str) -> tuple[str, list[str]]:
+        """Strip ``## References`` and ``## Top Sources`` from chapter text.
+
+        Returns (cleaned_text, list_of_reference_lines) where each
+        reference line starts with ``- ``.
+        """
+        ref_lines: list[str] = []
+
+        # Extract reference bullet lines from ## References section
+        refs_match = self._REFS_SECTION_RE.search(text)
+        if refs_match:
+            section_text = refs_match.group(0)
+            for line in section_text.splitlines():
+                line = line.strip()
+                if line.startswith('- '):
+                    ref_lines.append(line)
+            text = self._REFS_SECTION_RE.sub('', text)
+
+        # Also strip ## Top Sources (duplicates references)
+        text = self._TOP_SOURCES_SECTION_RE.sub('', text)
+
+        return text.rstrip(), ref_lines
+
+    @staticmethod
+    def _parse_ref_line(line: str) -> dict[str, str]:
+        """Parse a reference bullet line into structured fields.
+
+        Expected format:
+        ``- **Author** (Date). *Title*. Publisher. [url](url)``
+        """
+        result: dict[str, str] = {"raw": line}
+        # Strip leading "- "
+        body = line[2:].strip() if line.startswith('- ') else line.strip()
+
+        # Author: **...**
+        m = re.match(r'\*\*([^*]+)\*\*', body)
+        if m:
+            result["author"] = m.group(1).strip()
+            body = body[m.end():].strip()
+
+        # Date: (...)
+        m = re.match(r'\(([^)]*)\)', body)
+        if m:
+            result["date"] = m.group(1).strip()
+            body = body[m.end():].strip()
+
+        # Strip leading period/dot
+        body = body.lstrip('.').strip()
+
+        # Title: *...*
+        m = re.match(r'\*([^*]+)\*', body)
+        if m:
+            result["title"] = m.group(1).strip().rstrip('.')
+            body = body[m.end():].strip().lstrip('.')
+
+        # URL: [url](url) — extract from the end
+        url_m = re.search(r'\[([^\]]+)\]\(([^)]+)\)', body)
+        if url_m:
+            result["url"] = url_m.group(2).strip()
+            # Publisher is what's left before the URL
+            before_url = body[:url_m.start()].strip().rstrip('.')
+            if before_url:
+                result["publisher"] = before_url.strip()
+        else:
+            # No URL — remaining text is publisher
+            leftover = body.strip().rstrip('.')
+            if leftover:
+                result["publisher"] = leftover.strip()
+
+        return result
+
+    def _format_apa_references(self, ref_lines: list[str]) -> str:
+        """Deduplicate and format all references in APA 7th edition style.
+
+        Returns a complete Markdown chapter for the references appendix.
+        """
+        # Parse all reference lines
+        parsed: list[dict[str, str]] = []
+        for line in ref_lines:
+            if line.startswith('- '):
+                parsed.append(self._parse_ref_line(line))
+
+        # Deduplicate by URL (prefer entry with most fields filled)
+        seen_urls: dict[str, dict[str, str]] = {}
+        no_url: list[dict[str, str]] = []
+        for ref in parsed:
+            url = ref.get("url", "")
+            if url:
+                norm_url = _normalise_url(url)
+                existing = seen_urls.get(norm_url)
+                if not existing or len(ref) > len(existing):
+                    seen_urls[norm_url] = ref
+            else:
+                no_url.append(ref)
+
+        unique_refs = list(seen_urls.values()) + no_url
+
+        # Sort alphabetically by author surname, then date
+        unique_refs.sort(key=lambda r: (
+            r.get("author", "Unknown").split()[-1].lower()
+            if r.get("author") else "zzz",
+            r.get("date", ""),
+        ))
+
+        # Format in APA 7th style
+        lines = [
+            "# References",
+            "",
+            "*All sources cited in this document, deduplicated and "
+            "formatted in APA 7th edition style.*",
+            "",
+        ]
+        for ref in unique_refs:
+            author = ref.get("author", "Unknown")
+            date = ref.get("date", "n.d.")
+            title = ref.get("title", "")
+            publisher = ref.get("publisher", "")
+            url = ref.get("url", "")
+
+            # APA format: Author. (Date). *Title*. Publisher. URL
+            parts = [f"- {author}. ({date})."]
+            if title:
+                parts.append(f" *{title}.*")
+            if publisher:
+                parts.append(f" {publisher}.")
+            if url:
+                parts.append(f" [{url}]({url})")
+            lines.append("".join(parts))
+
+        self._logger.info("  APA references: %d unique from %d total",
+                         len(unique_refs), len(ref_lines))
+        return "\n".join(lines)
+
+    # ------------------------------------------------------------------
+    # Diagram repositioning
+    # ------------------------------------------------------------------
+
+    def _reposition_diagrams(self, text: str) -> str:
+        """Move ``## Implementation Record`` section from the end of the
+        chapter to directly after the executive summary / abstract.
+
+        The exec summary is identified as the blockquote paragraph(s) that
+        immediately follow the chapter ``# `` heading.  If no exec summary
+        is found, diagrams stay in their original position.
+        """
+        impl_match = self._IMPL_RECORD_RE.search(text)
+        if not impl_match:
+            return text
+
+        impl_section = impl_match.group(0).strip()
+        text_without_impl = self._IMPL_RECORD_RE.sub('', text).rstrip()
+
+        # Find insertion point: after the exec summary blockquote(s)
+        # Pattern: lines starting with '> ' immediately after the # heading
+        lines = text_without_impl.split('\n')
+        insert_idx = None
+        in_heading = False
+        in_blockquote = False
+
+        for i, line in enumerate(lines):
+            if line.startswith('# ') and not line.startswith('## '):
+                in_heading = True
+                continue
+            if in_heading:
+                stripped = line.strip()
+                if stripped.startswith('>'):
+                    in_blockquote = True
+                    continue
+                if in_blockquote and stripped == '':
+                    # Blank line after blockquote — could be between
+                    # consecutive blockquote paragraphs or the end
+                    # Look ahead: if next non-blank line is also a blockquote, continue
+                    for j in range(i + 1, min(i + 3, len(lines))):
+                        if lines[j].strip().startswith('>'):
+                            break
+                        if lines[j].strip():
+                            insert_idx = i
+                            break
+                    else:
+                        insert_idx = i
+                    if insert_idx is not None:
+                        break
+                    continue
+                if in_blockquote and not stripped.startswith('>'):
+                    insert_idx = i
+                    break
+                if not in_blockquote and stripped:
+                    # No blockquote found after heading — insert after heading
+                    insert_idx = i
+                    break
+
+        if insert_idx is None:
+            # Fallback: append at end (original behaviour)
+            return text_without_impl + '\n\n' + impl_section
+
+        # Insert the implementation record section
+        lines.insert(insert_idx, '\n' + impl_section + '\n')
+        return '\n'.join(lines)
+
+    # ------------------------------------------------------------------
+    # LLM diagram captions
+    # ------------------------------------------------------------------
+
+    _MERMAID_BLOCK_RE = re.compile(
+        r'```mermaid\n(.*?)```', re.DOTALL,
+    )
+
+    def _add_diagram_captions(self, text: str) -> str:
+        """Find mermaid blocks and append an LLM-generated caption below each.
+
+        The full chapter text is passed to the LLM for context so captions
+        are specific and descriptive.
+        """
+        # Use the full chapter as context (sans mermaid blocks themselves)
+        chapter_context = self._MERMAID_BLOCK_RE.sub('[diagram]', text)
+
+        def _replace_with_caption(match: re.Match) -> str:
+            mermaid_code = match.group(1)
+            original = match.group(0)
+            caption = self._generate_diagram_caption(mermaid_code, chapter_context)
+            # Escape inner asterisks so they don't break markdown italic
+            safe_caption = caption.replace('*', '\\*')
+            return f"{original}\n\n*{safe_caption}*"
+
+        return self._MERMAID_BLOCK_RE.sub(_replace_with_caption, text)
+
+    def _generate_diagram_caption(
+        self, mermaid_code: str, eo_context: str,
+    ) -> str:
+        """Use Gemini Flash to generate a figure caption explaining the
+        EO dependency diagram.
+
+        Returns a caption string, or a fallback if the LLM call fails.
+        """
+        model = self.cfg.publish.caption_model
+        prompt = (
+            "You are writing a descriptive figure caption for an academic "
+            "policy document. The chapter below analyses Executive Orders "
+            "and the mermaid diagram shows how they relate.\n\n"
+            "## Chapter Content\n\n"
+            f"{eo_context[:12000]}\n\n"
+            "## Mermaid Diagram\n\n"
+            f"```mermaid\n{mermaid_code}\n```\n\n"
+            "Write a 3-4 sentence figure caption that:\n"
+            "1. Names the specific Executive Orders shown in the diagram\n"
+            "2. Describes how they relate (rescissions, derivations, "
+            "companion orders, amendments)\n"
+            "3. Explains the policy significance — what do these "
+            "relationships mean in practice\n\n"
+            "Respond with ONLY the caption text. No heading, no prefix "
+            "like 'Figure:', no bullet points, no asterisks, no markdown "
+            "formatting. Write in formal prose, 60-100 words."
+        )
+        try:
+            from src._clients.llm_gcp_client import GeminiLLMClient
+            client = GeminiLLMClient(
+                model_name=model,
+                location=_gemini_location(model),
+            )
+            from google.genai import types as genai_types
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2,
+                max_output_tokens=2048,
+                thinking_config=genai_types.ThinkingConfig(
+                    thinking_budget=0,
+                ),
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name,
+                contents=prompt,
+                config=config,
+            )
+            caption = (response.text or "").strip()
+            if caption:
+                # Track cost
+                um = getattr(response, "usage_metadata", None)
+                in_tok = getattr(um, "prompt_token_count", 0) or 0 if um else 0
+                out_tok = getattr(um, "candidates_token_count", 0) or 0 if um else 0
+                cost = self._calculate_cost(model, in_tok, out_tok)
+                self._logger.info(
+                    "    Caption — in: %s  out: %s  ($%.4f)",
+                    f"{in_tok:,}", f"{out_tok:,}", cost,
+                )
+                return caption
+        except Exception as e:
+            self._logger.warning("  Caption generation failed: %s", e)
+
+        return ("EO precedence diagram showing legislative relationships "
+                "including rescissions, derivations, and companion orders.")
+
+    def _calculate_cost(
+        self, model: str, input_tokens: int, output_tokens: int,
+    ) -> float:
+        rates = self._PRICING.get(model, {"input": 0.30, "output": 2.50})
+        return (
+            input_tokens / 1_000_000 * rates["input"]
+            + output_tokens / 1_000_000 * rates["output"]
+        )
 
     # ------------------------------------------------------------------
     # Sphinx configuration generators
@@ -6721,12 +7240,83 @@ latex_documents = [
                     seen_first = True
         return '\n'.join(lines)
 
-    @staticmethod
-    def _strip_mermaid_blocks(text: str) -> str:
-        """Remove ```mermaid ... ``` blocks (mmdc needs Chrome, unavailable in CI)."""
+    _mmdc_counter: int = 0  # class-level counter for unique diagram filenames
+
+    def _render_mermaid_blocks(self, text: str, src_dir: Path) -> str:
+        """Render ```mermaid blocks to PNG via mmdc and replace with image refs.
+
+        Falls back to a placeholder if mmdc is unavailable or fails.
+        """
+        import shutil as _shutil
+        import tempfile
+
+        if not _shutil.which('mmdc'):
+            self._logger.warning("  mmdc not found — stripping mermaid blocks")
+            return re.sub(
+                r'```mermaid\n.*?```',
+                '*[Diagram omitted from PDF — see online version]*',
+                text, flags=re.DOTALL,
+            )
+
+        images_dir = src_dir / "_diagrams"
+        images_dir.mkdir(exist_ok=True)
+
+        # Find puppeteer config
+        puppeteer_cfg = None
+        for candidate in [
+            Path(self.cfg.paths.build_dir) / "puppeteer-config.json",
+            Path(__file__).parent.parent.parent.parent / "docs" / "AtrumVolentia" / "puppeteer-config.json",
+        ]:
+            if candidate.exists():
+                puppeteer_cfg = candidate
+                break
+
+        def _render_one(match: re.Match) -> str:
+            PublishStage._mmdc_counter += 1
+            mermaid_code = match.group(0)
+            # Extract just the code between fences
+            inner = re.search(r'```mermaid\n(.*?)```', mermaid_code, re.DOTALL)
+            if not inner:
+                return mermaid_code
+
+            img_name = f"diagram_{PublishStage._mmdc_counter:03d}.png"
+            img_path = images_dir / img_name
+
+            with tempfile.NamedTemporaryFile(
+                mode='w', suffix='.mmd', delete=False, encoding='utf-8'
+            ) as tmp:
+                tmp.write(inner.group(1))
+                tmp_path = tmp.name
+
+            try:
+                cmd = ['mmdc', '-i', tmp_path, '-o', str(img_path),
+                       '-b', 'white', '-w', '1200']
+                if puppeteer_cfg:
+                    cmd.extend(['-p', str(puppeteer_cfg)])
+                result = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=60,
+                )
+                if result.returncode != 0 or not img_path.exists():
+                    self._logger.warning(
+                        "  mmdc failed for diagram %d: %s",
+                        PublishStage._mmdc_counter,
+                        result.stderr.strip()[:200] if result.stderr else "unknown error",
+                    )
+                    return '*[Diagram could not be rendered]*'
+
+                self._logger.info("  Rendered diagram: %s", img_name)
+                # Use relative path from Sphinx source
+                rel = f"_diagrams/{img_name}"
+                return f"```{{image}} {rel}\n:width: 100%\n:align: center\n```"
+            except (subprocess.TimeoutExpired, OSError) as exc:
+                self._logger.warning("  mmdc error: %s", exc)
+                return '*[Diagram could not be rendered]*'
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
+
         return re.sub(
             r'```mermaid\n.*?```',
-            '*[Diagram omitted from PDF — see online version]*',
+            _render_one,
             text,
             flags=re.DOTALL,
         )

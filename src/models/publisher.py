@@ -150,6 +150,9 @@ class ConfluenceConfig:
 class PublishConfig:
     formats: list[str] = field(default_factory=lambda: ["pdf"])
     pdf_engine: str = "pdflatex"
+    collect_references: bool = True
+    diagram_captions: bool = True
+    caption_model: str = "gemini-2.5-flash"
     confluence: ConfluenceConfig = field(default_factory=ConfluenceConfig)
 
 
@@ -363,6 +366,9 @@ class PipelineConfig:
         cfg.publish = PublishConfig(
             formats=pu.get("formats", ["pdf"]),
             pdf_engine=pu.get("pdf_engine", "pdflatex"),
+            collect_references=pu.get("collect_references", True),
+            diagram_captions=pu.get("diagram_captions", True),
+            caption_model=pu.get("caption_model", "gemini-2.5-flash"),
             confluence=ConfluenceConfig(
                 server_url=conf.get("server_url", ""),
                 space_key=conf.get("space_key", ""),

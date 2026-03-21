@@ -18,8 +18,9 @@ from bs4 import BeautifulSoup
 # Add src to path for imports
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
 
-from src.clients._ import GeminiLLMClient
-from src.clients.llm_client import SimpleLLMClient
+from src._clients._ import GeminiLLMClient
+from src._clients.llm_client import SimpleLLMClient
+from src.clients.llm_cache_client import CachedLLMClient
 from src.components.document_websearcher import DocumentWebSearcher
 from src.config import app_conf
 from src.config_handler import Base
@@ -75,14 +76,28 @@ class SimpleTreeSearch(Base):
         if self.use_llm:
             # Initialize LLM client based on provider
             if self.llm_provider == 'gcp':
-                self.llm_client = GeminiLLMClient()
+                _inner = GeminiLLMClient()
+                self.llm_client = CachedLLMClient(
+                    _inner,
+                    redis_host=app_conf.get("redis.host") or "",
+                    redis_port=int(app_conf.get("redis.port") or 6379),
+                    redis_password=app_conf.get("redis.password") or None,
+                    ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
+                )
                 self._logger.info(f"✅ Tree search initialized with GCP Gemini LLM expansion (text chunks: {self.text_chunk_size} chars)")
             elif self.llm_provider == 'local':
                 self.llm_client = SimpleLLMClient()
                 self._logger.info(f"✅ Tree search initialized with local LLM expansion (text chunks: {self.text_chunk_size} chars)")
             else:
                 self._logger.warning(f"⚠️  Unknown LLM provider '{self.llm_provider}', defaulting to GCP Gemini")
-                self.llm_client = GeminiLLMClient()
+                _inner = GeminiLLMClient()
+                self.llm_client = CachedLLMClient(
+                    _inner,
+                    redis_host=app_conf.get("redis.host") or "",
+                    redis_port=int(app_conf.get("redis.port") or 6379),
+                    redis_password=app_conf.get("redis.password") or None,
+                    ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
+                )
                 self._logger.info(f"✅ Tree search initialized with GCP Gemini LLM expansion (text chunks: {self.text_chunk_size} chars)")
         else:
             self.llm_client = None

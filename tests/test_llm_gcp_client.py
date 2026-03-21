@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from src.clients.llm_gcp_client import GeminiLLMClient
+from src._clients.llm_gcp_client import GeminiLLMClient
 
 
 def _make_client():

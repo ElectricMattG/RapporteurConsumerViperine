@@ -91,9 +91,12 @@ class EmbeddingServiceClient(Base):
             self._app_config.get('embedding_service.max_texts_per_request') or 64
         )
 
-        # HTTP client will be initialized on first use (lazy initialization)
+        # HTTP client will be initialized on first use (lazy initialization).
+        # Because the Kafka consumer calls asyncio.run() per message (creating
+        # and destroying event loops), we track which loop the client was
+        # created on and discard it when the loop changes.
         self._client: Optional[httpx.AsyncClient] = None
-        self._client_lock = asyncio.Lock()
+        self._client_loop: Optional[asyncio.AbstractEventLoop] = None
 
         # Cache embedding dimension from service
         self._embedding_dim: Optional[int] = None
@@ -103,17 +106,25 @@ class EmbeddingServiceClient(Base):
         self._logger.info(f"max_texts_per_request: {self.max_texts_per_request}")
 
     async def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the HTTP client (lazy initialization with lock)."""
+        """Get or create the HTTP client bound to the *current* event loop.
+
+        If the running loop differs from the one the cached client was
+        created on, the stale client is discarded (without ``aclose`` —
+        its loop is already dead) and a fresh one is created.
+        """
+        loop = asyncio.get_running_loop()
+        if self._client is not None and self._client_loop is not loop:
+            # Old client is bound to a closed loop — drop it.
+            self._client = None
         if self._client is None:
-            async with self._client_lock:
-                if self._client is None:  # Double-check after acquiring lock
-                    self._client = httpx.AsyncClient(
-                        base_url=self.service_url,
-                        timeout=self.timeout,
-                        limits=self.limits,
-                        verify=False  # Disable SSL verification for self-signed certs
-                    )
-                    self._logger.info("HTTP client initialized")
+            self._client = httpx.AsyncClient(
+                base_url=self.service_url,
+                timeout=self.timeout,
+                limits=self.limits,
+                verify=False  # Disable SSL verification for self-signed certs
+            )
+            self._client_loop = loop
+            self._logger.info("HTTP client initialized")
         return self._client
 
     async def _post_with_retry(self, endpoint: str, json_data: dict) -> httpx.Response:

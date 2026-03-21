@@ -8,7 +8,7 @@ import logging
 
 import pytest
 
-from src.clients.llm_openai_client import OpenAILLMClient
+from src._clients.llm_openai_client import OpenAILLMClient
 
 
 def _make_client(model_name="gpt-4o-mini"):
