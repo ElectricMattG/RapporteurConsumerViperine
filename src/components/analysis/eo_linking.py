@@ -662,11 +662,21 @@ composites speaking to general protective values behind the EOs as well — \
 we want to make those linkages clear and unambiguous. We want to refer to \
 timeline representations linking EOs and the comms.
 
+**SOURCE TRACEABILITY — CRITICAL REQUIREMENT**
+Every communication listed below has a "URL:" line. That URL is the \
+canonical source identifier. When you create a linkage for a communication, \
+you MUST copy its exact URL verbatim into the "url" field of your output. \
+Do NOT omit, paraphrase, shorten, or invent URLs. The URL is the primary \
+key that links your analysis back to the original article — without it the \
+record is incomplete. If a single source article relates to multiple EOs, \
+repeat its URL in each EO's communication entry.
+
 For each communication, extract:
+- **url**: the exact URL from the source communication (MANDATORY)
 - The EO it implements (number, title, subsection if identifiable)
 - The action, decision, or event taken
 - The responsible official or department
-- The date of the communication
+- The date of the communication (use the Date: from the source)
 - Whether this implements, extends, or modifies the EO directive
 
 For each EO referenced, identify:
@@ -698,6 +708,64 @@ orders simultaneously.
 
 Refine the structured JSON output to include corrected linkages, expanded \
 precedence chains, and confidence scores per linkage.
+
+**SOURCE TRACEABILITY — MANDATORY**
+The ORIGINAL GOVERNMENT COMMUNICATIONS section below contains the \
+canonical source articles. Every article has a "URL:" line. That URL is \
+the primary key that links your analysis back to the original source. \
+For EVERY communication object you output you MUST:
+1. Copy the exact URL from the matching source article into the "url" field.
+2. Copy the article heading (the ### title) into "communication_title".
+3. Use the "Date:" value from the source article for the "date" field.
+Do NOT omit, shorten, or fabricate URLs. If a source article maps to \
+multiple EOs, repeat its URL in each EO entry. A communication without \
+a URL is an INCOMPLETE record.
+
+**CRITICAL: You MUST respond with a single JSON object matching the exact \
+schema below. Do NOT use any other key names, wrappers, or structures. \
+Do NOT wrap the JSON in markdown code fences. Output raw JSON only.**
+
+Required schema:
+{{
+  "executive_orders": {{
+    "<Exec. Order No. NNNNN>": {{
+      "title": "<EO title string>",
+      "rescinds_or_supersedes": ["Exec. Order No. NNNNN", ...],
+      "derived_from_or_read_together_with": ["Exec. Order No. NNNNN", ...],
+      "communications": [
+        {{
+          "url": "<EXACT source URL from the article — MANDATORY>",
+          "communication_title": "<### heading of the source article>",
+          "date": "<YYYY-MM-DD from the source article Date: field>",
+          "action_decision_or_event": "<description of action taken>",
+          "responsible_official_or_department": "<official or dept name>",
+          "implementation_status": "<implements|extends|modifies|announces>",
+          "confidence_score": <0.0-1.0>
+        }}
+      ]
+    }}
+  }}
+}}
+
+Rules:
+- Top-level key MUST be "executive_orders" containing a dict keyed by EO identifier.
+- EO keys MUST use format "Exec. Order No. NNNNN" (5-digit number).
+- Every EO entry MUST have "title", "rescinds_or_supersedes", \
+"derived_from_or_read_together_with", and "communications" keys.
+- "rescinds_or_supersedes" and "derived_from_or_read_together_with" are \
+arrays of strings. Use empty arrays [] if none apply.
+- "communications" is an array of objects. Use empty array [] if no comms.
+- Each communication object MUST have ALL seven keys shown above.
+- "url": MUST be the exact URL from the source article. Never empty, \
+never fabricated. This is the traceable link back to the original source.
+- "communication_title": MUST match the ### heading of the source article.
+- "date": MUST come from the Date: field of the source article.
+- "confidence_score": float between 0.0 and 1.0.
+- "implementation_status": one of "implements", "extends", "modifies", "announces".
+- Do NOT invent wrapper keys like "validated_linkages", "link_analysis", \
+"executive_order_linkages", "executive_order_implementations", etc.
+- Do NOT use a top-level array. Always use the dict-of-dicts structure above.
+- Do NOT nest a "metadata" sub-object inside EO entries.
 
 --- EO LEGAL FRAMEWORK ---
 
@@ -767,12 +835,16 @@ class LinkReflectDriver(Base):
         batch_index: int,
         eo_grounding: str,
         batch_conversations: str,
+        eo_article_grounding: str = "",
     ) -> dict[str, Any]:
         """Run LINK + REFLECT for a single batch. Returns result dict.
 
         Saves artefacts to batch_{b}/link.md, reflect.md, status.json.
         Skips if status.json already shows "complete" (checkpointing).
         """
+        # Merge article grounding into eo_grounding if provided
+        if eo_article_grounding:
+            eo_grounding = eo_grounding + "\n\n" + eo_article_grounding
         batch_dir = self.output_dir / f"batch_{batch_index}"
         batch_dir.mkdir(parents=True, exist_ok=True)
         status_path = batch_dir / "status.json"
@@ -822,7 +894,9 @@ class LinkReflectDriver(Base):
                 link_output=link_text,
                 batch_conversations=batch_conversations,
             )
-            reflect_text, reflect_usage = self._generate(reflect_prompt)
+            reflect_text, reflect_usage = self._generate(
+                reflect_prompt, response_mime_type="application/json",
+            )
             result["reflect_tokens"] = reflect_usage
 
             reflect_path = batch_dir / "reflect.md"
@@ -849,16 +923,23 @@ class LinkReflectDriver(Base):
 
     # -- private helpers -----------------------------------------------------
 
-    def _generate(self, prompt: str) -> tuple[str, dict[str, int]]:
+    def _generate(
+        self,
+        prompt: str,
+        response_mime_type: str | None = None,
+    ) -> tuple[str, dict[str, int]]:
         """Call Gemini and return (text, usage_dict)."""
         from google.genai import types as genai_types
 
         client = self._get_client()
-        config = genai_types.GenerateContentConfig(
-            temperature=0.2,
-            top_p=client.top_p,
-            max_output_tokens=32_000,
-        )
+        config_params: dict[str, Any] = {
+            "temperature": 0.2,
+            "top_p": client.top_p,
+            "max_output_tokens": 32_000,
+        }
+        if response_mime_type:
+            config_params["response_mime_type"] = response_mime_type
+        config = genai_types.GenerateContentConfig(**config_params)
         response = client.client.models.generate_content(
             model=client.model_name,
             contents=prompt,
@@ -883,8 +964,9 @@ class LinkReflectDriver(Base):
     ) -> str:
         """Load a batch conversation.json and format for prompt injection.
 
-        Only includes metadata and URL — no summaries — to reduce token
-        cost.  The URL is parseable for date and domain signals.
+        Includes metadata, the canonical URL, and the assistant response
+        summary so the LLM can trace every linkage back to a specific
+        source article.
         """
         if not conv_path.exists():
             return ""
@@ -892,12 +974,17 @@ class LinkReflectDriver(Base):
         parts: list[str] = []
         for entry in conversations:
             meta = entry.get("metadata", {})
+            response = entry.get("assistant_response", "")
+            # Truncate long responses to keep within token budget
+            if len(response) > 2000:
+                response = response[:2000] + " [...]"
             parts.append(
                 f"### {meta.get('article_title', 'Untitled')}\n"
                 f"URL: {meta.get('article_url', '')}\n"
                 f"Domain: {meta.get('domain', '')}\n"
                 f"Publisher: {meta.get('publisher', '')}\n"
-                f"Date: {meta.get('date', '')}\n"
+                f"Date: {meta.get('date', '')}\n\n"
+                f"{response}\n"
             )
         return "\n---\n\n".join(parts)
 
@@ -913,6 +1000,14 @@ _EO_KEY_RE = re.compile(r"(\d{5})")
 _EO_REF_RE = re.compile(
     r"(?:Exec\.?\s+Order\s+(?:No\.?\s*)?)(\d{5})", re.IGNORECASE,
 )
+
+# Words to skip when doing content-based keyword matching
+_STOP_WORDS = frozenset({
+    "about", "after", "between", "could", "department", "during", "every",
+    "following", "including", "order", "other", "president", "secretary",
+    "should", "since", "state", "their", "these", "those", "through",
+    "trump", "under", "united", "which", "while", "would",
+})
 
 
 class LinkageExtractor(Base):
@@ -935,206 +1030,108 @@ class LinkageExtractor(Base):
         Returns a list of flat dicts (one per EO-communication pair),
         plus EO-level records for precedence even when comms are empty.
 
+        Handles three JSON schemas produced by Gemini:
+          A) dict_keys: ``{"Exec. Order No. NNNNN": {comms, precedence}}``
+          B) exec_orders: ``{"executive_orders": {"EO_NNNNN": {metadata, comms}}}``
+          C) list: ``[{"eo_number": "...", comms, legal_precedence}]``
+
         Args:
             reflect_text: The full text output from the REFLECT prompt.
             batch_id: Identifier for the batch (provenance).
             article_lookup: Optional mapping of URL/Title -> metadata dict.
-                           Used to backfill missing fields (url, domain, date)
-                           when the LLM omits them.
         """
-        cleaned = _clean_json_markdown(reflect_text)
-
-        # The REFLECT output may contain prose before the JSON block.
-        # Find the first '{' that starts the JSON object.
-        json_start = cleaned.find("{")
-        if json_start < 0:
-            self._logger.warning("No JSON found in REFLECT output for %s", batch_id)
-            return []
-        cleaned = cleaned[json_start:]
-
-        # Find the matching closing brace
-        depth = 0
-        json_end = -1
-        for i, ch in enumerate(cleaned):
-            if ch == "{":
-                depth += 1
-            elif ch == "}":
-                depth -= 1
-                if depth == 0:
-                    json_end = i + 1
-                    break
-        if json_end > 0:
-            cleaned = cleaned[:json_end]
-
-        try:
-            data = json.loads(cleaned)
-        except json.JSONDecodeError as exc:
-            self._logger.error(
-                "Failed to parse REFLECT JSON for %s: %s", batch_id, exc,
-            )
-            return []
+        # Try all ```json blocks first, fall back to bare JSON
+        json_blocks = re.findall(r'```json\s*([\s\S]*?)```', reflect_text)
+        if not json_blocks:
+            cleaned = _clean_json_markdown(reflect_text)
+            # Find the first JSON structure (object or array)
+            json_start = cleaned.find("{")
+            list_start = cleaned.find("[")
+            if json_start < 0 and list_start < 0:
+                self._logger.warning("No JSON found in REFLECT output for %s", batch_id)
+                return []
+            # Pick whichever delimiter comes first
+            if list_start >= 0 and (json_start < 0 or list_start < json_start):
+                start = list_start
+                open_ch, close_ch = "[", "]"
+            else:
+                start = json_start
+                open_ch, close_ch = "{", "}"
+            # Find the matching close
+            depth = 0
+            end = len(cleaned)
+            for i in range(start, len(cleaned)):
+                if cleaned[i] == open_ch:
+                    depth += 1
+                elif cleaned[i] == close_ch:
+                    depth -= 1
+                    if depth == 0:
+                        end = i + 1
+                        break
+            json_blocks = [cleaned[start:end]]
 
         records: list[dict[str, Any]] = []
 
-        for eo_key, eo_data in data.items():
-            if not isinstance(eo_data, dict):
+        for block in json_blocks:
+            block = block.strip()
+            try:
+                data = json.loads(block)
+            except json.JSONDecodeError:
                 continue
 
-            # Extract EO number from key
-            eo_match = _EO_KEY_RE.search(eo_key)
-            if not eo_match:
-                continue
-            eo_number = eo_match.group(1)
+            # Normalise to a flat dict of {eo_key: eo_data_dict}
+            eo_items: dict[str, dict] = {}
 
-            eo_title = eo_data.get("eo_title") or eo_data.get("title", "")
-            eo_date = (
-                eo_data.get("chronological_placement")
-                or eo_data.get("eo_date", "")
-            )
+            if isinstance(data, list):
+                # Top-level list: [{"eo_number": "...", ...}]
+                eo_items = self._normalise_eo_list(data)
 
-            # Parse precedence — extract EO numbers from varied formats
-            precedence = {
-                "rescinds": self._extract_eo_nums(
-                    eo_data.get("rescinds_supersedes")
-                    or eo_data.get("rescinds_or_supersedes", [])
-                ),
-                "derived_from": self._extract_eo_nums(
-                    eo_data.get("derived_from_read_together")
-                    or eo_data.get("derived_from_or_read_together_with", [])
-                ),
-                "read_with": self._extract_eo_nums(
-                    eo_data.get("read_with", [])
-                ),
-            }
-
-            comms = eo_data.get("communications", [])
-            if not comms:
-                # EO-only record (no comms but has precedence info)
-                records.append({
-                    "eo_number": eo_number,
-                    "eo_title": eo_title,
-                    "eo_date": eo_date,
-                    "communication": None,
-                    "precedence": precedence,
-                    "confidence": 0.0,
-                    "batch_id": batch_id,
-                    "record_id": hashlib.sha256(
-                        f"{eo_number}:no_comm:{batch_id}".encode()
-                    ).hexdigest()[:16],
-                })
-                continue
-
-            for comm in comms:
-                if not isinstance(comm, dict):
-                    continue
-
-                comm_url = comm.get("url", "")
-                comm_title = comm.get("communication_title", "")
-                comm_date = comm.get("date", "")
-
-                # Hydrate missing metadata from article lookup (if available)
-                if article_lookup:
-                    meta = {}
-                    # 1. Exact match on URL
-                    if comm_url and comm_url in article_lookup:
-                        meta = article_lookup[comm_url]
-                    # 2. Exact match on title
-                    elif comm_title and comm_title in article_lookup:
-                        meta = article_lookup[comm_title]
-                    # 3. Normalized title match
-                    elif comm_title:
-                        norm = comm_title.strip().lower()
-                        if norm in article_lookup:
-                            meta = article_lookup[norm]
-                    # 4. Fuzzy substring match: action description against
-                    #    article titles in the lookup
-                    if not meta:
-                        action_desc = (
-                            comm.get("action_decision_or_event")
-                            or comm.get("action_decision_event", "")
-                        )
-                        if action_desc:
-                            desc_lower = action_desc.lower()
-                            best_score = 0
-                            for lk_key, lk_meta in article_lookup.items():
-                                lk_title = lk_meta.get("title", "")
-                                if not lk_title or len(lk_title) < 10:
-                                    continue
-                                t_lower = lk_title.lower()
-                                # Check if significant portion of title appears in action
-                                words = [w for w in t_lower.split() if len(w) > 3]
-                                if not words:
-                                    continue
-                                hits = sum(1 for w in words if w in desc_lower)
-                                score = hits / len(words)
-                                if score > best_score and score >= 0.5:
-                                    best_score = score
-                                    meta = lk_meta
-
-                    if meta:
-                        if not comm_url:
-                            comm_url = meta.get("url", "")
-                        if not comm_title:
-                            comm_title = meta.get("title", "")
-
-                        # Date enhancement: prefer metadata date if more precise than LLM date
-                        meta_date = meta.get("date", "")
-                        if not comm_date or (meta_date and len(meta_date) > len(comm_date)):
-                            comm_date = meta_date
-
-                        # Domain is handled below via _extract_domain(comm_url)
-
-                        # Fallback for official/department using publisher if available
-                        if not comm.get("responsible_official_or_department") and meta.get("publisher"):
-                            comm["responsible_official_or_department"] = meta["publisher"]
-
-                action_type = (
-                    comm.get("implementation_status")
-                    or comm.get("implements_extends_or_modifies", "")
+            elif isinstance(data, dict):
+                # Look for a known wrapper key that holds the EO data
+                _EO_WRAPPER_KEYS = (
+                    "executive_orders",
+                    "validated_linkages",
+                    "executive_order_linkages",
+                    "executive_order_implementations",
+                    "link_analysis",
                 )
-                # Normalise action_type to lowercase simple form
-                action_lower = action_type.lower().split("(")[0].strip() if action_type else ""
-                if "implement" in action_lower:
-                    action_type_norm = "implements"
-                elif "extend" in action_lower:
-                    action_type_norm = "extends"
-                elif "modif" in action_lower or "challeng" in action_lower:
-                    action_type_norm = "modifies"
-                elif "announce" in action_lower:
-                    action_type_norm = "announces"
+                inner = None
+                for wk in _EO_WRAPPER_KEYS:
+                    if wk in data:
+                        inner = data[wk]
+                        break
+
+                if inner is not None:
+                    if isinstance(inner, list):
+                        eo_items = self._normalise_eo_list(inner)
+                    elif isinstance(inner, dict):
+                        # Dict keyed by EO identifiers — may need metadata flattening
+                        for k, v in inner.items():
+                            if not isinstance(v, dict):
+                                continue
+                            eo_items[k] = self._flatten_eo_entry(v)
                 else:
-                    action_type_norm = action_lower or "unknown"
+                    # Format A: top-level keys ARE the EO identifiers
+                    for k, v in data.items():
+                        if not isinstance(v, dict):
+                            continue
+                        # Heuristic: skip metadata-only keys that don't look like EO entries
+                        if not (v.get("communications") or _EO_KEY_RE.search(k)):
+                            continue
+                        eo_items[k] = self._flatten_eo_entry(v)
 
-                # Build deterministic record ID for dedup (HC-11)
-                dedup_key = f"{comm_url or comm_title}:{eo_number}"
-                record_id = hashlib.sha256(dedup_key.encode()).hexdigest()[:16]
+            for eo_key, eo_data in eo_items.items():
+                self._extract_eo_records(eo_key, eo_data, batch_id,
+                                         article_lookup, records)
 
-                records.append({
-                    "eo_number": eo_number,
-                    "eo_title": eo_title,
-                    "eo_date": eo_date,
-                    "communication": {
-                        "url": comm_url,
-                        "title": comm_title,
-                        "date": comm_date,
-                        "domain": self._extract_domain(comm_url),
-                        "official": (
-                            comm.get("responsible_official_or_department")
-                            or comm.get("responsible_official", "")
-                        ),
-                        "action_type": action_type_norm,
-                        "action_description": (
-                            comm.get("action_decision_or_event")
-                            or comm.get("action_decision_event", "")
-                        ),
-                        "subsection": comm.get("subsection") or comm.get("eo_implemented", ""),
-                    },
-                    "precedence": precedence,
-                    "confidence": comm.get("confidence_score", 0.0),
-                    "batch_id": batch_id,
-                    "record_id": record_id,
-                    "cross_eo": comm.get("cross_eo_linkages", []),
-                })
+            if not eo_items:
+                # Log the unexpected schema for debugging
+                top_keys = list(data.keys()) if isinstance(data, dict) else f"list[{len(data)}]"
+                self._logger.warning(
+                    "No EO items extracted from JSON block in %s — "
+                    "unexpected schema: %s",
+                    batch_id, top_keys,
+                )
 
         self._logger.info(
             "Extracted %d linkage records from %s (%d EOs)",
@@ -1142,6 +1139,358 @@ class LinkageExtractor(Base):
             len({r["eo_number"] for r in records}),
         )
         return records
+
+    # -- normalisation helpers ------------------------------------------------
+
+    def _normalise_eo_list(self, items: list) -> dict[str, dict]:
+        """Convert a list of EO dicts into a keyed dict, flattening each."""
+        result: dict[str, dict] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            # Try several key names for the EO identifier
+            eo_id = (
+                item.get("eo_number")
+                or item.get("eo_identifier")
+                or item.get("executive_order")
+                or item.get("eo", "")
+            )
+            if not eo_id:
+                continue
+            result[str(eo_id)] = self._flatten_eo_entry(item)
+        return result
+
+    @staticmethod
+    def _flatten_eo_entry(entry: dict) -> dict:
+        """Flatten metadata / legal_precedence sub-dicts and normalise comm fields."""
+        flat = dict(entry)
+
+        # Flatten metadata (Format B: {"metadata": {"title": ..., "date_signed": ...}})
+        meta = flat.pop("metadata", None) or flat.pop("eo_metadata", None)
+        if isinstance(meta, dict):
+            flat.setdefault("title", meta.get("title", ""))
+            flat.setdefault("eo_title", meta.get("title", ""))
+            flat.setdefault("eo_date", meta.get("date_signed", ""))
+            flat.setdefault("rescinds_or_supersedes",
+                            meta.get("rescinds_or_supersedes", []))
+            flat.setdefault("derived_from_or_read_together_with",
+                            meta.get("derived_from_or_read_together_with", []))
+
+        # Flatten legal_precedence (Format C)
+        lp = flat.pop("legal_precedence", None)
+        if isinstance(lp, dict):
+            flat.setdefault("rescinds_or_supersedes",
+                            lp.get("rescinds_or_supersedes",
+                                   lp.get("rescinds_supersedes", [])))
+            flat.setdefault("derived_from_or_read_together_with",
+                            lp.get("derived_from_or_read_together_with",
+                                   lp.get("derived_from_read_together", [])))
+
+        # Flatten precedence_chain / read_together_with (batch_14/31 style)
+        if "precedence_chain" in flat and "rescinds_or_supersedes" not in flat:
+            flat["rescinds_or_supersedes"] = flat.pop("precedence_chain", [])
+        if "read_together_with" in flat and "derived_from_or_read_together_with" not in flat:
+            flat["derived_from_or_read_together_with"] = flat.pop("read_together_with", [])
+
+        # Normalise communication field names
+        comms = flat.get("communications", [])
+        normalised_comms = []
+        for c in comms:
+            if not isinstance(c, dict):
+                continue
+            nc = dict(c)
+            if "source_url" in nc and "url" not in nc:
+                nc["url"] = nc.pop("source_url")
+            if "action_decision_event" in nc and "action_decision_or_event" not in nc:
+                nc["action_decision_or_event"] = nc.pop("action_decision_event")
+            if "responsible_official_department" in nc and "responsible_official_or_department" not in nc:
+                nc["responsible_official_or_department"] = nc.pop("responsible_official_department")
+            normalised_comms.append(nc)
+        flat["communications"] = normalised_comms
+
+        return flat
+
+    def _extract_eo_records(
+        self,
+        eo_key: str,
+        eo_data: dict,
+        batch_id: str,
+        article_lookup: dict[str, dict[str, str]] | None,
+        records: list[dict[str, Any]],
+    ) -> None:
+        """Extract records for a single EO entry into *records*."""
+        eo_match = _EO_KEY_RE.search(eo_key)
+        if not eo_match:
+            return
+        eo_number = eo_match.group(1)
+
+        eo_title = eo_data.get("eo_title") or eo_data.get("title", "")
+        eo_date = (
+            eo_data.get("chronological_placement")
+            or eo_data.get("eo_date", "")
+        )
+
+        # Parse precedence — extract EO numbers from varied formats
+        precedence = {
+            "rescinds": self._extract_eo_nums(
+                eo_data.get("rescinds_supersedes")
+                or eo_data.get("rescinds_or_supersedes", [])
+            ),
+            "derived_from": self._extract_eo_nums(
+                eo_data.get("derived_from_read_together")
+                or eo_data.get("derived_from_or_read_together_with", [])
+            ),
+            "read_with": self._extract_eo_nums(
+                eo_data.get("read_with", [])
+            ),
+        }
+
+        comms = eo_data.get("communications", [])
+        if not comms:
+            # EO-only record (no comms but has precedence info)
+            records.append({
+                "eo_number": eo_number,
+                "eo_title": eo_title,
+                "eo_date": eo_date,
+                "communication": None,
+                "precedence": precedence,
+                "confidence": 0.0,
+                "batch_id": batch_id,
+                "record_id": hashlib.sha256(
+                    f"{eo_number}:no_comm:{batch_id}".encode()
+                ).hexdigest()[:16],
+            })
+            return
+
+        for comm in comms:
+            if not isinstance(comm, dict):
+                continue
+
+            comm_url = comm.get("url", "")
+            comm_title = comm.get("communication_title", "")
+            comm_date = comm.get("date", "")
+
+            # Hydrate missing metadata from article lookup (if available)
+            if article_lookup:
+                meta = {}
+                # 1. Exact match on URL
+                if comm_url and comm_url in article_lookup:
+                    meta = article_lookup[comm_url]
+                # 2. Exact match on title
+                elif comm_title and comm_title in article_lookup:
+                    meta = article_lookup[comm_title]
+                # 3. Normalized title match
+                elif comm_title:
+                    norm = comm_title.strip().lower()
+                    if norm in article_lookup:
+                        meta = article_lookup[norm]
+                # 4. Fuzzy substring match: action description against
+                #    article titles in the lookup
+                if not meta:
+                    action_desc = (
+                        comm.get("action_decision_or_event")
+                        or comm.get("action_decision_event", "")
+                    )
+                    if action_desc:
+                        desc_lower = action_desc.lower()
+                        best_score = 0
+                        for lk_key, lk_meta in article_lookup.items():
+                            lk_title = lk_meta.get("title", "")
+                            if not lk_title or len(lk_title) < 10:
+                                continue
+                            t_lower = lk_title.lower()
+                            # Check if significant portion of title appears in action
+                            words = [w for w in t_lower.split() if len(w) > 3]
+                            if not words:
+                                continue
+                            hits = sum(1 for w in words if w in desc_lower)
+                            score = hits / len(words)
+                            if score > best_score and score >= 0.5:
+                                best_score = score
+                                meta = lk_meta
+
+                # 5. Content-based match: search comm title + action desc
+                #    keywords in the assistant_response text stored in the
+                #    lookup entries.
+                if not meta:
+                    search_parts = [
+                        p for p in (
+                            comm_title,
+                            comm.get("action_decision_or_event")
+                            or comm.get("action_decision_event", ""),
+                        ) if p
+                    ]
+                    search_text = " ".join(search_parts)
+                    if search_text:
+                        # Strip punctuation from words for cleaner matching
+                        raw = re.sub(r"[^\w\s]", " ", search_text.lower())
+                        words = [
+                            w for w in raw.split()
+                            if len(w) > 4 and w not in _STOP_WORDS
+                        ]
+                        if words:
+                            seen_urls: set[str] = set()
+                            best_score = 0.0
+                            for lk_meta in article_lookup.values():
+                                lk_url = lk_meta.get("url", "")
+                                if not lk_url or lk_url in seen_urls:
+                                    continue
+                                seen_urls.add(lk_url)
+                                resp = lk_meta.get("response_text", "")
+                                if not resp:
+                                    continue
+                                resp_lower = resp.lower()
+                                hits = sum(
+                                    1 for w in words if w in resp_lower
+                                )
+                                score = hits / len(words)
+                                if score > best_score and score >= 0.35:
+                                    best_score = score
+                                    meta = lk_meta
+
+                # 6. Date-based fallback: match comm date against
+                #    conversation dates; if only one article shares the
+                #    date, assign its URL.  If several share the date,
+                #    pick the one with the best content overlap (even
+                #    below the normal threshold).
+                if not meta and comm_date and article_lookup:
+                    date_matches: list[dict[str, str]] = []
+                    seen_urls2: set[str] = set()
+                    for lk_meta in article_lookup.values():
+                        lk_url = lk_meta.get("url", "")
+                        if not lk_url or lk_url in seen_urls2:
+                            continue
+                        seen_urls2.add(lk_url)
+                        lk_date = lk_meta.get("date", "")
+                        if lk_date and comm_date.startswith(lk_date[:7]):
+                            date_matches.append(lk_meta)
+                    if len(date_matches) == 1:
+                        meta = date_matches[0]
+                    elif len(date_matches) > 1:
+                        # Multiple same-month: pick best content overlap
+                        raw_fb = re.sub(
+                            r"[^\w\s]", " ",
+                            (comm_title + " " + (
+                                comm.get("action_decision_or_event")
+                                or comm.get("action_decision_event", "")
+                            )).lower(),
+                        )
+                        fb_words = [
+                            w for w in raw_fb.split()
+                            if len(w) > 4 and w not in _STOP_WORDS
+                        ]
+                        if fb_words:
+                            best_fb = 0.0
+                            for dm in date_matches:
+                                resp = dm.get("response_text", "").lower()
+                                hits = sum(1 for w in fb_words if w in resp)
+                                sc = hits / len(fb_words)
+                                if sc > best_fb:
+                                    best_fb = sc
+                                    meta = dm
+
+                # 7. Best-available fallback: every communication was
+                #    derived from one of the batch's conversation items.
+                #    Pick the item whose response_text has the highest
+                #    keyword overlap — no minimum threshold.
+                if not meta and article_lookup:
+                    raw_final = re.sub(
+                        r"[^\w\s]", " ",
+                        " ".join(filter(None, [
+                            comm_title,
+                            comm.get("action_decision_or_event")
+                            or comm.get("action_decision_event", ""),
+                            comm.get("responsible_official_or_department")
+                            or comm.get("responsible_official", ""),
+                        ])).lower(),
+                    )
+                    final_words = [
+                        w for w in raw_final.split()
+                        if len(w) > 2 and w not in _STOP_WORDS
+                    ]
+                    if final_words:
+                        seen_urls3: set[str] = set()
+                        best_final = 0
+                        for lk_meta in article_lookup.values():
+                            lk_url = lk_meta.get("url", "")
+                            if not lk_url or lk_url in seen_urls3:
+                                continue
+                            seen_urls3.add(lk_url)
+                            resp = lk_meta.get("response_text", "")
+                            if not resp:
+                                continue
+                            hits = sum(
+                                1 for w in final_words
+                                if w in resp.lower()
+                            )
+                            if hits > best_final:
+                                best_final = hits
+                                meta = lk_meta
+
+                if meta:
+                    if not comm_url:
+                        comm_url = meta.get("url", "")
+                    if not comm_title:
+                        comm_title = meta.get("title", "")
+
+                    # Date enhancement: prefer metadata date if more precise than LLM date
+                    meta_date = meta.get("date", "")
+                    if not comm_date or (meta_date and len(meta_date) > len(comm_date)):
+                        comm_date = meta_date
+
+                    # Domain is handled below via _extract_domain(comm_url)
+
+                    # Fallback for official/department using publisher if available
+                    if not comm.get("responsible_official_or_department") and meta.get("publisher"):
+                        comm["responsible_official_or_department"] = meta["publisher"]
+
+            action_type = (
+                comm.get("implementation_status")
+                or comm.get("implements_extends_or_modifies", "")
+            )
+            # Normalise action_type to lowercase simple form
+            action_lower = action_type.lower().split("(")[0].strip() if action_type else ""
+            if "implement" in action_lower:
+                action_type_norm = "implements"
+            elif "extend" in action_lower:
+                action_type_norm = "extends"
+            elif "modif" in action_lower or "challeng" in action_lower:
+                action_type_norm = "modifies"
+            elif "announce" in action_lower:
+                action_type_norm = "announces"
+            else:
+                action_type_norm = action_lower or "unknown"
+
+            # Build deterministic record ID for dedup (HC-11)
+            dedup_key = f"{comm_url or comm_title}:{eo_number}"
+            record_id = hashlib.sha256(dedup_key.encode()).hexdigest()[:16]
+
+            records.append({
+                "eo_number": eo_number,
+                "eo_title": eo_title,
+                "eo_date": eo_date,
+                "communication": {
+                    "url": comm_url,
+                    "title": comm_title,
+                    "date": comm_date,
+                    "domain": self._extract_domain(comm_url),
+                    "official": (
+                        comm.get("responsible_official_or_department")
+                        or comm.get("responsible_official", "")
+                    ),
+                    "action_type": action_type_norm,
+                    "action_description": (
+                        comm.get("action_decision_or_event")
+                        or comm.get("action_decision_event", "")
+                    ),
+                    "subsection": comm.get("subsection") or comm.get("eo_implemented", ""),
+                },
+                "precedence": precedence,
+                "confidence": comm.get("confidence_score", 0.0),
+                "batch_id": batch_id,
+                "record_id": record_id,
+                "cross_eo": comm.get("cross_eo_linkages", []),
+            })
 
     # -- helpers -------------------------------------------------------------
 
@@ -1311,10 +1660,12 @@ class EOImplementationCache(Base):
 # a title for these numbers.
 _EO_NAME_FALLBACKS: dict[str, str] = {
     "11246": "Equal Employment Opportunity",
+    "12866": "Regulatory Planning and Review",
     "12898": "Federal Actions to Address Environmental Justice in Minority Populations and Low-Income Populations",
     "13533": "Providing an Order of Succession Within the Department of Defense",
     "13583": "Establishing a Coordinated Government-Wide Initiative to Promote Diversity and Inclusion in the Federal Workforce",
     "13637": "Administration of Reformed Export Controls",
+    "13859": "Maintaining American Leadership in Artificial Intelligence",
     "13950": "Combating Race and Sex Stereotyping",
     "13960": "Promoting the Use of Trustworthy Artificial Intelligence in the Federal Government",
     "13985": "Advancing Racial Equity and Support for Underserved Communities Through the Federal Government",
@@ -1511,12 +1862,22 @@ def _clean_eo_title(title: str) -> str:
     return cleaned
 
 
+_MERMAID_MIN_LABEL_WIDTH = 30  # pad labels so blocks render at uniform width
+
+
 def _mermaid_label(text: str, max_len: int = 50) -> str:
     """Sanitise a string for use in a Mermaid node label."""
     text = _MERMAID_UNSAFE_RE.sub("", text)
     if len(text) > max_len:
         text = text[: max_len - 1] + "…"
-    return text.strip()
+    text = text.strip()
+    # Pad short labels so Mermaid renders blocks at a uniform width
+    if len(text) < _MERMAID_MIN_LABEL_WIDTH:
+        pad = _MERMAID_MIN_LABEL_WIDTH - len(text)
+        left = pad // 2
+        right = pad - left
+        text = "\u00A0" * left + text + "\u00A0" * right
+    return text
 
 
 def _node_id(prefix: str, eo_number: str) -> str:
@@ -1563,7 +1924,30 @@ class EODiagramGenerator(Base):
             entry = registry.entries.get(eo_number)
             if entry and entry.title:
                 name = _mermaid_label(_clean_eo_title(entry.title))
-        return f"EO {eo_number}<br/>{name}" if name else f"EO {eo_number}"
+        if not name:
+            name = "Executive Order"
+        return f"EO {eo_number}<br/>{name}"
+
+    @staticmethod
+    def _emit_chrono_chain(
+        nodes: list[tuple[int, str]],
+        lines: list[str],
+    ) -> None:
+        """Append invisible ``~~~`` links to enforce chronological LR order.
+
+        *nodes* is a list of ``(eo_number_int, mermaid_node_id)`` tuples.
+        After sorting by EO number (== signing date), consecutive pairs are
+        linked with invisible edges so Mermaid places earlier EOs to the
+        left and later EOs to the right — no vertical alignment of nodes
+        with different dates.
+        """
+        if len(nodes) < 2:
+            return
+        sorted_nodes = sorted(nodes, key=lambda x: x[0])
+        for i in range(len(sorted_nodes) - 1):
+            lines.append(
+                f"  {sorted_nodes[i][1]} ~~~ {sorted_nodes[i + 1][1]}"
+            )
 
     def generate(
         self,
@@ -1573,47 +1957,55 @@ class EODiagramGenerator(Base):
         name_lookup: EONameLookup | None = None,
         exclude_eos: set[str] | None = None,
     ) -> str:
-        """Return a Mermaid markdown string for *eo_number*'s precedence."""
+        """Return a Mermaid markdown string for *eo_number*'s precedence.
+
+        Rescinded EOs are excluded.  Nodes are ordered left-to-right by
+        date (EO number) via invisible links so that earlier EOs always
+        appear to the left of later ones.
+        """
         if exclude_eos:
             precedence_graph = filter_precedence_graph(precedence_graph, exclude_eos)
         root_id = _node_id("ROOT", eo_number)
+        root_num = int(eo_number) if eo_number.isdigit() else 0
         lines: list[str] = ["graph LR"]
         styles: list[str] = []
+        # Track (eo_number_int, node_id) for chronological ordering
+        all_nodes: list[tuple[int, str]] = []
 
         # Root node
         root_label = self._eo_label(eo_number, registry, name_lookup)
         lines.append(f'  {root_id}["{root_label}"]')
         styles.append(f"  style {root_id} {self.STYLE_ROOT}")
+        all_nodes.append((root_num, root_id))
 
         prec = precedence_graph.get(eo_number, {})
 
-        # -- Disconnected: rescinded/superseded EOs (no edge) -------------
-        for resc_eo in prec.get("rescinds", []):
-            nid = _node_id("RESC", resc_eo)
-            label = self._eo_label(resc_eo, registry, name_lookup)
-            lines.append(f'  {nid}["{label}"]')
-            styles.append(f"  style {nid} {self.STYLE_RESCINDED}")
-
-        # -- Derived-from EOs (direction based on chronological order) -----
-        root_num = int(eo_number) if eo_number.isdigit() else 0
+        # -- Derived-from EOs (arrow direction = chronological) ------------
         for der_eo in prec.get("derived_from", []):
             nid = _node_id("DER", der_eo)
             label = self._eo_label(der_eo, registry, name_lookup)
             der_num = int(der_eo) if der_eo.isdigit() else 0
             if der_num < root_num:
-                # Older EO → root derives from it: arrow INTO root
                 lines.append(f'  {nid}["{label}"] --> {root_id}')
             else:
-                # Newer EO → it derives from root: arrow OUT of root
                 lines.append(f'  {root_id} --> {nid}["{label}"]')
             styles.append(f"  style {nid} {self.STYLE_DERIVED}")
+            all_nodes.append((der_num, nid))
 
-        # -- Right side: read-with EOs (different colour) -------------------
+        # -- Read-with EOs (undirected, chronological placement) -----------
         for rw_eo in prec.get("read_with", []):
             nid = _node_id("RW", rw_eo)
             label = self._eo_label(rw_eo, registry, name_lookup)
-            lines.append(f'  {root_id} --> {nid}["{label}"]')
+            rw_num = int(rw_eo) if rw_eo.isdigit() else 0
+            if rw_num < root_num:
+                lines.append(f'  {nid}["{label}"] --- {root_id}')
+            else:
+                lines.append(f'  {root_id} --- {nid}["{label}"]')
             styles.append(f"  style {nid} {self.STYLE_READ}")
+            all_nodes.append((rw_num, nid))
+
+        # -- Invisible chronological chain (left = oldest) -----------------
+        self._emit_chrono_chain(all_nodes, lines)
 
         # Combine
         lines.append("")
@@ -1664,13 +2056,15 @@ class EODiagramGenerator(Base):
         styles: list[str] = []
         emitted_edges: set[str] = set()
 
-        # Emit all nodes
+        # Emit all nodes (sorted chronologically)
+        all_nodes: list[tuple[int, str]] = []
         for eo in sorted(visited, key=lambda e: int(e) if e.isdigit() else 0):
             nid = f"EO_{eo}"
             label = self._eo_label(eo, registry, name_lookup)
             lines.append(f'  {nid}["{label}"]')
             style = self.STYLE_ROOT if eo == root_eo else self.STYLE_DERIVED
             styles.append(f"  style {nid} {style}")
+            all_nodes.append((int(eo) if eo.isdigit() else 0, nid))
 
         # Emit edges
         for eo in sorted(visited, key=lambda e: int(e) if e.isdigit() else 0):
@@ -1698,6 +2092,9 @@ class EODiagramGenerator(Base):
                     lines.append(edge_a)
                     emitted_edges.add(edge_a)
 
+        # Invisible chronological chain (left = oldest)
+        self._emit_chrono_chain(all_nodes, lines)
+
         lines.append("")
         lines.extend(styles)
         return "\n".join(lines)
@@ -1719,6 +2116,11 @@ class EODiagramGenerator(Base):
         """
         diagrams_dir = Path(output_dir) / "diagrams"
         diagrams_dir.mkdir(parents=True, exist_ok=True)
+
+        # Remove stale per-chapter diagram files from previous runs
+        # (chapter numbering can change, leaving orphans).
+        for old in diagrams_dir.glob("[0-9]*_eo_*.md"):
+            old.unlink()
 
         # Merge registry supercessions into the precedence graph so chapters
         # whose EOs aren't yet in the cache still get rescission edges.
@@ -1891,24 +2293,11 @@ class EODiagramGenerator(Base):
                 styles.append(f"  style {nid} {style}")
             return nid
 
-        # Collect all EOs that are only targets of rescission (never a root)
-        root_eos = set(merged.keys())
-        rescinded_only: set[str] = set()
-        for prec in merged.values():
-            for r in prec.get("rescinds", []):
-                if r not in root_eos:
-                    rescinded_only.add(r)
-
         # 1. Emit root EO nodes
         for eo in sorted(merged.keys(), key=lambda e: int(e) if e.isdigit() else 0):
             _ensure_node(eo, self.STYLE_ROOT)
 
-        # 2. Emit rescinded nodes (disconnected, white)
-        for eo in sorted(merged.keys(), key=lambda e: int(e) if e.isdigit() else 0):
-            for resc_eo in merged[eo].get("rescinds", []):
-                _ensure_node(resc_eo, self.STYLE_RESCINDED)
-
-        # 3. Derived-from edges (chronological direction)
+        # 2. Derived-from edges (chronological direction)
         for eo in sorted(merged.keys(), key=lambda e: int(e) if e.isdigit() else 0):
             eo_num = int(eo) if eo.isdigit() else 0
             for der_eo in merged[eo].get("derived_from", []):
@@ -1923,7 +2312,7 @@ class EODiagramGenerator(Base):
                     lines.append(edge)
                     emitted_edges.add(edge)
 
-        # 4. Read-with edges
+        # 3. Read-with edges
         for eo in sorted(merged.keys(), key=lambda e: int(e) if e.isdigit() else 0):
             for rw_eo in merged[eo].get("read_with", []):
                 nid_rw = _ensure_node(rw_eo, self.STYLE_READ)
@@ -1933,6 +2322,13 @@ class EODiagramGenerator(Base):
                 if edge_a not in emitted_edges and edge_b not in emitted_edges:
                     lines.append(edge_a)
                     emitted_edges.add(edge_a)
+
+        # 4. Invisible chronological chain (left = oldest)
+        chrono_nodes = [
+            (int(nid.removeprefix("EO_")) if nid.removeprefix("EO_").isdigit() else 0, nid)
+            for nid in emitted_nodes
+        ]
+        self._emit_chrono_chain(chrono_nodes, lines)
 
         lines.append("")
         lines.extend(styles)
@@ -2339,7 +2735,8 @@ class ChapterEnricher(Base):
                 merged_graph = filter_precedence_graph(merged_graph, self.exclude_eos)
 
             diagram_body = self.diagram_gen.generate(
-                eo_number, merged_graph, self.registry
+                eo_number, merged_graph, self.registry,
+                name_lookup=self.name_lookup,
             )
 
             # Wrap in mermaid block

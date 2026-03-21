@@ -63,7 +63,7 @@ from src.components.publisher.rapporteur_docs import (_CITE_GROUP_RE,
 from src.config_handler import Base
 from src.models.publisher import (ChapterSpec, CiteConfig, ConcludeConfig,
                                   FormatConfig, IntroduceConfig,
-                                  PipelineConfig)
+                                  PipelineConfig, SectionDef)
 
 # ---------------------------------------------------------------------------
 # Logging (fallback for CLI entry-point; stages use Base._logger)
@@ -75,6 +75,13 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 log = logging.getLogger("rapporteur")
+
+
+def _gemini_location(model: str) -> str | None:
+    """Return the GCP location override for models that require it."""
+    if "3.1" in model or "preview" in model:
+        return "global"
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1612,9 +1619,10 @@ class FormatStage(Base):
 
     # Pricing per 1M tokens (Gemini 2.5 models, prompts ≤200k)
     _PRICING = {
-        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
-        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
-        "gemini-2.5-flash-lite": {"input": 0.10,  "output":  0.40},
+        "gemini-2.5-pro":            {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":          {"input": 0.30,  "output":  2.50},
+        "gemini-2.5-flash-lite":     {"input": 0.10,  "output":  0.40},
+        "gemini-3.1-pro-preview":    {"input": 1.25,  "output": 10.00},
     }
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -1661,7 +1669,7 @@ class FormatStage(Base):
         from google.genai import types as genai_types
 
         from src.clients.llm_gcp_client import GeminiLLMClient
-        client = GeminiLLMClient(model_name=fmt.model)
+        client = GeminiLLMClient(model_name=fmt.model, location=_gemini_location(fmt.model))
 
         table_counter = 0     # running table number
 
@@ -2099,6 +2107,7 @@ class ConcludeStage(Base):
         "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
         "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
         "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+        "gemini-3.1-pro-preview":{"input": 1.25,  "output": 10.00},
     }
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -2149,12 +2158,14 @@ class ConcludeStage(Base):
             self._logger.info("  (dry-run) would generate conclusion chapter")
             return
 
-        # Phase 5.5: Always reconstitute full EO index via /query_metadata
-        eo_grounding = _fetch_full_eo_grounding(co.rag_service_url)
+        # Fetch EO grounding scoped to only EOs cited in document chapters
+        eo_grounding = self._fetch_document_eo_grounding(
+            chapters_dir, chapter_entries, co.rag_service_url,
+        )
         if eo_grounding:
-            self._logger.info("  Reconstituted full EO grounding (%d chars)", len(eo_grounding))
+            self._logger.info("  Scoped EO grounding (%d chars)", len(eo_grounding))
         else:
-            self._logger.warning("  No EO grounding available (RAG service unreachable or index empty)")
+            self._logger.warning("  No EO grounding available (RAG service unreachable or no EO URLs found)")
 
         # Cost tracking accumulators
         total_input_tokens = 0
@@ -2166,6 +2177,9 @@ class ConcludeStage(Base):
         conclude_prompt = self._build_conclude_prompt(
             document_context, conclusion_rules, style_rules, eo_grounding,
         )
+        prompt_file = chapters_dir / "_prompt-overall-conclude.txt"
+        prompt_file.write_text(conclude_prompt, encoding="utf-8")
+        self._logger.info("  Prompt saved to %s (%d chars)", prompt_file.name, len(conclude_prompt))
         conclusion_draft, usage_1 = self._generate_with_usage(co, conclude_prompt)
         total_input_tokens += usage_1.get("input", 0)
         total_output_tokens += usage_1.get("output", 0)
@@ -2183,6 +2197,9 @@ class ConcludeStage(Base):
         reflect_prompt = self._build_reflect_prompt(
             conclusion_draft, document_context, conclusion_rules, eo_grounding,
         )
+        prompt_file = chapters_dir / "_prompt-overall-reflect.txt"
+        prompt_file.write_text(reflect_prompt, encoding="utf-8")
+        self._logger.info("  Prompt saved to %s (%d chars)", prompt_file.name, len(reflect_prompt))
         refined_conclusion, usage_2 = self._generate_with_usage(co, reflect_prompt)
         total_input_tokens += usage_2.get("input", 0)
         total_output_tokens += usage_2.get("output", 0)
@@ -2202,14 +2219,15 @@ class ConcludeStage(Base):
         )
         refined_conclusion = refined_conclusion.rstrip() + "\n" + footer
 
-        # Write conclusion chapter — remove any prior conclusion entry first
-        non_conclusion = [c for c in chapter_entries if "conclusion" not in c["filename"]]
-        chapter_num = len(non_conclusion) + 1
+        # Write conclusion chapter — remove any prior *overall* conclusion entry first
+        non_conclusion = [c for c in chapter_entries if not ("conclusion" in c["filename"] and "part-" not in c["filename"])]
+        chapter_num = len([c for c in non_conclusion if "introduction" not in c["filename"] and "part-" not in c["filename"]]) + 1
         filename = f"{chapter_num:02d}-conclusion.md"
-        # Clean up stale conclusion files
+        # Clean up stale overall conclusion files (preserve section part conclusions)
         for old in chapter_entries:
-            if "conclusion" in old["filename"] and old["filename"] != filename:
-                stale = chapters_dir / old["filename"]
+            fn = old["filename"]
+            if "conclusion" in fn and fn != filename and "part-" not in fn:
+                stale = chapters_dir / fn
                 if stale.exists():
                     stale.unlink()
         conclusion_path = chapters_dir / filename
@@ -2308,7 +2326,7 @@ class ConcludeStage(Base):
 
             from src.clients.llm_gcp_client import GeminiLLMClient
 
-            client = GeminiLLMClient(model_name=co.model)
+            client = GeminiLLMClient(model_name=co.model, location=_gemini_location(co.model))
             max_tokens = 16_000
 
             config = genai_types.GenerateContentConfig(
@@ -2443,20 +2461,121 @@ class ConcludeStage(Base):
 
     # -- context helpers ----------------------------------------------------
 
+    def _fetch_document_eo_grounding(
+        self, chapters_dir: Path, chapter_entries: list[dict], rag_url: str,
+    ) -> str:
+        """Fetch EO grounding scoped to only EOs cited across all document chapters."""
+        if not rag_url:
+            return ""
+        url_pattern = re.compile(r'https://www\.federalregister\.gov/documents/[^\s\)\]"]+')
+        doc_urls: set[str] = set()
+        for entry in chapter_entries:
+            fn = entry.get("filename", "")
+            if "conclusion" in fn:
+                continue
+            path = chapters_dir / fn
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in url_pattern.finditer(text):
+                doc_urls.add(m.group(0).rstrip(".,;:"))
+
+        if not doc_urls:
+            return ""
+
+        self._logger.info("  Found %d unique EO URLs across chapters", len(doc_urls))
+
+        import requests as _requests
+        try:
+            ready = _requests.get(f"{rag_url}/ready", timeout=5)
+            active = ready.json().get("active_folder", "")
+            if "eo" not in active.lower():
+                resp = _requests.post(
+                    f"{rag_url}/switch-index",
+                    json={"folder": "x_indices_eo"},
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return ""
+        except Exception:
+            pass
+
+        grounding_parts: list[str] = []
+        for url in sorted(doc_urls):
+            try:
+                resp = _requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={
+                        "source_url": url,
+                        "include_summaries": True,
+                        "include_qa": True,
+                        "max_results": 100,
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                retrieved_docs = data.get("retrieved_docs", [])
+                retrieved_qa = data.get("retrieved_qa", [])
+                if not retrieved_docs and not retrieved_qa:
+                    continue
+                if retrieved_docs:
+                    doc = retrieved_docs[0]
+                    doc_title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary_text = doc.get("summary_text", "")
+                    parts = [f"### {doc_title}\n", f"**Source:** {url}\n"]
+                    if summary_text:
+                        parts.append(f"\n**Summary:**\n{summary_text}\n")
+                    if retrieved_qa:
+                        parts.append("\n**Detailed Content (Federal Register):**\n")
+                        for qa in retrieved_qa:
+                            context = qa.get("context", "")
+                            if context:
+                                parts.append(f"\n{context}\n")
+                    grounding_parts.append("".join(parts))
+            except Exception as exc:
+                self._logger.debug("Failed to fetch EO from %s: %s", url[:80], exc)
+
+        if not grounding_parts:
+            return ""
+        header = (
+            "## LEGAL FRAMEWORK GROUNDING\n\n"
+            f"Executive Order context ({len(grounding_parts)} documents) "
+            "covering all EOs cited in the document:\n\n"
+        )
+        return header + "\n\n".join(grounding_parts)
+
     def _build_document_context(
         self,
         chapters_dir: Path,
         chapter_entries: list[dict],
         include_kaliya: bool,
     ) -> str:
-        """Concatenate all chapter text, optionally with Kaliya analysis."""
+        """Concatenate chapter text, optionally with Kaliya analysis.
+
+        When sections are defined, uses only section introductions and
+        conclusions as context (much smaller) instead of all chapters.
+        """
         parts: list[str] = []
-        for entry in chapter_entries:
-            if "conclusion" in entry["filename"]:
-                continue  # exclude prior conclusion from context
-            path = chapters_dir / entry["filename"]
-            if path.exists():
-                parts.append(path.read_text(encoding="utf-8"))
+
+        # If sections are defined, use section intros + conclusions for a
+        # compact representation instead of all chapter text.
+        sects = self.cfg.sections
+        if sects.enabled and sects.definitions:
+            self._logger.info("  Using section intros/conclusions as document context")
+            for entry in chapter_entries:
+                fn = entry["filename"]
+                if "part-" in fn and ("-introduction" in fn or "-conclusion" in fn):
+                    path = chapters_dir / fn
+                    if path.exists():
+                        parts.append(path.read_text(encoding="utf-8"))
+        else:
+            for entry in chapter_entries:
+                if "conclusion" in entry["filename"]:
+                    continue  # exclude prior conclusion from context
+                path = chapters_dir / entry["filename"]
+                if path.exists():
+                    parts.append(path.read_text(encoding="utf-8"))
 
         if include_kaliya:
             kaliya_dir = self.cfg.build_dir / "kaliya"
@@ -2702,6 +2821,7 @@ class EditStage(Base):
         "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
         "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
         "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+        "gemini-3.1-pro-preview":{"input": 1.25,  "output": 10.00},
     }
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -3241,7 +3361,7 @@ class EditStage(Base):
 
             from src.clients.llm_gcp_client import GeminiLLMClient
 
-            client = GeminiLLMClient(model_name=ec.model)
+            client = GeminiLLMClient(model_name=ec.model, location=_gemini_location(ec.model))
             max_tokens = 16_000
 
             config = genai_types.GenerateContentConfig(
@@ -4495,6 +4615,7 @@ class IntroduceStage(Base):
         "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
         "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
         "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+        "gemini-3.1-pro-preview":{"input": 1.25,  "output": 10.00},
     }
 
     def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
@@ -4544,10 +4665,12 @@ class IntroduceStage(Base):
             self._logger.info("  (dry-run) would generate introduction chapter")
             return
 
-        # Phase 5.5: Always reconstitute full EO index via /query_metadata
-        eo_grounding = _fetch_full_eo_grounding(ic.rag_service_url)
+        # Scoped EO grounding — only EOs cited in chapters
+        eo_grounding = self._fetch_document_eo_grounding(
+            chapters_dir, chapter_entries, ic.rag_service_url,
+        )
         if eo_grounding:
-            self._logger.info("  Reconstituted full EO grounding (%d chars)", len(eo_grounding))
+            self._logger.info("  Scoped EO grounding (%d chars)", len(eo_grounding))
         else:
             self._logger.warning("  No EO grounding available (RAG service unreachable or index empty)")
 
@@ -4605,11 +4728,12 @@ class IntroduceStage(Base):
         )
         refined_intro = refined_intro.rstrip() + "\n" + footer
 
-        # Write introduction chapter — clean up any prior introduction file
+        # Write introduction chapter — clean up any prior *overall* introduction file
         filename = "00-introduction.md"
         for old in chapter_entries:
-            if "introduction" in old["filename"] and old["filename"] != filename:
-                stale = chapters_dir / old["filename"]
+            fn = old["filename"]
+            if "introduction" in fn and fn != filename and "part-" not in fn:
+                stale = chapters_dir / fn
                 if stale.exists():
                     stale.unlink()
         intro_path = chapters_dir / filename
@@ -4618,8 +4742,8 @@ class IntroduceStage(Base):
             "  Wrote %s (%d chars)", filename, len(refined_intro),
         )
 
-        # Update manifest — insert introduction at index 0, remove prior
-        chapter_entries[:] = [c for c in chapter_entries if "introduction" not in c["filename"]]
+        # Update manifest — insert introduction at index 0, remove prior overall intro only
+        chapter_entries[:] = [c for c in chapter_entries if not ("introduction" in c["filename"] and "part-" not in c["filename"])]
         chapter_entries.insert(0, {
             "filename": filename,
             "title": "Introduction",
@@ -4704,7 +4828,7 @@ class IntroduceStage(Base):
 
             from src.clients.llm_gcp_client import GeminiLLMClient
 
-            client = GeminiLLMClient(model_name=ic.model)
+            client = GeminiLLMClient(model_name=ic.model, location=_gemini_location(ic.model))
 
             config = genai_types.GenerateContentConfig(
                 temperature=0.2,
@@ -5017,6 +5141,90 @@ class IntroduceStage(Base):
             )
         return ""
 
+    def _fetch_document_eo_grounding(
+        self, chapters_dir: Path, chapter_entries: list[dict], rag_url: str,
+    ) -> str:
+        """Fetch EO grounding scoped to only EOs cited across all document chapters."""
+        if not rag_url:
+            return ""
+        url_pattern = re.compile(r'https://www\.federalregister\.gov/documents/[^\s\)\]"]+')
+        doc_urls: set[str] = set()
+        for entry in chapter_entries:
+            fn = entry.get("filename", "")
+            if "conclusion" in fn or "introduction" in fn:
+                continue
+            path = chapters_dir / fn
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in url_pattern.finditer(text):
+                doc_urls.add(m.group(0).rstrip(".,;:"))
+
+        if not doc_urls:
+            return ""
+
+        self._logger.info("  Found %d unique EO URLs across chapters", len(doc_urls))
+
+        import requests as _requests
+        try:
+            ready = _requests.get(f"{rag_url}/ready", timeout=5)
+            active = ready.json().get("active_folder", "")
+            if "eo" not in active.lower():
+                resp = _requests.post(
+                    f"{rag_url}/switch-index",
+                    json={"folder": "x_indices_eo"},
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return ""
+        except Exception:
+            pass
+
+        grounding_parts: list[str] = []
+        for url in sorted(doc_urls):
+            try:
+                resp = _requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={
+                        "source_url": url,
+                        "include_summaries": True,
+                        "include_qa": True,
+                        "max_results": 100,
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                retrieved_docs = data.get("retrieved_docs", [])
+                retrieved_qa = data.get("retrieved_qa", [])
+                if not retrieved_docs and not retrieved_qa:
+                    continue
+                if retrieved_docs:
+                    doc = retrieved_docs[0]
+                    doc_title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary_text = doc.get("summary_text", "")
+                    parts = [f"### {doc_title}\n", f"**Source:** {url}\n"]
+                    if summary_text:
+                        parts.append(f"\n**Summary:**\n{summary_text}\n")
+                    if retrieved_qa:
+                        parts.append("\n**Detailed Content (Federal Register):**\n")
+                        for qa in retrieved_qa:
+                            context = qa.get("context", "")
+                            if context:
+                                parts.append(f"\n{context}\n")
+                    grounding_parts.append("".join(parts))
+            except Exception as exc:
+                self._logger.debug("Failed to fetch EO from %s: %s", url[:80], exc)
+
+        if not grounding_parts:
+            return ""
+        header = (
+            "## LEGAL FRAMEWORK GROUNDING\n\n"
+            f"Executive Order context ({len(grounding_parts)} documents) "
+            "covering all EOs cited in the document:\n\n"
+        )
+        return header + "\n\n".join(grounding_parts)
+
     def _rebuild_index_md(
         self, chapters_dir: Path, chapter_entries: list[dict],
     ) -> None:
@@ -5074,6 +5282,1074 @@ class IntroduceStage(Base):
             input_tokens / 1_000_000 * rates["input"]
             + output_tokens / 1_000_000 * rates["output"]
         )
+
+
+# ---------------------------------------------------------------------------
+# Section Conclude — per-section conclusions for multi-part volumes
+# ---------------------------------------------------------------------------
+
+class SectionConcludeStage(Base):
+    """Generate a conclusion for each section defined in ``sections.definitions``.
+
+    Reuses the LLM generation, prompt-building, and EO-grounding logic from
+    :class:`ConcludeStage` but scopes each call to the chapters in a single
+    section.  Output files are inserted into the manifest immediately after
+    the last chapter in each section.
+    """
+
+    _PRICING: dict[str, dict[str, float]] = {
+        "gpt-5.4":               {"input": 2.50,  "output": 10.00},
+        "gpt-5.1":               {"input": 2.50,  "output": 10.00},
+        "gpt-5":                 {"input": 2.00,  "output":  8.00},
+        "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
+        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+        "gemini-3.1-pro-preview":{"input": 1.25,  "output": 10.00},
+    }
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self) -> None:
+        sects = self.cfg.sections
+        if not sects.enabled or not sects.definitions:
+            self._logger.info("  No sections defined — skipping section conclude.")
+            return
+
+        co = self.cfg.conclude
+        if not co.enabled:
+            self._logger.info("  Conclusion generation disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to conclude.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Idempotent check
+        if manifest.get("section_conclude", {}).get("generated") and not self.cfg.force:
+            self._logger.info("  Section conclusions already generated — skipping.")
+            return
+
+        # Load style rules
+        style_rules = self._load_style_rules(Path(co.style_guide))
+        conclusion_rules = self._load_conclusion_rules(Path(co.style_guide))
+
+        if self.dry_run:
+            for sec in sects.definitions:
+                self._logger.info("  (dry-run) would generate conclusion for: %s", sec.title)
+                if sec.prompt:
+                    self._logger.info("    custom prompt: %s", sec.prompt[:120])
+            return
+
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+        conclusions_written = 0
+
+        # Build a map of 1-based chapter number → entry for quick lookup
+        # Content chapters are those with an "index" key (excludes intro/conclusion)
+        content_entries = [e for e in chapter_entries if "index" in e]
+
+        for sec_idx, sec in enumerate(sects.definitions):
+            part_num = sec_idx + 1
+            self._logger.info("")
+            self._logger.info("  ── Section %d: %s (chapters %s) ──",
+                              part_num, sec.title,
+                              ", ".join(str(c) for c in sec.chapters))
+
+            # Select chapter entries for this section (1-based chapter numbers)
+            section_entries = []
+            for ch_num in sec.chapters:
+                # ch_num is 1-based; content_entries[0] is chapter 1
+                idx = ch_num - 1
+                if 0 <= idx < len(content_entries):
+                    section_entries.append(content_entries[idx])
+                else:
+                    self._logger.warning("    Chapter %d out of range — skipped", ch_num)
+
+            if not section_entries:
+                self._logger.warning("    No valid chapters for section — skipping.")
+                continue
+
+            # Build document context scoped to this section
+            doc_context = self._build_section_context(
+                chapters_dir, section_entries, co.include_kaliya,
+            )
+
+            # Build citable EO list from section chapters only
+            citable_eo_list = self._build_citable_eo_list(chapters_dir, section_entries)
+            if citable_eo_list:
+                self._logger.info("    Scoped EO citations: %d EOs from section chapters",
+                                  citable_eo_list.count("\n"))
+
+            # Fetch scoped EO grounding — only EOs referenced in this section
+            eo_grounding = self._fetch_section_eo_grounding(
+                chapters_dir, section_entries, co.rag_service_url,
+            )
+            if eo_grounding:
+                self._logger.info("    Scoped EO grounding (%d chars)", len(eo_grounding))
+
+            if sec.prompt:
+                self._logger.info("    Custom prompt: %s", sec.prompt[:120])
+
+            self._logger.info("    Generating with %s (%s)", co.model, co.provider)
+
+            # Call 1: Conclude
+            self._logger.info("    Call 1/2: CONCLUDE")
+            conclude_prompt = self._build_conclude_prompt(
+                sec.title, part_num, len(sects.definitions),
+                doc_context, conclusion_rules, style_rules, eo_grounding,
+                citable_eo_list, sec.prompt,
+            )
+            prompt_file = chapters_dir / f"_prompt-part-{part_num}-conclude.txt"
+            prompt_file.write_text(conclude_prompt, encoding="utf-8")
+            self._logger.info("    Prompt saved to %s (%d chars)", prompt_file.name, len(conclude_prompt))
+            conclusion_draft, usage_1 = self._generate_with_usage(co, conclude_prompt)
+            total_input_tokens += usage_1.get("input", 0)
+            total_output_tokens += usage_1.get("output", 0)
+            total_thinking_tokens += usage_1.get("thinking", 0)
+            self._log_usage(f"conclude-part-{part_num}", usage_1, co.model)
+
+            if not conclusion_draft or not conclusion_draft.strip():
+                self._logger.warning("    Empty conclusion draft — skipping section.")
+                continue
+
+            conclusion_draft = self._strip_code_fencing(conclusion_draft)
+
+            # Call 2: Reflect
+            self._logger.info("    Call 2/2: REFLECT")
+            reflect_prompt = self._build_reflect_prompt(
+                sec.title, conclusion_draft, doc_context,
+                conclusion_rules, eo_grounding, citable_eo_list,
+            )
+            prompt_file = chapters_dir / f"_prompt-part-{part_num}-reflect.txt"
+            prompt_file.write_text(reflect_prompt, encoding="utf-8")
+            self._logger.info("    Prompt saved to %s (%d chars)", prompt_file.name, len(reflect_prompt))
+            refined, usage_2 = self._generate_with_usage(co, reflect_prompt)
+            total_input_tokens += usage_2.get("input", 0)
+            total_output_tokens += usage_2.get("output", 0)
+            total_thinking_tokens += usage_2.get("thinking", 0)
+            self._log_usage(f"reflect-part-{part_num}", usage_2, co.model)
+
+            if not refined or not refined.strip():
+                refined = conclusion_draft
+            refined = self._strip_code_fencing(refined)
+
+            # Add footer
+            footer = (
+                f"\n---\n*Generated by Rapporteur CLI — "
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+            )
+            refined = refined.rstrip() + "\n" + footer
+
+            # Write section conclusion file
+            last_ch = sec.chapters[-1]
+            filename = f"{last_ch:02d}z-part-{part_num}-conclusion.md"
+            (chapters_dir / filename).write_text(refined, encoding="utf-8")
+            self._logger.info("    Wrote %s (%d chars)", filename, len(refined))
+            conclusions_written += 1
+
+            # Insert into chapter_entries after the last chapter in section
+            insert_after_fn = content_entries[last_ch - 1]["filename"] if last_ch <= len(content_entries) else None
+            if insert_after_fn:
+                # Find position in the full chapter_entries list
+                for pos, e in enumerate(chapter_entries):
+                    if e.get("filename") == insert_after_fn:
+                        chapter_entries.insert(pos + 1, {
+                            "filename": filename,
+                            "title": f"Part {part_num} Conclusion — {sec.title}",
+                            "section_conclude_status": "done",
+                            "section_index": sec_idx,
+                        })
+                        break
+
+        # Write manifest
+        cost = self._calculate_cost(co.model, total_input_tokens, total_output_tokens)
+        manifest["section_conclude"] = {
+            "generated": True,
+            "model": co.model,
+            "provider": co.provider,
+            "sections": len(sects.definitions),
+            "conclusions_written": conclusions_written,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        self._logger.info("  ─── Section Conclude Summary ───")
+        self._logger.info("    Sections:        %d", len(sects.definitions))
+        self._logger.info("    Written:         %d", conclusions_written)
+        self._logger.info("    Model:           %s", co.model)
+        self._logger.info("    Input tokens:    %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:   %s", f"{total_output_tokens:,}")
+        self._logger.info("    Estimated cost:  $%.4f", cost)
+
+    # -- LLM generation (reuse pattern from ConcludeStage) -----------------
+
+    def _generate_with_usage(self, co: ConcludeConfig, prompt: str) -> tuple[str, dict]:
+        import asyncio
+        usage: dict = {"input": 0, "output": 0, "thinking": 0}
+
+        if co.provider == "openai":
+            from src.clients.llm_openai_client import OpenAILLMClient
+            client = OpenAILLMClient(model_name=co.model)
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(
+                    client.client.responses.create(
+                        model=co.model, input=prompt,
+                        reasoning={"effort": co.reasoning_effort},
+                        max_output_tokens=16_000,
+                    )
+                )
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+            text = response.output_text if hasattr(response, "output_text") else ""
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+            return text, usage
+        else:
+            from google.genai import types as genai_types
+
+            from src.clients.llm_gcp_client import GeminiLLMClient
+            client = GeminiLLMClient(model_name=co.model, location=_gemini_location(co.model))
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2, top_p=client.top_p, max_output_tokens=16_000,
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name, contents=prompt, config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+            return text, usage
+
+    # -- prompt builders ---------------------------------------------------
+
+    def _build_conclude_prompt(
+        self, section_title: str, part_num: int, total_parts: int,
+        doc_context: str, conclusion_rules: str, style_rules: str,
+        eo_grounding: str = "", citable_eo_list: str = "",
+        custom_prompt: str = "",
+    ) -> str:
+        title = self.cfg.project.title
+        author = self.cfg.project.author
+        parts = [
+            f"You are writing the conclusion for Part {part_num} of {total_parts} "
+            f"in a multi-part published analysis titled '{title}' by {author}.\n\n",
+            f"This section is titled: '{section_title}'\n\n",
+            "CRITICAL CONSTRAINTS:\n",
+            f"- Use exactly ONE # heading: '# Part {part_num} Conclusion — {section_title}'\n",
+            "- All other headings use ## or ### (max 3 levels)\n",
+            "- Do NOT add numeric prefixes to headings — the build system numbers them automatically\n",
+            "- Favour free-flowing prose over seriated lists\n",
+            "- This conclusion covers ONLY the chapters in this section, not the whole document\n",
+            "- Reference ONLY Executive Orders that appear in this section's chapters\n\n",
+        ]
+        if custom_prompt:
+            parts.extend([
+                f"AUTHOR GUIDANCE:\n{custom_prompt}\n\n",
+            ])
+        parts.extend([
+            f"CONCLUSION GUIDELINES:\n{conclusion_rules}\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+        ])
+        if citable_eo_list:
+            parts.extend([
+                f"{citable_eo_list}\n\n",
+                "CITATION CONSTRAINT:\n",
+                "- You may ONLY reference Executive Orders in the CITABLE list above.\n",
+                "- Do NOT cite or mention any EOs not in this list.\n",
+                "- Cite as: 'Executive Order 14151, \"Title\"'\n\n",
+            ])
+        if eo_grounding:
+            parts.extend([
+                f"{eo_grounding}\n\n",
+                "LEGAL FRAMEWORK:\n",
+                "Cite Executive Orders by number and title. Ground conclusions in EO provisions.\n\n",
+            ])
+        parts.extend([
+            f"SECTION CHAPTERS:\n{doc_context}\n\n",
+            "Write a conclusion that synthesises the themes and analysis from this section's chapters.\n",
+            "Return ONLY the conclusion markdown.",
+        ])
+        return "".join(parts)
+
+    def _build_reflect_prompt(
+        self, section_title: str, conclusion_draft: str, doc_context: str,
+        conclusion_rules: str, eo_grounding: str = "", citable_eo_list: str = "",
+    ) -> str:
+        parts = [
+            f"Review and refine this section conclusion for '{section_title}'.\n\n",
+            f"CONCLUSION GUIDELINES:\n{conclusion_rules}\n\n",
+            "REVIEW CRITERIA:\n",
+            "1. Are conclusions grounded in evidence from the section's chapters?\n",
+            "2. Is the tone professional, authoritative, and favourable?\n",
+            "3. Are headings using #/##/### without numeric prefixes?\n",
+            "4. Does it stay scoped to this section (not the full document)?\n",
+        ]
+        if citable_eo_list:
+            parts.extend([
+                "5. Does it ONLY reference Executive Orders from the citable list?\n",
+                "6. Remove any references to EOs not in the citable list.\n\n",
+                f"{citable_eo_list}\n\n",
+            ])
+        elif eo_grounding:
+            parts.extend([
+                "5. Are Executive Orders cited correctly with number and title?\n\n",
+            ])
+        if eo_grounding:
+            parts.append(f"{eo_grounding}\n\n")
+        parts.extend([
+            f"SECTION CHAPTERS:\n{doc_context}\n\n",
+            f"CONCLUSION DRAFT:\n{conclusion_draft}\n\n",
+            "Return the refined conclusion markdown. Strengthen weak arguments.",
+        ])
+        return "".join(parts)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _build_section_context(
+        self, chapters_dir: Path, entries: list[dict], include_kaliya: bool,
+    ) -> str:
+        parts: list[str] = []
+        for entry in entries:
+            path = chapters_dir / entry["filename"]
+            if path.exists():
+                parts.append(path.read_text(encoding="utf-8"))
+        return "\n\n---\n\n".join(parts)
+
+    def _load_style_rules(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r'(## STYLE CONVE[NT]+IONS.*?)(?=\n## |\Z)', text, re.DOTALL)
+        return match.group(1).strip() if match else text.strip()
+
+    def _load_conclusion_rules(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r'(## CONCLUSION.*?)(?=\n## |\Z)', text, re.DOTALL)
+        return match.group(1).strip() if match else ""
+
+    def _build_citable_eo_list(self, chapters_dir: Path, entries: list[dict]) -> str:
+        """Extract EO references from section chapters and return a constrained list."""
+        pattern = re.compile(r'\[Exec\. Order No\. ([\d,]+),\s*(\d{4})\]\((https://[^\)]+)\)')
+        pattern_apa = re.compile(r'\[Exec\. Order No\. ([\d,]+),\s+[^\]]+?\((\d{4})\)\]\((https://[^\)]+)\)')
+        pattern_plain = re.compile(r'Executive Order\s+(\d{4,5})[,:.]*\s*["\u201c]([^"\u201d]+)["\u201d]', re.IGNORECASE)
+        eos: dict[str, dict] = {}
+        for entry in entries:
+            if "introduction" in entry.get("filename", "") or "conclusion" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in pattern.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2), "url": m.group(3)}
+            for m in pattern_apa.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2), "url": m.group(3)}
+            for m in pattern_plain.finditer(text):
+                num_raw = m.group(1)
+                title_frag = m.group(2).strip().rstrip(".")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": num_raw, "year": "", "title": title_frag}
+        if not eos:
+            return ""
+        lines = []
+        for num in sorted(eos, key=lambda x: int(x)):
+            info = eos[num]
+            year_part = f" ({info['year']})" if info.get("year") else ""
+            title_part = f' — "{info["title"]}"' if info.get("title") else ""
+            lines.append(f"  - Exec. Order No. {info['formatted']}{year_part}{title_part}")
+        return "CITABLE EXECUTIVE ORDERS (exhaustive list):\n" + "\n".join(lines)
+
+    def _fetch_section_eo_grounding(
+        self, chapters_dir: Path, entries: list[dict], rag_url: str,
+    ) -> str:
+        """Fetch EO grounding scoped to only the EOs referenced in section chapters."""
+        if not rag_url:
+            return ""
+        # Extract unique Federal Register URLs from section chapters
+        url_pattern = re.compile(r'https://www\.federalregister\.gov/documents/[^\s\)\]"]+')
+        section_urls: set[str] = set()
+        for entry in entries:
+            if "introduction" in entry.get("filename", "") or "conclusion" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in url_pattern.finditer(text):
+                section_urls.add(m.group(0).rstrip(".,;:"))
+
+        if not section_urls:
+            return ""
+
+        import requests as _requests
+
+        # Ensure EO index is active
+        try:
+            ready = _requests.get(f"{rag_url}/ready", timeout=5)
+            active = ready.json().get("active_folder", "")
+            if "eo" not in active.lower():
+                resp = _requests.post(
+                    f"{rag_url}/switch-index",
+                    json={"folder": "x_indices_eo"},
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return ""
+        except Exception:
+            pass  # continue — might already be on the right index
+
+        grounding_parts: list[str] = []
+        for url in sorted(section_urls):
+            try:
+                resp = _requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={
+                        "source_url": url,
+                        "include_summaries": True,
+                        "include_qa": True,
+                        "max_results": 100,
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                retrieved_docs = data.get("retrieved_docs", [])
+                retrieved_qa = data.get("retrieved_qa", [])
+                if not retrieved_docs and not retrieved_qa:
+                    continue
+                if retrieved_docs:
+                    doc = retrieved_docs[0]
+                    doc_title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary_text = doc.get("summary_text", "")
+                    parts = [f"### {doc_title}\n", f"**Source:** {url}\n"]
+                    if summary_text:
+                        parts.append(f"\n**Summary:**\n{summary_text}\n")
+                    if retrieved_qa:
+                        parts.append("\n**Detailed Content (Federal Register):**\n")
+                        for qa in retrieved_qa:
+                            context = qa.get("context", "")
+                            if context:
+                                parts.append(f"\n{context}\n")
+                    grounding_parts.append("".join(parts))
+            except Exception as exc:
+                self._logger.debug("Failed to fetch EO from %s: %s", url[:80], exc)
+
+        if not grounding_parts:
+            return ""
+        header = (
+            "## LEGAL FRAMEWORK GROUNDING\n\n"
+            f"Executive Order context ({len(grounding_parts)} documents) "
+            "scoped to this section's chapters:\n\n"
+        )
+        return header + "\n\n".join(grounding_parts)
+
+    @staticmethod
+    def _strip_code_fencing(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
+            stripped = stripped[first_nl + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        return stripped
+
+    def _log_usage(self, label: str, usage: dict, model: str) -> None:
+        cost = self._calculate_cost(model, usage["input"], usage["output"])
+        self._logger.info(
+            "    %s — in: %s  out: %s  think: %s  ($%.4f)",
+            label, f"{usage['input']:,}", f"{usage['output']:,}",
+            f"{usage['thinking']:,}", cost,
+        )
+
+    def _calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        rates = self._PRICING.get(model, {"input": 2.50, "output": 10.00})
+        return input_tokens / 1_000_000 * rates["input"] + output_tokens / 1_000_000 * rates["output"]
+
+
+# ---------------------------------------------------------------------------
+# Section Introduce — per-section introductions for multi-part volumes
+# ---------------------------------------------------------------------------
+
+class SectionIntroduceStage(Base):
+    """Generate an introduction for each section defined in ``sections.definitions``.
+
+    Mirrors :class:`SectionConcludeStage` but generates introductions.  Output
+    files are inserted into the manifest immediately before the first chapter
+    in each section.
+    """
+
+    _PRICING: dict[str, dict[str, float]] = {
+        "gpt-5.4":               {"input": 2.50,  "output": 10.00},
+        "gpt-5.1":               {"input": 2.50,  "output": 10.00},
+        "gpt-5":                 {"input": 2.00,  "output":  8.00},
+        "gpt-5-mini":            {"input": 0.40,  "output":  1.60},
+        "gemini-2.5-pro":        {"input": 1.25,  "output": 10.00},
+        "gemini-2.5-flash":      {"input": 0.30,  "output":  2.50},
+        "gemini-3.1-pro-preview":{"input": 1.25,  "output": 10.00},
+    }
+
+    def __init__(self, cfg: PipelineConfig, dry_run: bool = False) -> None:
+        super().__init__()
+        self.cfg = cfg
+        self.dry_run = dry_run
+
+    def run(self) -> None:
+        sects = self.cfg.sections
+        if not sects.enabled or not sects.definitions:
+            self._logger.info("  No sections defined — skipping section introduce.")
+            return
+
+        ic = self.cfg.introduce
+        if not ic.enabled:
+            self._logger.info("  Introduction generation disabled — skipping.")
+            return
+
+        chapters_dir = self.cfg.build_dir / "chapters"
+        manifest_path = chapters_dir / "manifest.json"
+        if not manifest_path.exists():
+            self._logger.warning("No manifest.json — nothing to introduce.")
+            return
+
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        chapter_entries = manifest.get("chapters", [])
+        if not chapter_entries:
+            self._logger.warning("Manifest has no chapters — skipping.")
+            return
+
+        # Idempotent check
+        if manifest.get("section_introduce", {}).get("generated") and not self.cfg.force:
+            self._logger.info("  Section introductions already generated — skipping.")
+            return
+
+        # Load style rules
+        style_rules = self._load_style_rules(Path(ic.style_guide))
+
+        if self.dry_run:
+            for sec in sects.definitions:
+                self._logger.info("  (dry-run) would generate introduction for: %s", sec.title)
+                if sec.prompt:
+                    self._logger.info("    custom prompt: %s", sec.prompt[:120])
+            return
+
+        total_input_tokens = 0
+        total_output_tokens = 0
+        total_thinking_tokens = 0
+        intros_written = 0
+
+        content_entries = [e for e in chapter_entries if "index" in e]
+
+        for sec_idx, sec in enumerate(sects.definitions):
+            part_num = sec_idx + 1
+            self._logger.info("")
+            self._logger.info("  ── Section %d: %s (chapters %s) ──",
+                              part_num, sec.title,
+                              ", ".join(str(c) for c in sec.chapters))
+
+            # Select chapter entries for this section
+            section_entries = []
+            for ch_num in sec.chapters:
+                idx = ch_num - 1
+                if 0 <= idx < len(content_entries):
+                    section_entries.append(content_entries[idx])
+
+            if not section_entries:
+                self._logger.warning("    No valid chapters for section — skipping.")
+                continue
+
+            # Skip if this section's intro already exists on disk
+            first_ch = sec.chapters[0]
+            intro_filename = f"{first_ch:02d}a-part-{part_num}-introduction.md"
+            if (chapters_dir / intro_filename).exists():
+                self._logger.info("    %s already exists — skipping.", intro_filename)
+                intros_written += 1
+                continue
+
+            # Build chapter summaries scoped to this section
+            chapter_summaries = self._build_chapter_summaries(chapters_dir, section_entries)
+
+            # Build citable EO list from section chapters
+            citable_eo_list = self._build_citable_eo_list(chapters_dir, section_entries)
+            if citable_eo_list:
+                self._logger.info("    Scoped EO citations: %d EOs from section chapters",
+                                  citable_eo_list.count("\n"))
+
+            # Fetch scoped EO grounding — only EOs referenced in this section
+            eo_grounding = self._fetch_section_eo_grounding(
+                chapters_dir, section_entries, ic.rag_service_url,
+            )
+            if eo_grounding:
+                self._logger.info("    Scoped EO grounding (%d chars)", len(eo_grounding))
+
+            if sec.prompt:
+                self._logger.info("    Custom prompt: %s", sec.prompt[:120])
+
+            self._logger.info("    Generating with %s (%s)", ic.model, ic.provider)
+
+            # Call 1: Introduce
+            self._logger.info("    Call 1/2: INTRODUCE")
+            intro_prompt = self._build_introduce_prompt(
+                sec.title, part_num, len(sects.definitions),
+                chapter_summaries, style_rules, eo_grounding, citable_eo_list,
+                sec.prompt,
+            )
+            prompt_file = chapters_dir / f"_prompt-part-{part_num}-introduce.txt"
+            prompt_file.write_text(intro_prompt, encoding="utf-8")
+            self._logger.info("    Prompt saved to %s (%d chars)", prompt_file.name, len(intro_prompt))
+            intro_draft, usage_1 = self._generate_with_usage(ic, intro_prompt)
+            total_input_tokens += usage_1.get("input", 0)
+            total_output_tokens += usage_1.get("output", 0)
+            total_thinking_tokens += usage_1.get("thinking", 0)
+            self._log_usage(f"introduce-part-{part_num}", usage_1, ic.model)
+
+            if not intro_draft or not intro_draft.strip():
+                self._logger.warning("    Empty introduction draft — skipping section.")
+                continue
+
+            intro_draft = self._strip_code_fencing(intro_draft)
+
+            # Call 2: Reflect
+            self._logger.info("    Call 2/2: REFLECT")
+            reflect_prompt = self._build_reflect_prompt(
+                sec.title, intro_draft, chapter_summaries,
+                style_rules, eo_grounding, citable_eo_list,
+            )
+            prompt_file = chapters_dir / f"_prompt-part-{part_num}-intro-reflect.txt"
+            prompt_file.write_text(reflect_prompt, encoding="utf-8")
+            self._logger.info("    Prompt saved to %s (%d chars)", prompt_file.name, len(reflect_prompt))
+            refined, usage_2 = self._generate_with_usage(ic, reflect_prompt)
+            total_input_tokens += usage_2.get("input", 0)
+            total_output_tokens += usage_2.get("output", 0)
+            total_thinking_tokens += usage_2.get("thinking", 0)
+            self._log_usage(f"reflect-part-{part_num}", usage_2, ic.model)
+
+            if not refined or not refined.strip():
+                refined = intro_draft
+            refined = self._strip_code_fencing(refined)
+
+            footer = (
+                f"\n---\n*Generated by Rapporteur CLI — "
+                f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+            )
+            refined = refined.rstrip() + "\n" + footer
+
+            # Write section introduction file (sorts before first chapter)
+            first_ch = sec.chapters[0]
+            filename = f"{first_ch:02d}a-part-{part_num}-introduction.md"
+            (chapters_dir / filename).write_text(refined, encoding="utf-8")
+            self._logger.info("    Wrote %s (%d chars)", filename, len(refined))
+            intros_written += 1
+
+            # Insert into chapter_entries before the first chapter in section
+            first_fn = content_entries[first_ch - 1]["filename"] if first_ch <= len(content_entries) else None
+            if first_fn:
+                for pos, e in enumerate(chapter_entries):
+                    if e.get("filename") == first_fn:
+                        chapter_entries.insert(pos, {
+                            "filename": filename,
+                            "title": f"Part {part_num} Introduction — {sec.title}",
+                            "section_introduce_status": "done",
+                            "section_index": sec_idx,
+                        })
+                        break
+
+        # Write manifest
+        cost = self._calculate_cost(ic.model, total_input_tokens, total_output_tokens)
+        manifest["section_introduce"] = {
+            "generated": True,
+            "model": ic.model,
+            "provider": ic.provider,
+            "sections": len(sects.definitions),
+            "introductions_written": intros_written,
+            "usage": {
+                "input_tokens": total_input_tokens,
+                "output_tokens": total_output_tokens,
+                "thinking_tokens": total_thinking_tokens,
+                "total_tokens": total_input_tokens + total_output_tokens,
+                "estimated_cost_usd": round(cost, 4),
+            },
+        }
+        manifest_path.write_text(
+            json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+        # Rebuild index.md
+        self._rebuild_index_md(chapters_dir, chapter_entries)
+
+        self._logger.info("  ─── Section Introduce Summary ───")
+        self._logger.info("    Sections:        %d", len(sects.definitions))
+        self._logger.info("    Written:         %d", intros_written)
+        self._logger.info("    Model:           %s", ic.model)
+        self._logger.info("    Input tokens:    %s", f"{total_input_tokens:,}")
+        self._logger.info("    Output tokens:   %s", f"{total_output_tokens:,}")
+        self._logger.info("    Estimated cost:  $%.4f", cost)
+
+    # -- LLM generation ---------------------------------------------------
+
+    def _generate_with_usage(self, ic: IntroduceConfig, prompt: str) -> tuple[str, dict]:
+        import asyncio
+        usage: dict = {"input": 0, "output": 0, "thinking": 0}
+
+        if ic.provider == "openai":
+            from src.clients.llm_openai_client import OpenAILLMClient
+            client = OpenAILLMClient(model_name=ic.model)
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(
+                    client.client.responses.create(
+                        model=ic.model, input=prompt,
+                        reasoning={"effort": ic.reasoning_effort},
+                        max_output_tokens=16_000,
+                    )
+                )
+            finally:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+                loop.close()
+            text = response.output_text if hasattr(response, "output_text") else ""
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+            return text, usage
+        else:
+            from google.genai import types as genai_types
+
+            from src.clients.llm_gcp_client import GeminiLLMClient
+            client = GeminiLLMClient(model_name=ic.model, location=_gemini_location(ic.model))
+            config = genai_types.GenerateContentConfig(
+                temperature=0.2, top_p=client.top_p, max_output_tokens=16_000,
+            )
+            response = client.client.models.generate_content(
+                model=client.model_name, contents=prompt, config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+            return text, usage
+
+    # -- prompt builders ---------------------------------------------------
+
+    def _build_introduce_prompt(
+        self, section_title: str, part_num: int, total_parts: int,
+        chapter_summaries: str, style_rules: str,
+        eo_grounding: str = "", citable_eo_list: str = "",
+        custom_prompt: str = "",
+    ) -> str:
+        title = self.cfg.project.title
+        author = self.cfg.project.author
+        parts = [
+            f"You are writing the introduction for Part {part_num} of {total_parts} "
+            f"in a multi-part published analysis titled '{title}' by {author}.\n\n",
+            f"This section is titled: '{section_title}'\n\n",
+            "CRITICAL CONSTRAINTS:\n",
+            f"- Use exactly ONE # heading: '# Part {part_num} — {section_title}'\n",
+            "- All other headings use ## or ### (max 3 levels)\n",
+            "- Do NOT add numeric prefixes to headings\n",
+            "- Favour free-flowing prose over seriated lists\n",
+            "- This introduction covers ONLY the chapters in this section\n",
+            "- Reference ONLY Executive Orders that appear in this section's chapters\n\n",
+        ]
+        if custom_prompt:
+            parts.extend([
+                f"AUTHOR GUIDANCE:\n{custom_prompt}\n\n",
+            ])
+        parts.extend([
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            "INTRODUCTION GUIDELINES:\n",
+            "- Describe the scope and purpose of this section\n",
+            "- Provide a roadmap of the chapters within this part\n",
+            "- Explain how this section fits into the broader multi-part publication\n",
+            "- Set an authoritative, professional, and favourable tone\n",
+            "- The administration's actions serve a protective function — frame accordingly\n\n",
+        ])
+        if citable_eo_list:
+            parts.extend([
+                f"{citable_eo_list}\n\n",
+                "CITATION CONSTRAINT:\n",
+                "- You may ONLY reference Executive Orders in the CITABLE list above.\n",
+                "- Cite as: 'Executive Order 14151, \"Title\"'\n\n",
+            ])
+        if eo_grounding:
+            parts.append(f"{eo_grounding}\n\n")
+        parts.extend([
+            f"CHAPTER SUMMARIES:\n{chapter_summaries}\n\n",
+            "Write a section introduction. Return ONLY the markdown.",
+        ])
+        return "".join(parts)
+
+    def _build_reflect_prompt(
+        self, section_title: str, intro_draft: str,
+        chapter_summaries: str, style_rules: str,
+        eo_grounding: str = "", citable_eo_list: str = "",
+    ) -> str:
+        parts = [
+            f"Review and refine this section introduction for '{section_title}'.\n\n",
+            f"STYLE CONVENTIONS:\n{style_rules}\n\n",
+            "REVIEW CRITERIA:\n",
+            "1. Does it accurately represent this section's scope?\n",
+            "2. Is the tone professional and authoritative?\n",
+            "3. Does it stay scoped to this section only?\n",
+            "4. Are headings using #/##/### without numeric prefixes?\n",
+        ]
+        if citable_eo_list:
+            parts.extend([
+                "5. Are all EO references in the citable list?\n\n",
+                f"{citable_eo_list}\n\n",
+            ])
+        if eo_grounding:
+            parts.append(f"{eo_grounding}\n\n")
+        parts.extend([
+            f"CHAPTER SUMMARIES:\n{chapter_summaries}\n\n",
+            f"INTRODUCTION DRAFT:\n{intro_draft}\n\n",
+            "Return the refined introduction markdown.",
+        ])
+        return "".join(parts)
+
+    # -- helpers -----------------------------------------------------------
+
+    def _build_chapter_summaries(self, chapters_dir: Path, entries: list[dict]) -> str:
+        parts: list[str] = []
+        for entry in entries:
+            fn = entry["filename"]
+            if "introduction" in fn or "conclusion" in fn:
+                continue
+            path = chapters_dir / fn
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            title = entry.get("title", fn)
+            lines = text.split("\n")
+            paragraphs: list[str] = []
+            in_content = False
+            current_para: list[str] = []
+            for line in lines:
+                if line.startswith("# ") and not in_content:
+                    in_content = True
+                    continue
+                if not in_content:
+                    continue
+                if line.strip() == "":
+                    if current_para:
+                        paragraphs.append(" ".join(current_para))
+                        current_para = []
+                        if len(paragraphs) >= 3:
+                            break
+                else:
+                    if not line.startswith(("#", "![", "```", "---")):
+                        current_para.append(line.strip())
+            if current_para:
+                paragraphs.append(" ".join(current_para))
+            summary_text = "\n\n".join(paragraphs[:3])
+            parts.append(f"### {title}\n\n{summary_text}")
+        return "\n\n---\n\n".join(parts)
+
+    def _build_citable_eo_list(self, chapters_dir: Path, entries: list[dict]) -> str:
+        pattern = re.compile(r'\[Exec\. Order No\. ([\d,]+),\s*(\d{4})\]\((https://[^\)]+)\)')
+        pattern_apa = re.compile(r'\[Exec\. Order No\. ([\d,]+),\s+[^\]]+?\((\d{4})\)\]\((https://[^\)]+)\)')
+        pattern_plain = re.compile(r'Executive Order\s+(\d{4,5})[,:.]*\s*["\u201c]([^"\u201d]+)["\u201d]', re.IGNORECASE)
+        eos: dict[str, dict] = {}
+        for entry in entries:
+            if "introduction" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in pattern.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_apa.finditer(text):
+                num_raw = m.group(1).replace(",", "")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": m.group(1), "year": m.group(2)}
+            for m in pattern_plain.finditer(text):
+                num_raw = m.group(1)
+                title_frag = m.group(2).strip().rstrip(".")
+                if num_raw not in eos:
+                    eos[num_raw] = {"formatted": num_raw, "year": "", "title": title_frag}
+        if not eos:
+            return ""
+        lines = []
+        for num in sorted(eos, key=lambda x: int(x)):
+            info = eos[num]
+            year_part = f" ({info['year']})" if info.get("year") else ""
+            title_part = f' — "{info["title"]}"' if info.get("title") else ""
+            lines.append(f"  - Exec. Order No. {info['formatted']}{year_part}{title_part}")
+        return "CITABLE EXECUTIVE ORDERS (exhaustive list):\n" + "\n".join(lines)
+
+    def _fetch_section_eo_grounding(
+        self, chapters_dir: Path, entries: list[dict], rag_url: str,
+    ) -> str:
+        """Fetch EO grounding scoped to only the EOs referenced in section chapters."""
+        if not rag_url:
+            return ""
+        url_pattern = re.compile(r'https://www\.federalregister\.gov/documents/[^\s\)\]"]+')
+        section_urls: set[str] = set()
+        for entry in entries:
+            if "introduction" in entry.get("filename", "") or "conclusion" in entry.get("filename", ""):
+                continue
+            path = chapters_dir / entry["filename"]
+            if not path.exists():
+                continue
+            text = path.read_text(encoding="utf-8")
+            for m in url_pattern.finditer(text):
+                section_urls.add(m.group(0).rstrip(".,;:"))
+
+        if not section_urls:
+            return ""
+
+        import requests as _requests
+        try:
+            ready = _requests.get(f"{rag_url}/ready", timeout=5)
+            active = ready.json().get("active_folder", "")
+            if "eo" not in active.lower():
+                resp = _requests.post(
+                    f"{rag_url}/switch-index",
+                    json={"folder": "x_indices_eo"},
+                    timeout=30,
+                )
+                if resp.status_code != 200:
+                    return ""
+        except Exception:
+            pass
+
+        grounding_parts: list[str] = []
+        for url in sorted(section_urls):
+            try:
+                resp = _requests.post(
+                    f"{rag_url}/query_metadata",
+                    json={
+                        "source_url": url,
+                        "include_summaries": True,
+                        "include_qa": True,
+                        "max_results": 100,
+                    },
+                    timeout=30,
+                )
+                resp.raise_for_status()
+                data = resp.json()
+                retrieved_docs = data.get("retrieved_docs", [])
+                retrieved_qa = data.get("retrieved_qa", [])
+                if not retrieved_docs and not retrieved_qa:
+                    continue
+                if retrieved_docs:
+                    doc = retrieved_docs[0]
+                    doc_title = doc.get("doc_metadata", {}).get("title", "Executive Order")
+                    summary_text = doc.get("summary_text", "")
+                    parts = [f"### {doc_title}\n", f"**Source:** {url}\n"]
+                    if summary_text:
+                        parts.append(f"\n**Summary:**\n{summary_text}\n")
+                    if retrieved_qa:
+                        parts.append("\n**Detailed Content (Federal Register):**\n")
+                        for qa in retrieved_qa:
+                            context = qa.get("context", "")
+                            if context:
+                                parts.append(f"\n{context}\n")
+                    grounding_parts.append("".join(parts))
+            except Exception as exc:
+                self._logger.debug("Failed to fetch EO from %s: %s", url[:80], exc)
+
+        if not grounding_parts:
+            return ""
+        header = (
+            "## LEGAL FRAMEWORK GROUNDING\n\n"
+            f"Executive Order context ({len(grounding_parts)} documents) "
+            "scoped to this section's chapters:\n\n"
+        )
+        return header + "\n\n".join(grounding_parts)
+
+    def _load_style_rules(self, path: Path) -> str:
+        if not path.exists():
+            return ""
+        text = path.read_text(encoding="utf-8")
+        match = re.search(r'(## STYLE CONVE[NT]+IONS.*?)(?=\n## |\Z)', text, re.DOTALL)
+        return match.group(1).strip() if match else text.strip()
+
+    def _rebuild_index_md(self, chapters_dir: Path, chapter_entries: list[dict]) -> None:
+        parts = [
+            f"# {self.cfg.project.title}\n",
+            f"**Author:** {self.cfg.project.author}  ",
+            f"**Date:** {self.cfg.project.date}\n",
+            "## Table of Contents\n",
+        ]
+        for i, entry in enumerate(chapter_entries):
+            title = entry.get("title", entry["filename"])
+            wc = entry.get("word_count", 0)
+            wc_str = f" — {wc:,} words" if wc else ""
+            parts.append(f"{i}. [{title}]({entry['filename']}){wc_str}")
+        parts.append("")
+        parts.append(
+            f"\n---\n*Generated by Rapporteur CLI — "
+            f"{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*\n"
+        )
+        (chapters_dir / "index.md").write_text("\n".join(parts), encoding="utf-8")
+        self._logger.info("  Rebuilt index.md with section introductions.")
+
+    @staticmethod
+    def _strip_code_fencing(text: str) -> str:
+        stripped = text.strip()
+        if stripped.startswith("```"):
+            first_nl = stripped.index("\n") if "\n" in stripped else len(stripped)
+            stripped = stripped[first_nl + 1:]
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].rstrip()
+        return stripped
+
+    def _log_usage(self, label: str, usage: dict, model: str) -> None:
+        cost = self._calculate_cost(model, usage["input"], usage["output"])
+        self._logger.info(
+            "    %s — in: %s  out: %s  think: %s  ($%.4f)",
+            label, f"{usage['input']:,}", f"{usage['output']:,}",
+            f"{usage['thinking']:,}", cost,
+        )
+
+    def _calculate_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
+        rates = self._PRICING.get(model, {"input": 2.50, "output": 10.00})
+        return input_tokens / 1_000_000 * rates["input"] + output_tokens / 1_000_000 * rates["output"]
 
 
 # ---------------------------------------------------------------------------
@@ -5476,17 +6752,19 @@ latex_documents = [
 # ---------------------------------------------------------------------------
 
 STAGES = [
-    ("export",     ExportStage),
-    ("parse",      ParseStage),
-    ("chapters",   ChapterStage),
-    ("kaliya",     KaliyaStage),
-    ("eo_link",    EOLinkStage),
-    ("format",     FormatStage),
-    ("conclude",   ConcludeStage),
-    ("edit",       EditStage),
-    ("cite",       CiteStage),
-    ("introduce",  IntroduceStage),
-    ("publish",    PublishStage),
+    ("export",             ExportStage),
+    ("parse",              ParseStage),
+    ("chapters",           ChapterStage),
+    ("kaliya",             KaliyaStage),
+    ("eo_link",            EOLinkStage),
+    ("format",             FormatStage),
+    ("conclude",           ConcludeStage),
+    ("section_conclude",   SectionConcludeStage),
+    ("edit",               EditStage),
+    ("cite",               CiteStage),
+    ("introduce",          IntroduceStage),
+    ("section_introduce",  SectionIntroduceStage),
+    ("publish",            PublishStage),
 ]
 
 
@@ -5518,7 +6796,7 @@ def run_pipeline(cfg: PipelineConfig, selected: list[str], dry_run: bool) -> Non
 # Cost rollup
 # ---------------------------------------------------------------------------
 
-_COST_STAGES = ("format", "conclude", "edit", "cite", "introduce", "eo_link")
+_COST_STAGES = ("format", "conclude", "section_conclude", "edit", "cite", "introduce", "section_introduce", "eo_link")
 
 
 def _write_cost_rollup(cfg: PipelineConfig, selected: list[str]) -> None:
@@ -5658,6 +6936,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Stage 8: Generate introduction chapter via LLM")
     stages.add_argument("--no-introduce", dest="introduce", action="store_false",
                         help="Skip introduction generation even if enabled in config")
+    stages.add_argument("--section-conclude", action="store_true", default=None,
+                        help="Generate per-section conclusions for multi-part volumes")
+    stages.add_argument("--section-introduce", action="store_true", default=None,
+                        help="Generate per-section introductions for multi-part volumes")
     stages.add_argument("--eo-link",  action="store_true", default=None,
                         help="EO Linking: Map .gov/.mil comms to EO framework")
     stages.add_argument("--no-eo-link", dest="eo_link", action="store_false",
@@ -5759,6 +7041,24 @@ def main(argv: list[str] | None = None) -> None:
         cfg.introduce.enabled = True
         if "introduce" not in selected:
             selected.append("introduce")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --section-conclude
+    if args.section_conclude is True:
+        cfg.conclude.enabled = True
+        cfg.sections.enabled = True
+        if "section_conclude" not in selected:
+            selected.append("section_conclude")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --section-introduce
+    if args.section_introduce is True:
+        cfg.introduce.enabled = True
+        cfg.sections.enabled = True
+        if "section_introduce" not in selected:
+            selected.append("section_introduce")
             stage_order = [name for name, _ in STAGES]
             selected.sort(key=lambda s: stage_order.index(s))
 

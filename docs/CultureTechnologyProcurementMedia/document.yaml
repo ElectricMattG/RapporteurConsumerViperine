@@ -44,11 +44,11 @@ format:
 conclude:
   enabled: true
   style_guide: "../style_guide.md"
-  provider: "openai"
-  model: "gpt-5.4"
+  provider: "gemini"
+  model: "gemini-3.1-pro-preview"
   reasoning_effort: "high"
   include_kaliya: true
-  rag_service_url: "http://localhost:8000"  # Phase 8.1: EO grounding via RAG
+  rag_service_url: "http://localhost:8000"
 
 edit:
   enabled: false
@@ -68,8 +68,8 @@ cite:
 introduce:
   enabled: true
   style_guide: "../style_guide.md"
-  provider: "openai"
-  model: "gpt-5.4"
+  provider: "gemini"
+  model: "gemini-3.1-pro-preview"
   reasoning_effort: "high"
   include_kaliya: false
   rag_service_url: "http://localhost:8000"
@@ -81,3 +81,18 @@ publish:
     server_url: ""
     space_key: ""
     parent_page: "Atrum Volentia"
+
+sections:
+  definitions:
+    - title: "Culture & Identity"
+      chapters: [1, 2, 3, 4]
+      prompt: "Focus on how these executive orders collectively reshape federal cultural policy — DEI rescissions, anti-stereotyping mandates, and government efficiency reforms. Emphasise the legal mechanisms and policy coherence across the four orders."
+    - title: "Artificial Intelligence"
+      chapters: [5, 6, 7, 8, 9]
+      prompt: "Synthesise how these five orders establish the administration's AI governance framework — from trustworthy AI in government, to preventing ideological bias, to maintaining American leadership and removing regulatory barriers. Highlight the interplay between innovation promotion and risk management."
+    - title: "Military & Defence"
+      chapters: [10, 11, 12, 13, 14, 15]
+      prompt: "Conclude on how these six orders restructure defence policy — warfighter prioritisation, force restoration, reinstatement of discharged members, DoD reorganisation, and succession planning. Draw out the coherent strategy for military readiness and institutional reform."
+    - title: "Procurement & Trade"
+      chapters: [16, 17, 18, 19]
+      prompt: "Assess how these four orders reform defence procurement and foreign arms transfers — deregulation, acquisition modernisation, arms transfer strategy, and foreign sales reform. Connect the procurement reforms to broader industrial base and alliance objectives."

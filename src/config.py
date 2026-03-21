@@ -32,8 +32,8 @@ defaults = {
         # GCP Gemini configuration (alternative to local LLM)
         "project_id": "rapporteurclients",  # Set via PROJECT_ID env var or config
         "location": "global",  # GCP region for Vertex AI
-        "model_name": "gemini-3.1-pro-preview",  # Fast model with good performance
-        "timeout": 300,  # Request timeout for Gemini API
+        "model_name": "gemini-2.5-pro",  # Fast model with good performance
+        "timeout": 600,  # Request timeout for Gemini API
         "api_key": None,  # Set via GOOGLE_API_KEY env var or config (for direct API, not Vertex AI)
         # Note: Uses llm.* settings for temperature, top_p, max_length, etc.
     },

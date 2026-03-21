@@ -118,6 +118,126 @@
         "file": "conversations_export_20260304_063912.json",
         "index": 10
       }
+    },
+    {
+      "id": "201",
+      "filename": "201_ai_initiatives_eo_overview.md",
+      "title": "DoD AI Initiatives and Executive Orders: Policy Landscape and Event Cascade",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 1
+      }
+    },
+    {
+      "id": "202",
+      "filename": "202_dow_ai_media_response.md",
+      "title": "Media Response to DoD AI Policies: National Security Framing and Critical Coverage",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 2
+      }
+    },
+    {
+      "id": "203",
+      "filename": "203_anthropic_supply_chain_media_analysis.md",
+      "title": "DoD vs. Anthropic: Supply-Chain Risk Designation — Media Spin, Threat Clusters, and Framing Analysis",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 3
+      }
+    },
+    {
+      "id": "204",
+      "filename": "204_anthropic_supply_chain_deep_dive.md",
+      "title": "Anthropic Supply-Chain Designation Deep Dive: Author Backgrounds, Publication Clusters, and Risk Assessment",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 4
+      }
+    },
+    {
+      "id": "205",
+      "filename": "205_anthropic_deep_dive_recent_events.md",
+      "title": "Anthropic Dispute Deep Dive: Recent Events and Broader Government-Industry Dynamics",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 5
+      }
+    },
+    {
+      "id": "206",
+      "filename": "206_anthropic_threat_cluster_table.md",
+      "title": "Anthropic Media Threat Clusters: URL Reference Table and Framing Analysis",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 6
+      }
+    },
+    {
+      "id": "207",
+      "filename": "207_anthropic_media_legal_framework.md",
+      "title": "Anthropic and U.S. AI Strategy: Legal Framework Analysis and Media Conclusions",
+      "source": {
+        "type": "bundled",
+        "file": "docs/midnight_hammer/raw/conversations_anthropic.json",
+        "index": 7
+      }
+    },
+    {
+      "id": "208",
+      "filename": "208_dei_technology_governance.md",
+      "title": "The Executive Overhaul of DEI and Technology Governance at the Department of War",
+      "source": {
+        "type": "bundled",
+        "file": "docs/AtrumVolentia/raw/conversations_export_20260316.json",
+        "index": 4
+      }
+    },
+    {
+      "id": "209",
+      "filename": "209_information_control_rebranding.md",
+      "title": "The Politics of Information: Renaming, Culture, and Media Control at the Department of War",
+      "source": {
+        "type": "bundled",
+        "file": "docs/AtrumVolentia/raw/conversations_export_20260316.json",
+        "index": 5
+      }
+    },
+    {
+      "id": "210",
+      "filename": "210_media_response_paradox.md",
+      "title": "Media Response and the Paradox of Implementation vs. Stated Intent",
+      "source": {
+        "type": "bundled",
+        "file": "docs/AtrumVolentia/raw/conversations_export_20260316.json",
+        "index": 6
+      }
+    },
+    {
+      "id": "211",
+      "filename": "211_media_vetting_analysis.md",
+      "title": "Analysis of Media Response to the Department of War's Information Integrity Initiatives",
+      "source": {
+        "type": "bundled",
+        "file": "docs/AtrumVolentia/raw/conversations_export_20260316.json",
+        "index": 8
+      }
+    },
+    {
+      "id": "212",
+      "filename": "212_media_cluster.md",
+      "title": "Surface Structure Evidence of Coordinated Media Framing",
+      "source": {
+        "type": "split",
+        "response_file": "docs/AtrumVolentia/212_media_cluster.md",
+        "user_query": "Analyze the media cluster for evidence of coordinated framing around DoW and Hegseth coverage"
+      }
     }
   ]
 }

@@ -125,6 +125,21 @@ class EditConfig:
 
 
 @dataclass
+class SectionDef:
+    """A named section grouping consecutive chapters for per-part intro/conclusion."""
+    title: str = ""
+    chapters: list[int] = field(default_factory=list)  # 1-based chapter numbers
+    prompt: str = ""  # optional per-section guidance for conclusion/introduction generation
+
+
+@dataclass
+class SectionsConfig:
+    """Multi-part volume configuration — per-section conclusions & introductions."""
+    enabled: bool = False
+    definitions: list[SectionDef] = field(default_factory=list)
+
+
+@dataclass
 class ConfluenceConfig:
     server_url: str = ""
     space_key: str = ""
@@ -162,6 +177,7 @@ class EOLinkingConfig:
     output_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"
     shared_volume: str = "/mnt/workspace_2"
     exclude_eos: list[str] = field(default_factory=list)
+    focused_eos: list[str] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +202,7 @@ class PipelineConfig:
     cite: CiteConfig = field(default_factory=CiteConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     eo_linking: EOLinkingConfig = field(default_factory=EOLinkingConfig)
+    sections: SectionsConfig = field(default_factory=SectionsConfig)
     force: bool = False
 
     @property
@@ -375,6 +392,21 @@ class PipelineConfig:
                                      "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"),
             shared_volume=eo.get("shared_volume", "/mnt/workspace_2"),
             exclude_eos=eo.get("exclude_eos", []),
+            focused_eos=eo.get("focused_eos", []),
+        )
+
+        # --- sections (multi-part volume) ---
+        sec = raw.get("sections") or {}
+        sec_defs: list[SectionDef] = []
+        for sd in sec.get("definitions") or []:
+            sec_defs.append(SectionDef(
+                title=sd.get("title", ""),
+                chapters=sd.get("chapters", []),
+                prompt=sd.get("prompt", ""),
+            ))
+        cfg.sections = SectionsConfig(
+            enabled=sec.get("enabled", bool(sec_defs)),
+            definitions=sec_defs,
         )
 
         return cfg

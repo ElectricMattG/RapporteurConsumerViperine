@@ -50,6 +50,15 @@ conclude:
   include_kaliya: true
   rag_service_url: "http://localhost:8000"  # Phase 8.1: EO grounding via RAG
 
+edit:
+  enabled: false
+  style_guide: "../style_guide.md"
+  provider: "openai"
+  model: "gpt-5.4"
+  reasoning_effort: "high"
+  edit_log: true
+  executive_summary: true
+
 publish:
   formats: ["pdf"]
   pdf_engine: "pdflatex"

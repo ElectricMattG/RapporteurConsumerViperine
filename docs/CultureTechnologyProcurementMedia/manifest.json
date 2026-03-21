@@ -1,0 +1,13 @@
+{
+  "collection": "Atrum Volentia — Hegseth, Iran & the Second Strike",
+  "author": "Moses",
+  "output_dir": ".",
+  "raw_dir": "../..",
+  "render_options": {
+    "top_sources_n": 10,
+    "abstract_max_words": 220,
+    "postprocess": true
+  },
+  "documents": [
+  ]
+}

@@ -210,12 +210,48 @@ class EOLinkStage(Base):
         total_extracted = 0
         total_new = 0
         for batch_idx in range(len(batches)):
-            reflect_path = output_dir / f"batch_{batch_idx}" / "reflect.md"
+            batch_dir = output_dir / f"batch_{batch_idx}"
+            reflect_path = batch_dir / "reflect.md"
             if not reflect_path.exists():
                 self._logger.warning("Batch %d — no reflect.md, skipping.", batch_idx)
                 continue
+
+            # Build article_lookup from conversation.json so the extractor
+            # can hydrate URLs, dates, and publisher for every communication.
+            article_lookup: dict[str, dict[str, str]] = {}
+            conv_path = batch_dir / "conversation.json"
+            if conv_path.exists():
+                try:
+                    conv_items = json.loads(conv_path.read_text(encoding="utf-8"))
+                    for item in conv_items:
+                        meta = item.get("metadata", {})
+                        entry = {
+                            "url": meta.get("article_url", ""),
+                            "title": meta.get("article_title", ""),
+                            "date": meta.get("date", ""),
+                            "domain": meta.get("domain", ""),
+                            "publisher": meta.get("publisher", ""),
+                            "response_text": item.get(
+                                "assistant_response", "",
+                            )[:5000],
+                        }
+                        # Key by URL, title, and normalised title
+                        if entry["url"]:
+                            article_lookup[entry["url"]] = entry
+                        if entry["title"]:
+                            article_lookup[entry["title"]] = entry
+                            article_lookup[entry["title"].strip().lower()] = entry
+                except (json.JSONDecodeError, KeyError):
+                    self._logger.warning(
+                        "Batch %d — could not parse conversation.json", batch_idx,
+                    )
+
             reflect_text = reflect_path.read_text(encoding="utf-8")
-            records = extractor_p4.extract(reflect_text, batch_id=f"batch_{batch_idx}")
+            records = extractor_p4.extract(
+                reflect_text,
+                batch_id=f"batch_{batch_idx}",
+                article_lookup=article_lookup or None,
+            )
             total_extracted += len(records)
             if records:
                 new_count = cache.append(records)
@@ -264,12 +300,38 @@ class EOLinkStage(Base):
             exclude_eos=exclude,
         )
 
+        # Unified diagram (all EOs in one graph)
+        unified = diagram_gen.generate_unified(
+            prec_graph, registry, output_dir=output_dir,
+            name_lookup=name_lookup, exclude_eos=exclude,
+        )
+
+        # Focused diagrams (configurable per-EO subgraphs)
+        focused_manifest: list = []
+        if eo_cfg.focused_eos:
+            diagrams_dir = Path(output_dir) / "diagrams"
+            for eo in eo_cfg.focused_eos:
+                body = diagram_gen.generate_focused(
+                    eo, prec_graph, registry,
+                    name_lookup=name_lookup, exclude_eos=exclude,
+                )
+                out = diagrams_dir / f"focused_{eo}.md"
+                header = f"# EO {eo} — Focused Dependency Diagram\n\n"
+                out.write_text(
+                    header + "```mermaid\n" + body + "\n```\n",
+                    encoding="utf-8",
+                )
+                focused_manifest.append({"eo": eo, "path": str(out)})
+
         total_warnings = sum(len(m["warnings"]) for m in manifest)
         self._logger.info("=" * 60)
         self._logger.info("EO Linking — Phase 5 Summary")
-        self._logger.info("  Diagrams generated: %d", len(manifest))
+        self._logger.info("  Per-chapter diagrams: %d", len(manifest))
         self._logger.info("  Total nodes:        %d",
                           sum(m["nodes"] for m in manifest))
+        self._logger.info("  Unified diagram:    %d nodes, %d edges",
+                          unified["nodes"], unified["edges"])
+        self._logger.info("  Focused diagrams:   %d", len(focused_manifest))
         self._logger.info("  Warnings:           %d", total_warnings)
         self._logger.info("  Output dir:         %s/diagrams/", output_dir)
         self._logger.info("=" * 60)
