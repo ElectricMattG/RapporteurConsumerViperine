@@ -146,6 +146,8 @@ class EOLinkStage(Base):
             model_name=eo_cfg.analysis_model,
             location=eo_cfg.analysis_location,
             output_dir=output_dir,
+            provider=eo_cfg.analysis_provider,
+            reasoning_effort=eo_cfg.analysis_reasoning_effort,
         )
 
         eo_grounding = registry.full_grounding_text

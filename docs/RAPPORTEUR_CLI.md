@@ -15,9 +15,10 @@ python -m src.components.publisher.rapporteur_cli docs/AtrumVolentia/document.ya
 ## Usage
 
 ```
-rapporteur_cli [-h] [--export] [--parse] [--chapters] [--kaliya] [--publish]
-               [--all] [--dry-run] [--build-dir DIR] [--frontend-url URL] [-v]
-               config
+rapporteur_cli [-h] [--export] [--parse] [--chapters] [--kaliya] [--format]
+               [--conclude] [--edit] [--cite] [--introduce] [--eo-link]
+               [--publish] [--all] [--force] [--dry-run] [--build-dir DIR]
+               [--frontend-url URL] [-v] config
 ```
 
 **Positional:**
@@ -34,16 +35,27 @@ rapporteur_cli [-h] [--export] [--parse] [--chapters] [--kaliya] [--publish]
 | `--parse` | 2 | Classify turns, build citation map, generate footnotes |
 | `--chapters` | 3 | Render session Markdown with per-chapter references |
 | `--kaliya` | 4 | Match threat clusters to Kaliya analyses, inject sections |
-| `--publish` | 5 | Build PDF via pandoc + pdflatex |
-| `--all` | 1–5 | Run all stages sequentially |
+| `--format` | 5 | LLM-based style formatting (headings, seriation, tables) |
+| `--conclude` | 5b | LLM-generated conclusion chapter (draft + reflect) |
+| `--edit` | 6 | LLM-based editorial review (review + apply) |
+| `--cite` | 7 | Resolve citation tokens + EO-specific APA formatting |
+| `--introduce` | 8 | LLM-generated introduction chapter (draft + reflect) |
+| `--eo-link` | 10 | EO precedence diagrams + chapter enrichment |
+| `--publish` | 9 | Build PDF via Sphinx + xelatex |
+| `--all` | 1–10 | Run all stages sequentially |
 
 **Options:**
 
 | Flag | Description |
 |---|---|
 | `--dry-run` | Preview actions without writing files |
+| `--force` | Re-run stages even if already completed (override idempotency guards) |
 | `--build-dir DIR` | Override build directory from config |
 | `--frontend-url URL` | Override frontend API URL from config |
+| `--edit-chapter N` | Edit a specific chapter by number |
+| `--edit-instructions TEXT` | Custom editorial instructions for edit stage |
+| `--no-format` | Skip format stage in `--all` pipeline |
+| `--no-conclude` | Skip conclude stage in `--all` pipeline |
 | `-v`, `--verbose` | Enable debug logging |
 
 ## Examples
@@ -57,6 +69,15 @@ python -m src.components.publisher.rapporteur_cli config.yaml --export --parse -
 
 # Build chapters + run Kaliya analysis + generate PDF:
 python -m src.components.publisher.rapporteur_cli config.yaml --chapters --kaliya --publish
+
+# Full LLM pipeline (format, conclude, edit, cite, introduce):
+python -m src.components.publisher.rapporteur_cli config.yaml --format --conclude --edit --cite --introduce --publish
+
+# Generate EO precedence diagrams and publish:
+python -m src.components.publisher.rapporteur_cli config.yaml --eo-link --publish
+
+# Re-run a stage that was already completed:
+python -m src.components.publisher.rapporteur_cli config.yaml --cite --force
 
 # Use a static export file (offline build):
 # Set export.static_file in document.yaml, then:
@@ -105,18 +126,34 @@ Matches detected threat clusters against cached Kaliya analyses by URL overlap. 
 
 ### Stage 5: Publish (`--publish`)
 
-Concatenates chapter Markdowns (with `\newpage` separators), prepends YAML front matter with LaTeX styling, and invokes pandoc with pdflatex.
+Builds PDF from chapter Markdown files via Sphinx + xelatex. Generates a temporary `_sphinx_src/` directory with cleaned chapter copies, `conf.py`, and `index.md` toctree.
+
+**Build pipeline:**
+1. Copies chapters to `_sphinx_src/` with cleaning (strip footers, blockquotes, metadata)
+2. Strips mermaid blocks with placeholder note (pre-render deferred)
+3. Generates `conf.py` (xelatex engine, fncychap, MyST parser) and `index.md` (natural chapter ordering)
+4. Runs `sphinx-build -M latexpdf`
+5. Copies PDF to build root, updates manifest
 
 **LaTeX Styling:**
 - A4 paper, 11pt font, 2.5cm margins
-- Professional image sizing (constrained to line width and 85% text height, aspect ratio preserved)
+- xelatex with TeX Gyre Termes/Heros/Cursor fonts
+- fncychap Bjarne chapter decoration
+- Professional image sizing (constrained to line width and 85% text height)
 - Enhanced table formatting (booktabs package)
 - Professional caption styling (small font, bold labels)
-- Float package for precise figure placement
 
-**Requires:** `--chapters` to have run first. `--kaliya` is optional (images will be embedded if present).
+**Requires:** `--chapters` to have run first. Other stages optional.
 
-**Output:** `{build_dir}/{project_slug}.pdf`, `{build_dir}/{project_slug}_combined.md`.
+**Output:** `{build_dir}/{project_slug}.pdf`.
+
+### Stage 10: EO Link (`--eo-link`)
+
+Generates EO precedence diagrams (Mermaid `graph LR`) showing relationships between Executive Orders. Creates per-chapter diagrams, a unified view, and focused dependency subgraphs. Resolves EO names from 5 sources (cache, implementation data, index files, chapter text, hardcoded fallbacks). Enriches chapters with implementation tables.
+
+**Requires:** `--chapters` to have run first (needs chapter files with EO references).
+
+**Output:** `{build_dir}/chapters/diagrams/*.md`, updated chapter files with embedded mermaid blocks.
 
 ## Configuration: `document.yaml`
 
@@ -189,15 +226,27 @@ Relative paths in `document.yaml` are resolved against the YAML file's directory
 │   ├── session_000.json ... session_NNN.json
 │   ├── footnotes.json
 │   ├── unified_citations.json
+│   ├── eo_title_index.json                # EO number → name/URL index
 │   └── threat_clusters.json               # Detected threat clusters
 ├── chapters/
+│   ├── 00-introduction.md                 # LLM-generated introduction
+│   ├── 01a-part-1-introduction.md         # Section introductions
 │   ├── 01-chapter-slug.md ... NN-chapter-slug.md
+│   ├── NNz-part-N-conclusion.md           # Section conclusions
+│   ├── 99-references.md                   # Consolidated references
+│   ├── diagrams/                          # EO precedence diagrams
+│   │   ├── NN_eo_XXXXX.md                 # Per-chapter diagrams
+│   │   ├── unified_precedence.md          # All-EO unified diagram
+│   │   └── focused_XXXXX.md               # Focused dependency subgraphs
 │   ├── index.md                           # Table of contents
 │   └── manifest.json                      # Chapter metadata + build info
 ├── kaliya/
 │   └── images/
 │       └── {request_id}_{image_id}.jpeg   # Converted figure images
-├── {project_slug}_combined.md             # Concatenated chapters
+├── _sphinx_src/                           # Temporary Sphinx build directory
+│   ├── conf.py                            # Generated Sphinx config
+│   ├── index.md                           # Generated toctree
+│   └── *.md                               # Cleaned chapter copies
 └── {project_slug}.pdf                     # Final PDF output
 ```
 
@@ -209,9 +258,12 @@ Relative paths in `document.yaml` are resolved against the YAML file's directory
 | `requests` | Frontend API calls | Stage 1 |
 | `PyYAML` | Config parsing | All |
 | `Pillow` (PIL) | Image conversion (.webp/.avif → .jpeg) | Stage 4 |
-| `pandoc` (3.x) | Markdown → PDF conversion | Stage 5 |
-| `pdflatex` (TeX Live) | PDF rendering engine | Stage 5 |
-| `pdfinfo` (poppler-utils) | PDF page count extraction | Stage 5 (optional) |
+| `Sphinx` (9.x) | Documentation build engine | Stage 9 |
+| `myst-parser` (5.x) | MyST Markdown parser for Sphinx | Stage 9 |
+| `xelatex` (TeX Live) | PDF rendering engine | Stage 9 |
+| `mmdc` (mermaid-cli 11.x) | Mermaid diagram rendering | Stage 10 (optional) |
+| `pdfinfo` (poppler-utils) | PDF page count extraction | Stage 9 (optional) |
+| `redis` | LLM response caching (947x–1014x speedup) | Stages 5, 5b, 6, 8 |
 
 ## Troubleshooting
 
@@ -225,14 +277,20 @@ sudo apt install pandoc
 pandoc --version
 ```
 
-### pdflatex not found
+### pdflatex / xelatex not found
 
 ```bash
 # Ubuntu/Debian:
-sudo apt install texlive-latex-base texlive-latex-recommended texlive-latex-extra
+sudo apt install texlive-latex-base texlive-latex-recommended texlive-latex-extra texlive-xetex
 
 # Verify:
-pdflatex --version
+xelatex --version
+```
+
+### Sphinx not found
+
+```bash
+pip install 'sphinx>=7.2.0' 'myst-parser>=2.0.0' 'sphinx-rtd-theme>=2.0.0' 'sphinxcontrib-mermaid>=0.9.2'
 ```
 
 ### Pillow can't open .avif files
@@ -253,21 +311,32 @@ The frontend API must be running at `export.frontend_url`. Alternatively, use `e
 
 Run `--chapters` first. The Kaliya stage needs threat cluster data extracted by the Chapter stage.
 
-### PDF build: "Unknown alias" error
+### PDF build: LaTeX errors or "Unknown alias"
 
-This occurs when pandoc misinterprets `---` separators as YAML metadata boundaries. The Publish stage automatically strips chapter footers to prevent this. If it persists, check for raw `---` lines in chapter content.
+If the Sphinx + xelatex build fails, check for:
+- Unescaped `&` characters in titles (auto-escaped by `_build_conf_py`)
+- Unclosed mermaid fences (`` ```mermaid `` without closing `` ``` ``)
+- Non-zero latexmk exit — the build checks for PDF existence before aborting; warnings are non-fatal if PDF was produced
 
 ## Running Tests
 
 ```bash
+# Run the pipeline unit tests:
+python -m pytest tests/test_pipeline_stages.py -v
+
+# Run EO diagram tests:
+python -m pytest tests/test_eo_diagrams.py -v
+
 # Run the integration test suite:
 python -m pytest tests/rapporteur_cli_tests.py -v
 
 # Run with timeout (default 300s per test):
-python -m pytest tests/rapporteur_cli_tests.py -v --timeout=300
+python -m pytest tests/test_pipeline_stages.py -v --timeout=300
 ```
 
 The test suite validates:
-- **6.1** End-to-end pipeline (static export → PDF), with and without Kaliya
-- **6.2** Chapter reference structure (single `## References` per chapter, no orphaned sub-refs)
-- **6.3** Kaliya cache structure (report.json, narrative.md, figures.json integrity)
+- **Pipeline stages** — 54 unit tests covering sort, references, APA formatting, mermaid stripping, diagram captions, and config models
+- **EO diagrams** — per-chapter, unified, and focused diagram generation with name resolution
+- **Integration** — end-to-end pipeline (static export → PDF), with and without Kaliya
+- **Chapter structure** — single `## References` per chapter, no orphaned sub-refs
+- **Kaliya cache** — report.json, narrative.md, figures.json integrity

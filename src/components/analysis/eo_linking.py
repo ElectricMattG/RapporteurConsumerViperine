@@ -453,12 +453,14 @@ class EORegistry(Base):
 # ---------------------------------------------------------------------------
 
 class TokenBudgetBatcher(Base):
-    """Group articles into batches of ≤ batch_size, sub-grouped by index_folder.
+    """Group articles into batches of ≤ batch_size with cross-index interleaving.
 
     Batching is purely mechanical (token budget) — no embedding similarity,
     no EO affinity scoring.  The LLM's reasoning determines all EO linkages.
-    Within each batch, articles from the same index_folder are contiguous
-    to minimise ``/switch-index`` calls.
+
+    Round-robin interleaving ensures each batch draws from multiple indices,
+    maximising the chance of surfacing cross-index linkages within a single
+    LINK-REFLECT window.
     """
 
     def __init__(self, batch_size: int = 25) -> None:
@@ -466,25 +468,47 @@ class TokenBudgetBatcher(Base):
         self.batch_size = batch_size
 
     def batch(self, articles: list[ArticleRecord]) -> list[list[ArticleRecord]]:
-        """Return a list of batches, each ≤ batch_size articles."""
-        # Sub-group by index_folder for efficient /switch-index
+        """Return a list of batches, each ≤ batch_size articles.
+
+        Articles are interleaved across indices in round-robin order so
+        that each batch contains a diverse mix of sources.
+        """
+        # Sub-group by index_folder
         by_index: dict[str, list[ArticleRecord]] = defaultdict(list)
         for article in articles:
             by_index[article.index_folder].append(article)
 
-        # Flatten in index-folder order, then chunk
+        # Round-robin interleave across indices
+        index_keys = sorted(by_index)
+        iterators = {k: iter(by_index[k]) for k in index_keys}
         ordered: list[ArticleRecord] = []
-        for folder in sorted(by_index):
-            ordered.extend(by_index[folder])
+        exhausted: set[str] = set()
 
+        while len(exhausted) < len(index_keys):
+            for key in index_keys:
+                if key in exhausted:
+                    continue
+                try:
+                    ordered.append(next(iterators[key]))
+                except StopIteration:
+                    exhausted.add(key)
+
+        # Chunk into batches
         batches: list[list[ArticleRecord]] = []
         for i in range(0, len(ordered), self.batch_size):
             batches.append(ordered[i : i + self.batch_size])
 
+        # Log per-index distribution
+        index_counts: dict[str, int] = defaultdict(int)
+        for a in articles:
+            index_counts[a.index_folder] += 1
+
         self._logger.info(
-            "Batched %d articles into %d batches (max %d per batch)",
-            len(articles), len(batches), self.batch_size,
+            "Batched %d articles into %d batches (max %d per batch, %d indices interleaved)",
+            len(articles), len(batches), self.batch_size, len(index_keys),
         )
+        for idx_name in index_keys:
+            self._logger.info("  %s: %d articles", idx_name, index_counts[idx_name])
         return batches
 
 
@@ -610,6 +634,7 @@ _RAG_PRICING: dict[str, dict[str, float]] = {
     "gemini-3.1-pro-preview":  {"input": 1.25, "output": 10.00},
     "gemini-2.5-pro":          {"input": 1.25, "output": 10.00},
     "gemini-2.5-flash":        {"input": 0.30, "output":  2.50},
+    "gpt-5.4":                 {"input": 2.50, "output": 10.00},
 }
 
 
@@ -807,34 +832,47 @@ class LinkReflectDriver(Base):
         location: str = "global",
         output_dir: str | Path = ".",
         timeout: int = 900,
+        provider: str = "gemini",
+        reasoning_effort: str = "high",
     ) -> None:
         super().__init__()
         self.model_name = model_name
         self.location = location
         self.output_dir = Path(output_dir)
         self.timeout = timeout
+        self.provider = provider
+        self.reasoning_effort = reasoning_effort
         self._client = None  # lazy init
         self.total_usage: dict[str, int] = {
             "input": 0, "output": 0, "thinking": 0,
         }
 
     def _get_client(self):
-        """Lazy-init the Gemini client, wrapped with Redis cache."""
+        """Lazy-init the LLM client (Gemini direct, or OpenAI sync)."""
         if self._client is None:
-            from src._clients.llm_gcp_client import GeminiLLMClient
-            from src.clients.llm_cache_client import CachedLLMClient
-            from src.config import app_conf
-            _inner = GeminiLLMClient(
-                model_name=self.model_name,
-                location=self.location,
-            )
-            self._client = CachedLLMClient(
-                _inner,
-                redis_host=app_conf.get("redis.host") or "",
-                redis_port=int(app_conf.get("redis.port") or 6379),
-                redis_password=app_conf.get("redis.password") or None,
-                ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
-            )
+            if self.provider == "openai":
+                import os
+
+                from openai import OpenAI
+                self._client = OpenAI(
+                    api_key=os.environ["OPENAI_API_KEY"],
+                    timeout=self.timeout,
+                )
+            else:
+                from src._clients.llm_gcp_client import GeminiLLMClient
+                from src.clients.llm_cache_client import CachedLLMClient
+                from src.config import app_conf
+                _inner = GeminiLLMClient(
+                    model_name=self.model_name,
+                    location=self.location,
+                )
+                self._client = CachedLLMClient(
+                    _inner,
+                    redis_host=app_conf.get("redis.host") or "",
+                    redis_port=int(app_conf.get("redis.port") or 6379),
+                    redis_password=app_conf.get("redis.password") or None,
+                    ttl_seconds=int(app_conf.get("redis.llm_cache_ttl_seconds") or 432000),
+                )
         return self._client
 
     # -- public API ----------------------------------------------------------
@@ -937,30 +975,47 @@ class LinkReflectDriver(Base):
         prompt: str,
         response_mime_type: str | None = None,
     ) -> tuple[str, dict[str, int]]:
-        """Call Gemini and return (text, usage_dict)."""
-        from google.genai import types as genai_types
-
-        client = self._get_client()
-        config_params: dict[str, Any] = {
-            "temperature": 0.2,
-            "top_p": client.top_p,
-            "max_output_tokens": 32_000,
-        }
-        if response_mime_type:
-            config_params["response_mime_type"] = response_mime_type
-        config = genai_types.GenerateContentConfig(**config_params)
-        response = client.client.models.generate_content(
-            model=client.model_name,
-            contents=prompt,
-            config=config,
-        )
-        text = response.text if response.text else ""
+        """Call LLM (Gemini or OpenAI) and return (text, usage_dict)."""
         usage: dict[str, int] = {"input": 0, "output": 0, "thinking": 0}
-        um = getattr(response, "usage_metadata", None)
-        if um:
-            usage["input"] = getattr(um, "prompt_token_count", 0) or 0
-            usage["output"] = getattr(um, "candidates_token_count", 0) or 0
-            usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
+
+        if self.provider == "openai":
+            client = self._get_client()
+            response = client.responses.create(
+                model=self.model_name,
+                input=prompt,
+                reasoning={"effort": self.reasoning_effort},
+                max_output_tokens=32_000,
+            )
+            text = response.output_text if hasattr(response, "output_text") else ""
+            resp_usage = getattr(response, "usage", None)
+            if resp_usage:
+                usage["input"] = getattr(resp_usage, "input_tokens", 0) or 0
+                usage["output"] = getattr(resp_usage, "output_tokens", 0) or 0
+                details = getattr(resp_usage, "output_tokens_details", None)
+                if details:
+                    usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+        else:
+            from google.genai import types as genai_types
+            client = self._get_client()
+            config_params: dict[str, Any] = {
+                "temperature": 0.2,
+                "top_p": client.top_p,
+                "max_output_tokens": 32_000,
+            }
+            if response_mime_type:
+                config_params["response_mime_type"] = response_mime_type
+            config = genai_types.GenerateContentConfig(**config_params)
+            response = client.client.models.generate_content(
+                model=client.model_name,
+                contents=prompt,
+                config=config,
+            )
+            text = response.text if response.text else ""
+            um = getattr(response, "usage_metadata", None)
+            if um:
+                usage["input"] = getattr(um, "prompt_token_count", 0) or 0
+                usage["output"] = getattr(um, "candidates_token_count", 0) or 0
+                usage["thinking"] = getattr(um, "thoughts_token_count", 0) or 0
 
         # Accumulate totals
         for key in ("input", "output", "thinking"):
@@ -2657,7 +2712,13 @@ class ImplementationTableGenerator(Base):
             action = comm.get("action_description", "") or "—"
             url = comm.get("url", "")
             domain = comm.get("domain", "")
-            source = f"[{domain}]({url})" if url and domain else domain or "—"
+            comm_title = (comm.get("title", "") or "").replace("|", "–")
+            if url and comm_title:
+                source = f"[{comm_title}]({url})"
+            elif url and domain:
+                source = f"[{domain}]({url})"
+            else:
+                source = domain or "—"
 
             # Visual marker: primary EO rows get a blue indicator
             if primary_eo and rec.get("eo_number") == primary_eo:

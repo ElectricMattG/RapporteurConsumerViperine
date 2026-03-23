@@ -368,7 +368,7 @@ defaults = {
     },
     "redis": {
         # Redis configuration for LLM response caching
-        "host": "redis.rag-service.svc.cluster.local",  # Redis hostname
+        "host": "localhost",  # Redis hostname
         "port": 6379,  # Redis port
         "password": "",  # Set via REDIS_PASSWORD env var or config
         "llm_cache_ttl_seconds": 432000,  # 5 days TTL for cached LLM responses

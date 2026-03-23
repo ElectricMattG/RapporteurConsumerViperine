@@ -6612,9 +6612,12 @@ class PublishStage(Base):
                 # Extract any mermaid blocks from the Implementation Record
                 impl_diagrams = self._MERMAID_BLOCK_RE.findall(impl_section)
                 text = self._IMPL_RECORD_RE.sub('', text).rstrip()
-                # Re-append the diagrams at the end of the chapter
-                for diag in impl_diagrams:
-                    text += f'\n\n```mermaid\n{diag}```'
+                # Re-insert diagrams after exec summary / first heading
+                if impl_diagrams:
+                    diagram_block = '\n\n'.join(
+                        f'```mermaid\n{diag}```' for diag in impl_diagrams
+                    )
+                    text = self._insert_after_first_heading(text, diagram_block)
 
             # --- Generate LLM captions for mermaid diagrams ---------------
             if self.cfg.publish.diagram_captions and not self.dry_run:
@@ -6763,18 +6766,24 @@ class PublishStage(Base):
 
     @staticmethod
     def _sort_chapter_entries(entries: list[dict]) -> list[dict]:
-        """Sort chapter entries: intro first, numbered chapters in order,
-        conclusion/section intros in natural position."""
-        def _sort_key(entry: dict) -> tuple[int, str]:
+        """Sort chapter entries by filename so intros/conclusions stay
+        interleaved with their content chapters.
+
+        The filenames use a naming convention that sorts naturally:
+        00-introduction, 01a-part-1-introduction, 01-..., 04z-part-1-conclusion,
+        05a-part-2-introduction, 05-..., etc.
+        """
+        import re as _re
+
+        def _sort_key(entry: dict) -> tuple:
             fn = entry.get("filename", "")
-            # Introduction always first
-            if fn.startswith("00-") or "introduction" in fn.lower():
-                return (0, fn)
-            # Section/part intro files (part-1-intro etc.)
-            if "part-" in fn and "intro" in fn.lower():
-                return (1, fn)
-            # Regular numbered chapters — sort by filename (numeric prefix)
-            return (2, fn)
+            # Extract leading number and optional letter suffix
+            m = _re.match(r'^(\d+)([a-z]?)', fn)
+            if m:
+                num = int(m.group(1))
+                suffix = m.group(2) or 'm'  # 'm' sorts between 'a' and 'z'
+                return (num, suffix, fn)
+            return (9999, 'z', fn)
         return sorted(entries, key=_sort_key)
 
     # ------------------------------------------------------------------
@@ -6918,6 +6927,26 @@ class PublishStage(Base):
     # Diagram repositioning
     # ------------------------------------------------------------------
 
+    def _insert_after_first_heading(self, text: str, block: str) -> str:
+        """Insert *block* after the first ``## `` section's content.
+
+        The diagram is placed just before the *second* ``## `` heading,
+        so it appears at the end of the executive-summary / overview
+        section.  Falls back to appending at the end if fewer than two
+        ``## `` headings exist.
+        """
+        lines = text.split('\n')
+        h2_count = 0
+        for i, line in enumerate(lines):
+            if line.startswith('## '):
+                h2_count += 1
+                if h2_count == 2:
+                    # Insert just before the second ## heading
+                    lines.insert(i, block + '\n')
+                    return '\n'.join(lines)
+        # Fallback: append at end
+        return text + '\n\n' + block
+
     def _reposition_diagrams(self, text: str) -> str:
         """Move ``## Implementation Record`` section from the end of the
         chapter to directly after the executive summary / abstract.
@@ -7000,7 +7029,11 @@ class PublishStage(Base):
         def _replace_with_caption(match: re.Match) -> str:
             mermaid_code = match.group(1)
             original = match.group(0)
-            caption = self._generate_diagram_caption(mermaid_code, chapter_context)
+            try:
+                caption = self._generate_diagram_caption(mermaid_code, chapter_context)
+            except Exception as exc:
+                self._logger.warning("  Caption generation failed: %s", exc)
+                return original
             # Escape inner asterisks so they don't break markdown italic
             safe_caption = caption.replace('*', '\\*')
             return f"{original}\n\n*{safe_caption}*"
@@ -7017,22 +7050,25 @@ class PublishStage(Base):
         """
         model = self.cfg.publish.caption_model
         prompt = (
-            "You are writing a descriptive figure caption for an academic "
-            "policy document. The chapter below analyses Executive Orders "
-            "and the mermaid diagram shows how they relate.\n\n"
+            "You are writing a descriptive figure caption for a policy "
+            "document aimed at an informed general audience. The chapter "
+            "below analyses Executive Orders and the mermaid diagram shows "
+            "how they relate.\n\n"
             "## Chapter Content\n\n"
             f"{eo_context[:12000]}\n\n"
             "## Mermaid Diagram\n\n"
             f"```mermaid\n{mermaid_code}\n```\n\n"
             "Write a 3-4 sentence figure caption that:\n"
-            "1. Names the specific Executive Orders shown in the diagram\n"
-            "2. Describes how they relate (rescissions, derivations, "
-            "companion orders, amendments)\n"
-            "3. Explains the policy significance — what do these "
-            "relationships mean in practice\n\n"
+            "1. Refers to each Executive Order by its SHORT COMMON NAME "
+            "(e.g. 'Unleashing Prosperity Through Deregulation') — do NOT "
+            "cite EO numbers like 14148 or 14319\n"
+            "2. Explains in plain language how they connect — which order "
+            "enabled, replaced, or built upon the others\n"
+            "3. Summarises the real-world significance for a layman — "
+            "what changed in practice\n\n"
             "Respond with ONLY the caption text. No heading, no prefix "
             "like 'Figure:', no bullet points, no asterisks, no markdown "
-            "formatting. Write in formal prose, 60-100 words."
+            "formatting. Write in accessible formal prose, 60-100 words."
         )
         try:
             from src._clients.llm_gcp_client import GeminiLLMClient
@@ -7068,8 +7104,9 @@ class PublishStage(Base):
         except Exception as e:
             self._logger.warning("  Caption generation failed: %s", e)
 
-        return ("EO precedence diagram showing legislative relationships "
-                "including rescissions, derivations, and companion orders.")
+        return ("This diagram shows how these executive orders connect. "
+                "The central order enabled or replaced others, reshaping "
+                "federal policy across the areas discussed in this chapter.")
 
     def _calculate_cost(
         self, model: str, input_tokens: int, output_tokens: int,
@@ -7557,6 +7594,11 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.verbose:
         logging.getLogger().setLevel(logging.DEBUG)
+        # Keep noisy HTTP/transport libraries at WARNING to avoid
+        # dumping huge request/response payloads (grounding data, etc.)
+        for _lib in ("httpx", "httpcore", "openai", "urllib3",
+                      "requests", "google", "grpc"):
+            logging.getLogger(_lib).setLevel(logging.WARNING)
 
     # Load config
     cfg = PipelineConfig.from_yaml(args.config)

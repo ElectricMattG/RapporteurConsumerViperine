@@ -437,23 +437,23 @@ class TestSortChapterEntries:
 
         entries = [
             {"filename": "05-conclusion.md"},
-            {"filename": "introduction.md"},
+            {"filename": "00-introduction.md"},
             {"filename": "01-chapter.md"},
         ]
         result = PublishStage._sort_chapter_entries(entries)
-        assert result[0]["filename"] == "introduction.md"
+        assert result[0]["filename"] == "00-introduction.md"
 
     def test_section_intros_after_intro(self):
         from src.components.publisher.rapporteur_cli import PublishStage
 
         entries = [
             {"filename": "03-body.md"},
-            {"filename": "part-1-intro.md"},
+            {"filename": "01a-part-1-intro.md"},
             {"filename": "00-introduction.md"},
         ]
         result = PublishStage._sort_chapter_entries(entries)
         assert result[0]["filename"] == "00-introduction.md"
-        assert result[1]["filename"] == "part-1-intro.md"
+        assert result[1]["filename"] == "01a-part-1-intro.md"
         assert result[2]["filename"] == "03-body.md"
 
     def test_empty_list(self):

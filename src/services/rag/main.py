@@ -910,7 +910,9 @@ def publish_webscraper_messages(request_id: str, session_id: str, query: str, re
                 callback=lambda err, msg, i=idx: logger.error(f"Kafka produce error for URL {i}: {err}") if err else logger.info(f"✅ Published web-scraper message {i}/{total_urls}")
             )
 
-        state.kafka_producer.flush()
+        remaining = state.kafka_producer.flush(timeout=5)
+        if remaining:
+            logger.warning(f"⚠️ Kafka flush timed out, {remaining} message(s) still pending")
         logger.info(f"📤 Published {total_urls} web-scraper messages to web-scrape-requests topic")
 
     except Exception as e:
@@ -1676,7 +1678,9 @@ async def switch_index(request: SwitchIndexRequest):
                 key=b"rag-service",
                 value=json.dumps({"folder": request.folder}).encode("utf-8"),
             )
-            state.kafka_producer.flush()
+            remaining = state.kafka_producer.flush(timeout=5)
+            if remaining:
+                logger.warning(f"⚠️ Kafka flush timed out, {remaining} message(s) still pending")
             logger.info(f"📤 Published index-folder-switch: {request.folder}")
     except Exception as e:
         logger.warning(f"⚠️ Could not publish folder-switch notification: {e}")
