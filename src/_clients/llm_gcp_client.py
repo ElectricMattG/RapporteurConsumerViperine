@@ -274,6 +274,49 @@ class GeminiLLMClient(Base):
                     raise
             raise
 
+    async def generate_content_with_usage(self, prompt: str, temperature: Optional[float] = None,
+                        max_tokens: Optional[int] = None) -> dict:
+        """Generate content and return both text and usage statistics.
+
+        Args:
+            prompt: Input prompt for generation
+            temperature: Generation temperature (0.0-1.0). If None, uses default.
+            max_tokens: Maximum tokens to generate. If None, uses default max_length.
+
+        Returns:
+            dict with keys:
+                - text: Generated text
+                - usage: dict with input_tokens, output_tokens, total_tokens
+        """
+        config_params = {
+            'temperature': temperature if temperature is not None else self.temperature,
+            'top_p': self.top_p,
+            'max_output_tokens': max_tokens if max_tokens is not None else self.max_length,
+        }
+        config = types.GenerateContentConfig(**config_params)
+
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self.client.models.generate_content(
+                model=self.model_name,
+                contents=prompt,
+                config=config,
+            ),
+        )
+
+        text = response.text
+
+        # Extract usage metadata
+        usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+        if hasattr(response, 'usage_metadata') and response.usage_metadata:
+            um = response.usage_metadata
+            usage["input_tokens"] = getattr(um, 'prompt_token_count', 0) or 0
+            usage["output_tokens"] = getattr(um, 'candidates_token_count', 0) or 0
+            usage["total_tokens"] = getattr(um, 'total_token_count', 0) or 0
+
+        return {"text": text, "usage": usage}
+
     async def generate_queries(self, root_query, text_content: str, num_queries: int = 5,
                               enable_search: bool = False) -> List[str]:
         """Generate semantic query variations using Gemini with retry logic.

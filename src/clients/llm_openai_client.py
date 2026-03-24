@@ -215,6 +215,86 @@ class OpenAILLMClient(Base):
             self._logger.error(f"❌ OpenAI generation failed: {e}")
             raise
 
+    async def generate_content_with_usage(self, prompt: str, reasoning_effort: Optional[str] = None,
+                        max_tokens: Optional[int] = None, verbosity: Optional[str] = None,
+                        temperature: Optional[float] = None) -> dict:
+        """Generate content and return both text and usage statistics.
+
+        Args:
+            prompt: Input prompt for generation
+            reasoning_effort: Reasoning effort level for GPT-5 models (none, low, medium, high)
+            max_tokens: Maximum tokens to generate
+            verbosity: Output verbosity for GPT-5 models (low, medium, high)
+            temperature: Sampling temperature (0.0-2.0)
+
+        Returns:
+            dict with keys:
+                - text: Generated text
+                - usage: dict with input_tokens, output_tokens, total_tokens
+        """
+        try:
+            if self.is_reasoning_model:
+                # Use Responses API for GPT-5 models
+                request_data = {
+                    'model': self.model_name,
+                    'input': prompt,
+                }
+
+                # Add reasoning configuration
+                reasoning_config = {
+                    'effort': reasoning_effort if reasoning_effort is not None else self.reasoning_effort
+                }
+                request_data['reasoning'] = reasoning_config
+
+                # Add text configuration
+                text_config = {
+                    'verbosity': verbosity if verbosity is not None else self.verbosity
+                }
+                request_data['text'] = text_config
+
+                # Add max_output_tokens if specified
+                if max_tokens:
+                    request_data['max_output_tokens'] = max_tokens
+
+                # Add temperature if specified
+                if temperature is not None:
+                    request_data['temperature'] = temperature
+
+                # Call Responses API
+                response = await self.client.responses.create(**request_data)
+
+                return {
+                    "text": response.output_text,
+                    "usage": {
+                        "input_tokens": response.usage.input_tokens,
+                        "output_tokens": response.usage.output_tokens,
+                        "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
+                    }
+                }
+            else:
+                # Use Chat Completions API for non-reasoning models (GPT-4, etc.)
+                response = await self.client.chat.completions.create(
+                    model=self.model_name,
+                    messages=[
+                        {"role": "user", "content": prompt}
+                    ],
+                    temperature=0.7,
+                    top_p=0.9,
+                    max_tokens=max_tokens if max_tokens is not None else self.max_length,
+                )
+
+                return {
+                    "text": response.choices[0].message.content,
+                    "usage": {
+                        "input_tokens": response.usage.prompt_tokens,
+                        "output_tokens": response.usage.completion_tokens,
+                        "total_tokens": response.usage.total_tokens,
+                    }
+                }
+        except Exception as e:
+            self._logger.error(f"❌ OpenAI generation with usage failed: {e}")
+            raise
+
     async def generate_queries(self, root_query, text_content: str, num_queries: int = 5) -> List[str]:
         """Generate semantic query variations using OpenAI with retry logic.
 
