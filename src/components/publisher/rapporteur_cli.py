@@ -51,6 +51,9 @@ import requests
 from PIL import Image
 
 from src.components.analysis.eo_linking_stage import EOLinkStage
+from src.components.analysis.media_linking_stage import MediaLinkStage
+from src.components.publisher.analytics_conclude import AnalyticsConcludeStage
+from src.components.publisher.fuse_analysis import FuseAnalysisStage
 # Re-use rendering helpers from the original document builder.
 from src.components.publisher.rapporteur_docs import (_CITE_GROUP_RE,
                                                       _cite_token_to_cm_key,
@@ -61,8 +64,9 @@ from src.components.publisher.rapporteur_docs import (_CITE_GROUP_RE,
                                                       postprocess_response,
                                                       resolve_inline_citations)
 from src.config_handler import Base
-from src.models.publisher import (ChapterSpec, CiteConfig, ConcludeConfig,
-                                  FormatConfig, IntroduceConfig,
+from src.models.publisher import (AnalyticsConcludeConfig, ChapterSpec,
+                                  CiteConfig, ConcludeConfig, FormatConfig,
+                                  FuseAnalysisConfig, IntroduceConfig,
                                   PipelineConfig, SectionDef)
 
 # ---------------------------------------------------------------------------
@@ -3905,18 +3909,107 @@ class CiteStage(Base):
     # -- internal -----------------------------------------------------------
 
     def _build_merged_citation_map(self) -> dict:
-        """Merge citation_maps from all conversations in the raw export."""
+        """Merge citation data from conversations, x_indices, and workflow caches.
+
+        Priority (lowest wins on conflict):
+            1. x_indices JSONL files (research_summaries + research_qa_pairs)
+            2. Workflow cache conversations (media_linking / eo_linking batches)
+            3. Raw conversations.json ``citation_map`` (highest fidelity)
+        """
+        merged: dict = {}
+
+        # ── 1. x_indices JSONL files ──
+        project_root = Path(__file__).resolve().parent.parent.parent.parent
+        for folder in (self.cfg.cite.index_folders or []):
+            idx_dir = project_root / folder
+            if not idx_dir.is_dir():
+                continue
+            # research_summaries: {document_id, source_url, doc_metadata: {title, authors[], publication_date, publisher}}
+            summaries_path = idx_dir / "research_summaries_combined.jsonl"
+            if summaries_path.exists():
+                count = 0
+                for line in summaries_path.open(encoding="utf-8"):
+                    d = json.loads(line)
+                    did = d.get("document_id", "")
+                    if not did:
+                        continue
+                    dm = d.get("doc_metadata") or {}
+                    authors = dm.get("authors") or []
+                    merged[did] = {
+                        "url": d.get("source_url", ""),
+                        "author": ", ".join(authors) if authors else "",
+                        "date": dm.get("publication_date", ""),
+                        "title": dm.get("title", ""),
+                        "publisher": dm.get("publisher", ""),
+                    }
+                    count += 1
+                self._logger.info("    index %s/summaries: %d entries", folder, count)
+
+            # research_qa_pairs: {document_metadata: {document_id, source_url, title, author, creation_date}}
+            qa_path = idx_dir / "research_qa_pairs_combined.jsonl"
+            if qa_path.exists():
+                count = 0
+                for line in qa_path.open(encoding="utf-8"):
+                    d = json.loads(line)
+                    dm = d.get("document_metadata") or {}
+                    did = dm.get("document_id", "")
+                    if not did or did in merged:
+                        continue
+                    merged[did] = {
+                        "url": dm.get("source_url", ""),
+                        "author": dm.get("author", ""),
+                        "date": dm.get("creation_date", ""),
+                        "title": dm.get("title", ""),
+                    }
+                    count += 1
+                self._logger.info("    index %s/qa_pairs: %d new entries", folder, count)
+
+        # ── 2. Workflow cache conversations ──
+        for wf_dir_str in (self.cfg.cite.workflow_dirs or []):
+            wf_dir = Path(wf_dir_str)
+            if not wf_dir.is_dir():
+                continue
+            count = 0
+            for batch in sorted(wf_dir.iterdir()):
+                if not batch.is_dir():
+                    continue
+                for fname in ("conversations.json", "conversation.json"):
+                    conv_path = batch / fname
+                    if not conv_path.exists():
+                        continue
+                    data = json.loads(conv_path.read_text(encoding="utf-8"))
+                    convs = data if isinstance(data, list) else [data]
+                    for c in convs:
+                        meta = c.get("metadata") or {}
+                        did = meta.get("document_id", "")
+                        if not did or did in merged:
+                            continue
+                        authors = meta.get("authors") or []
+                        merged[did] = {
+                            "url": meta.get("article_url", ""),
+                            "author": ", ".join(authors) if isinstance(authors, list) else str(authors),
+                            "date": meta.get("date", ""),
+                            "title": meta.get("article_title", ""),
+                            "publisher": meta.get("publisher", ""),
+                        }
+                        count += 1
+            self._logger.info("    workflow %s: %d new entries", wf_dir.name, count)
+
+        # ── 3. Raw conversations.json (highest priority — overwrites) ──
         raw_dir = self.cfg.build_dir / "raw"
         conv_path = raw_dir / "conversations.json"
-        if not conv_path.exists():
-            self._logger.warning("No conversations.json — cannot build citation map.")
-            return {}
+        if conv_path.exists():
+            conversations = json.loads(conv_path.read_text(encoding="utf-8"))
+            count = 0
+            for conv in conversations:
+                cm = (conv.get("metadata") or {}).get("citation_map") or {}
+                merged.update(cm)
+                count += len(cm)
+            self._logger.info("    conversations.json: %d citation_map entries", count)
 
-        conversations = json.loads(conv_path.read_text(encoding="utf-8"))
-        merged: dict = {}
-        for conv in conversations:
-            cm = (conv.get("metadata") or {}).get("citation_map") or {}
-            merged.update(cm)
+        if not merged:
+            self._logger.warning("No citation data found from any source.")
+
         return merged
 
     def _build_eo_title_index(self, citation_map: dict) -> dict:
@@ -4105,7 +4198,9 @@ class CiteStage(Base):
                         continue
                     # Federal Register but no EO title → use generic format
                     author = entry.get("author", "Federal Register")
-                    date = entry.get("date", "")
+                    from src.components.publisher.rapporteur_docs import \
+                        _format_date_month_year
+                    date = _format_date_month_year(entry.get("date", ""))
                     label = f"{author}, {date}" if date else author
                     links.append(f"[{label}]({url})")
                     stats["resolved"] += 1
@@ -4114,10 +4209,10 @@ class CiteStage(Base):
 
                 # Web citation
                 if cc.resolve_web_citations and url:
-                    from src.components.publisher.rapporteur_docs import \
-                        _short_author
+                    from src.components.publisher.rapporteur_docs import (
+                        _format_date_month_year, _short_author)
                     author = _short_author(entry.get("author") or "")
-                    date = entry.get("date", "")
+                    date = _format_date_month_year(entry.get("date", ""))
                     label = f"{author}, {date}" if author and date else (author or date or "?")
                     links.append(f"[{label}]({url})")
                     stats["resolved"] += 1
@@ -6790,11 +6885,24 @@ class PublishStage(Base):
     # Reference collection and APA formatting
     # ------------------------------------------------------------------
 
+    # Regex to extract inline citations like [Author, Month YYYY](url)
+    # Also matches date-only variants: [Month YYYY](url) or [YYYY](url)
+    _INLINE_CITE_RE = re.compile(
+        r'\[(?P<label>[^\]]*?'
+        r'(?:January|February|March|April|May|June'
+        r'|July|August|September|October|November|December)?'
+        r'\s*\d{4})\]'
+        r'\((?P<url>https?://[^)]+)\)',
+    )
+
     def _extract_references(self, text: str) -> tuple[str, list[str]]:
         """Strip ``## References`` and ``## Top Sources`` from chapter text.
 
         Returns (cleaned_text, list_of_reference_lines) where each
         reference line starts with ``- ``.
+
+        When no ``## References`` section exists, inline citations of the
+        form ``[Author, Month YYYY](url)`` are harvested instead.
         """
         ref_lines: list[str] = []
 
@@ -6810,6 +6918,25 @@ class PublishStage(Base):
 
         # Also strip ## Top Sources (duplicates references)
         text = self._TOP_SOURCES_SECTION_RE.sub('', text)
+
+        # Fallback: harvest inline [Author, Month YYYY](url) citations
+        if not ref_lines:
+            seen_urls: set[str] = set()
+            for m in self._INLINE_CITE_RE.finditer(text):
+                url = m.group("url").strip()
+                if url in seen_urls:
+                    continue
+                seen_urls.add(url)
+                label = m.group("label").strip()
+                # Split "Author, Month YYYY" into author and date
+                parts = label.rsplit(", ", 1)
+                if len(parts) == 2:
+                    author, date = parts[0].strip(), parts[1].strip()
+                else:
+                    author, date = label, "n.d."
+                ref_lines.append(
+                    f"- **{author}** ({date}). [{url}]({url})"
+                )
 
         return text.rstrip(), ref_lines
 
@@ -7201,6 +7328,20 @@ latex_elements = {{
 \\usepackage{{caption}}
 \\captionsetup{{font=small,labelfont=bf,skip=4pt}}
 
+% --- Full-width tables with smaller font ------------------------------------
+\\usepackage{{tabularx}}
+\\usepackage{{longtable}}
+\\usepackage{{etoolbox}}
+% Shrink all table environments to \\footnotesize with tighter column padding
+\\AtBeginEnvironment{{tabulary}}{{\\footnotesize\\tabcolsep=3pt}}
+\\AtBeginEnvironment{{longtable}}{{\\footnotesize\\tabcolsep=3pt}}
+\\AtBeginEnvironment{{tabular}}{{\\footnotesize\\tabcolsep=3pt}}
+% Force Sphinx tabulary to use full textwidth
+\\renewcommand{{\\tymin}}{{20pt}}
+\\renewcommand{{\\tymax}}{{\\textwidth}}
+% Let long URLs wrap inside table cells
+\\usepackage{{seqsplit}}
+
 % --- Section numbering depth -------------------------------------------------
 \\setcounter{{secnumdepth}}{{2}}
 \\setcounter{{tocdepth}}{{2}}
@@ -7219,8 +7360,11 @@ latex_elements = {{
 \\addtolength{{\\topmargin}}{{-2pt}}
 """,
     "figure_align": "H",
-    "geometry": r"\\usepackage[a4paper,top=2.5cm,bottom=2.5cm,left=2.5cm,right=2.5cm]{{geometry}}",
+    "geometry": r"\\usepackage[a4paper,top=2.5cm,bottom=2.5cm,left=2cm,right=2cm]{{geometry}}",
 }}
+
+# Full-width tables, coloured header rows
+latex_table_style = ["booktabs", "colorrows"]
 
 # Sphinx auto-numbers sections (secnumdepth=2); figure numbering off
 numfig = False
@@ -7384,6 +7528,7 @@ STAGES = [
     ("chapters",           ChapterStage),
     ("kaliya",             KaliyaStage),
     ("eo_link",            EOLinkStage),
+    ("media_link",         MediaLinkStage),
     ("format",             FormatStage),
     ("conclude",           ConcludeStage),
     ("section_conclude",   SectionConcludeStage),
@@ -7391,6 +7536,8 @@ STAGES = [
     ("cite",               CiteStage),
     ("introduce",          IntroduceStage),
     ("section_introduce",  SectionIntroduceStage),
+    ("analytics_conclude", AnalyticsConcludeStage),
+    ("fuse_analysis",       FuseAnalysisStage),
     ("publish",            PublishStage),
 ]
 
@@ -7423,7 +7570,7 @@ def run_pipeline(cfg: PipelineConfig, selected: list[str], dry_run: bool) -> Non
 # Cost rollup
 # ---------------------------------------------------------------------------
 
-_COST_STAGES = ("format", "conclude", "section_conclude", "edit", "cite", "introduce", "section_introduce", "eo_link")
+_COST_STAGES = ("format", "conclude", "section_conclude", "edit", "cite", "introduce", "section_introduce", "eo_link", "media_link", "analytics_conclude", "fuse_analysis")
 
 
 def _write_cost_rollup(cfg: PipelineConfig, selected: list[str]) -> None:
@@ -7571,6 +7718,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="EO Linking: Map .gov/.mil comms to EO framework")
     stages.add_argument("--no-eo-link", dest="eo_link", action="store_false",
                         help="Skip EO linking even if enabled in config")
+    stages.add_argument("--media-link", action="store_true", default=None,
+                        help="Media Linkage: Link media articles to EO framework")
+    stages.add_argument("--no-media-link", dest="media_link", action="store_false",
+                        help="Skip media linkage even if enabled in config")
+    stages.add_argument("--analytics-conclude", action="store_true", default=None,
+                        help="Analytics Conclusion: integrate cluster + Kaliya analyses into overarching findings")
+    stages.add_argument("--fuse-analysis", action="store_true", default=None,
+                        help="Fuse Analysis: rewrite Phase 4 + Kaliya per cluster into readable prose")
     stages.add_argument("--publish",  action="store_true", help="Stage 8: Build PDF / HTML / Confluence output")
     stages.add_argument("--all",      action="store_true", help="Run all stages (1-6)")
 
@@ -7583,6 +7738,8 @@ def build_parser() -> argparse.ArgumentParser:
     opts.add_argument("--edit-instructions", default=None,   help="Custom editorial instructions for targeted chapter edit")
     opts.add_argument("--exclude-eos",  nargs="*", default=None,
                       help="EO numbers to exclude from diagrams and tables (e.g. --exclude-eos 14165 14370)")
+    opts.add_argument("--clusters", nargs="*", default=None,
+                      help="Restrict analytics-conclude to specific clusters (e.g. --clusters A B C E)")
     opts.add_argument("-v", "--verbose", action="store_true", help="Enable debug logging")
 
     return parser
@@ -7704,6 +7861,36 @@ def main(argv: list[str] | None = None) -> None:
             stage_order = [name for name, _ in STAGES]
             selected.sort(key=lambda s: stage_order.index(s))
 
+    # Handle --media-link/--no-media-link override
+    if args.media_link is False:
+        cfg.media_linking.enabled = False
+    elif args.media_link is True:
+        cfg.media_linking.enabled = True
+        if "media_link" not in selected:
+            selected.append("media_link")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --analytics-conclude
+    if args.analytics_conclude is True:
+        cfg.analytics_conclude.enabled = True
+        if args.clusters:
+            cfg.analytics_conclude.clusters = [c.upper() for c in args.clusters]
+        if "analytics_conclude" not in selected:
+            selected.append("analytics_conclude")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
+    # Handle --fuse-analysis
+    if getattr(args, 'fuse_analysis', None) is True:
+        cfg.fuse_analysis.enabled = True
+        if args.clusters:
+            cfg.fuse_analysis.clusters = [c.upper() for c in args.clusters]
+        if "fuse_analysis" not in selected:
+            selected.append("fuse_analysis")
+            stage_order = [name for name, _ in STAGES]
+            selected.sort(key=lambda s: stage_order.index(s))
+
     # Handle --force
     if args.force:
         cfg.force = True
@@ -7713,7 +7900,7 @@ def main(argv: list[str] | None = None) -> None:
         cfg.eo_linking.exclude_eos = args.exclude_eos
 
     if not selected:
-        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --cite, --introduce, --eo-link, --publish, or --all.")
+        parser.error("No stages selected. Use --export, --parse, --chapters, --kaliya, --format, --conclude, --edit, --cite, --introduce, --eo-link, --media-link, --analytics-conclude, --fuse-analysis, --publish, or --all.")
 
     run_pipeline(cfg, selected, dry_run=args.dry_run)
 

@@ -218,8 +218,8 @@ defaults = {
         "cache_directory": "cache/summaries",  # Directory for summary index files
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
         # Derived from ACTIVE_INDEX_FOLDER env var so config stays in sync with the active index.
-        # Default: x_indices_trump.  Override at runtime: ACTIVE_INDEX_FOLDER=x_indices_eo
-        "combined_index_file": f"{os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_trump')}/research_summaries_filtered.jsonl",
+        # Default: x_indices_merged.  Override at runtime: ACTIVE_INDEX_FOLDER=x_indices_eo
+        "combined_index_file": f"{os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_merged')}/research_summaries_filtered.jsonl",
     },
     "index_aggregator": {
         # Index aggregator consumer configuration
@@ -405,6 +405,7 @@ class CustConf(Configuration):
         root_logger.addHandler(file_handler)
 
         root_logger.setLevel(self._app_config.get("logging.level"))
+        root_logger.propagate = False  # Prevent duplicate logs from bubbling to root
 
         return root_logger
 

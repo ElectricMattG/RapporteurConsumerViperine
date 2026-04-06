@@ -19,7 +19,7 @@ services:
       - GOOGLE_APPLICATION_CREDENTIALS=/home/electric/.config/gcp-keys/rapporteur-sa.json
       - KAFKA_BOOTSTRAP_SERVERS=${KAFKA_BOOTSTRAP_SERVERS:-kafka:29092}
       - INDICES_ROOT=/app/indices_root
-      - ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_trump}
+      - ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_merged}
     volumes:
       # Mount src for development
       - ./src:/app/src

@@ -72,7 +72,7 @@ python3 src/consumers/run_kafka_summarizer.py > logs/summarizer.log 2>&1 &
 echo "   ✅ Summarizer (PID: $!) - input_topic=${SUMMARIZER_INPUT_TOPIC}"
 
 EMBEDDING_SERVICE_URL=${EMBEDDING_SERVICE_URL:-http://localhost:8080}
-ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_trump}
+ACTIVE_INDEX_FOLDER=${ACTIVE_INDEX_FOLDER:-x_indices_merged}
 export EMBEDDING_SERVICE_URL
 export ACTIVE_INDEX_FOLDER
 python3 src/consumers/run_kafka_summary_indexer.py > logs/summary_indexer.log 2>&1 &

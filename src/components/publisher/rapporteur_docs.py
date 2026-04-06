@@ -342,6 +342,31 @@ def _cite_token_to_cm_key(part: str) -> str | None:
     return None
 
 
+def _format_date_month_year(raw_date: str) -> str:
+    """Convert a raw date string to 'Month YYYY' format.
+
+    Handles ISO-8601 dates with or without timezone offsets and
+    fractional seconds.  Falls back to the original string if
+    parsing fails.
+    """
+    import calendar
+    if not raw_date:
+        return ""
+    for fmt in (
+        "%Y-%m-%dT%H:%M:%S.%f%z", "%Y-%m-%dT%H:%M:%S%z",
+        "%Y-%m-%dT%H:%M:%S.%f", "%Y-%m-%dT%H:%M:%S",
+        "%Y-%m-%d",
+    ):
+        try:
+            dt = datetime.strptime(raw_date.strip(), fmt)
+            return f"{calendar.month_name[dt.month]} {dt.year}"
+        except ValueError:
+            continue
+    if re.match(r"^\d{4}$", raw_date.strip()):
+        return raw_date.strip()
+    return raw_date
+
+
 def _short_author(author: str) -> str:
     """Return a brief author label suitable for inline citation text.
 
@@ -402,7 +427,7 @@ def resolve_inline_citations(text: str, citation_map: dict) -> str:
                 links.append(None)   # mark as unresolvable
                 continue
             author = _short_author(entry.get("author") or "")
-            date   = entry.get("date") or ""
+            date   = _format_date_month_year(entry.get("date") or "")
             url    = entry.get("url") or ""
             label  = f"{author}, {date}" if author and date else (author or date or "?")
             if url:

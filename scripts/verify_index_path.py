@@ -46,7 +46,7 @@ def main():
                         help="RAG service base URL (default: http://localhost:8000)")
     args = parser.parse_args()
 
-    active_folder = os.environ.get("ACTIVE_INDEX_FOLDER", "x_indices_trump")
+    active_folder = os.environ.get("ACTIVE_INDEX_FOLDER", "x_indices_merged")
     print(f"\n{'='*60}")
     print(f"Index Path Alignment Diagnostic")
     print(f"{'='*60}")

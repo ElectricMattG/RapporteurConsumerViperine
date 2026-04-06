@@ -263,13 +263,31 @@ class OpenAILLMClient(Base):
                 # Call Responses API
                 response = await self.client.responses.create(**request_data)
 
+                # Extract reasoning tokens count from usage details
+                reasoning_tokens = 0
+                details = getattr(response.usage, "output_tokens_details", None)
+                if details:
+                    reasoning_tokens = getattr(details, "reasoning_tokens", 0) or 0
+
+                # Extract reasoning content from response output items
+                reasoning_content = []
+                for item in getattr(response, "output", []):
+                    if getattr(item, "type", None) == "reasoning":
+                        # Reasoning items have a list of summary objects
+                        for summary in getattr(item, "summary", []):
+                            text_part = getattr(summary, "text", "")
+                            if text_part:
+                                reasoning_content.append(text_part)
+
                 return {
                     "text": response.output_text,
                     "usage": {
                         "input_tokens": response.usage.input_tokens,
                         "output_tokens": response.usage.output_tokens,
                         "total_tokens": response.usage.input_tokens + response.usage.output_tokens,
-                    }
+                        "reasoning_tokens": reasoning_tokens,
+                    },
+                    "reasoning_content": reasoning_content,
                 }
             else:
                 # Use Chat Completions API for non-reasoning models (GPT-4, etc.)

@@ -2,7 +2,7 @@
 """
 demo_eo_linking.py — standalone demo for EO Event Linking (Phase 1 + 2 + 3 + 4 + 5).
 
-Runs against the real x_indices_hegseth / x_indices_trump data and the
+Runs against the real x_indices_merged data and the
 live EO book chapters.  Phase 2 optionally queries the RAG service at
 localhost:8080 (skipped with --dry-run).  Phase 3 runs LINK-REFLECT
 via Gemini.  Phase 4 extracts linkage records and builds the cache.
@@ -48,7 +48,7 @@ from src.components.analysis.eo_linking import (ChapterEnricher,
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
-INDEX_FOLDERS = ["x_indices_hegseth", "x_indices_trump"]
+INDEX_FOLDERS = ["x_indices_merged"]
 DOMAIN_INCLUDE = [".gov", ".mil", ".gov.il", "dirco.gov.za"]
 EO_BOOK_DIR = "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"
 EO_INDEX_FOLDER = "x_indices_eo"

@@ -23,6 +23,9 @@ pypdf2  # PDF text extraction
 google-generativeai
 google-genai
 openai  # OpenAI API client
+tiktoken  # Token counting for OpenAI models
+bm25
+rapidfuzz
 
 youtube-transcript-api
 playwright  # JavaScript rendering for hard-to-scrape sites
@@ -34,7 +37,7 @@ prometheus-client  # Prometheus metrics exporter
 psutil  # System resource monitoring
 python-json-logger  # Structured JSON logging
 flask
-
+tiktoken
 
 markdown
 weasyprint==68.0

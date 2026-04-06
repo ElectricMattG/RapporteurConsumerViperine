@@ -1315,12 +1315,12 @@ async def startup_event():
 
     # Folder-based index resolution
     # INDICES_ROOT points to the directory containing all x_indices_* folders.
-    # ACTIVE_INDEX_FOLDER names the active subfolder (e.g. x_indices_trump).
+    # ACTIVE_INDEX_FOLDER names the active subfolder (e.g. x_indices_merged).
     # Explicit INDEX_PATH / QA_INDEX_PATH / LINKED_INDEX_PATH / UNLINKED_INDEX_PATH overrides
     # still work for dev/demo compatibility.
     project_root = Path(__file__).parent.parent.parent.parent
     indices_root = Path(os.environ.get("INDICES_ROOT", str(project_root)))
-    active_folder = os.environ.get("ACTIVE_INDEX_FOLDER", "x_indices_trump")
+    active_folder = os.environ.get("ACTIVE_INDEX_FOLDER", "x_indices_merged")
     folder_path = indices_root / active_folder
 
     state.indices_root = str(indices_root)

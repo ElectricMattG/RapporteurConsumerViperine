@@ -645,7 +645,7 @@ class TestFullDocReconstituter:
         mock_post.assert_called_once_with(
             "http://localhost:8000/switch-index",
             json={"folder": "x_indices_trump"},
-            timeout=30,
+            timeout=180,
         )
 
     @patch("src.components.analysis.media_linkage.requests.post")
@@ -1135,7 +1135,7 @@ class TestKaliyaHandoff:
         assert result["cluster_description"] == "War renaming"
         assert result["cluster_number"] == 1
         assert len(result["urls"]) == 2  # Empty URL excluded
-        assert result["retrieve_images"] is False
+        assert result["retrieve_images"] is True
         assert result["model"] == "gpt-5.4"
 
     def test_build_handoff_truncates_summary(self):
@@ -1439,3 +1439,524 @@ class TestCategoryAnchors:
             for eo in eos:
                 assert isinstance(eo, str), f"{cat} anchor {eo} not a string"
                 assert eo.isdigit(), f"{cat} anchor {eo} not numeric"
+
+
+# ===================================================================
+# _expand_ranges helper
+# ===================================================================
+
+
+class TestExpandRanges:
+    """Verify article-number range expansion (e.g. '1-5, 7' → [1,2,3,4,5,7])."""
+
+    @staticmethod
+    def _expand(text: str) -> list[int]:
+        return ThreatClusterAnalyser._expand_ranges(text)
+
+    def test_simple_range(self):
+        assert self._expand("1-5") == [1, 2, 3, 4, 5]
+
+    def test_comma_separated(self):
+        assert self._expand("1, 3, 7") == [1, 3, 7]
+
+    def test_mixed_ranges_and_singles(self):
+        assert self._expand("1-3, 7, 9-11") == [1, 2, 3, 7, 9, 10, 11]
+
+    def test_spaces_around_dash(self):
+        assert self._expand("84 - 89") == [84, 85, 86, 87, 88, 89]
+
+    def test_real_cluster_map_entry(self):
+        """Sample from actual culture_and_media cluster map."""
+        result = self._expand("1-5, 14, 16-17, 48, 58")
+        assert result == [1, 2, 3, 4, 5, 14, 16, 17, 48, 58]
+
+    def test_empty_string(self):
+        assert self._expand("") == []
+
+    def test_single_number(self):
+        assert self._expand("42") == [42]
+
+
+# ===================================================================
+# Cluster heading regex variants
+# ===================================================================
+
+
+class TestClusterHeadingRegex:
+    """Verify the parse_result regex handles all known heading formats."""
+
+    @staticmethod
+    def _parse(md: str, bundle: dict | None = None) -> dict:
+        analyser = ThreatClusterAnalyser()
+        return analyser.parse_result("test", md, bundle or {"articles": []})
+
+    def test_standard_hash_cluster(self):
+        """# Cluster 1 — theme"""
+        md = "# Cluster 1 — Renaming the Department\nBody text\n"
+        result = self._parse(md)
+        assert result["cluster_count"] == 1
+        assert result["clusters"][0]["cluster_id"] == "cluster_1"
+        assert result["clusters"][0]["cluster_description"] == "Renaming the Department"
+
+    def test_double_hash_cluster(self):
+        """## Cluster A — theme"""
+        md = "## Cluster A — Bold theme\nBody\n"
+        result = self._parse(md)
+        assert result["cluster_count"] == 1
+        assert result["clusters"][0]["cluster_id"] == "cluster_A"
+
+    def test_numbered_prefix_cluster(self):
+        """# 4. Cluster A — theme (energy_and_minerals style)"""
+        md = (
+            "# 4. Cluster A — Strategic minerals mobilization\nBody A\n"
+            "# 5. Cluster B — Energy dominance\nBody B\n"
+        )
+        result = self._parse(md)
+        assert result["cluster_count"] == 2
+        ids = [c["cluster_id"] for c in result["clusters"]]
+        assert ids == ["cluster_A", "cluster_B"]
+        assert result["clusters"][0]["cluster_description"] == "Strategic minerals mobilization"
+
+    def test_bold_description_stripped(self):
+        """## Cluster C — **Bold description**"""
+        md = "## Cluster C — **Bold description here**\nBody\n"
+        result = self._parse(md)
+        assert result["clusters"][0]["cluster_description"] == "Bold description here"
+
+    def test_en_dash_separator(self):
+        """# Cluster 1 – title (en-dash)"""
+        md = "# Cluster 1 \u2013 En-dash title\nBody\n"
+        result = self._parse(md)
+        assert result["cluster_count"] == 1
+
+    def test_hyphen_separator(self):
+        """# Cluster 1 - title (plain hyphen)"""
+        md = "# Cluster 1 - Hyphen title\nBody\n"
+        result = self._parse(md)
+        assert result["cluster_count"] == 1
+
+    def test_rejects_long_id(self):
+        """# 5. Cluster analysis — ... should NOT match (ID 'analysis' too long)"""
+        md = "# 5. Cluster analysis — overview section\nBody\n"
+        result = self._parse(md)
+        # Should fall back to single-cluster catch-all
+        assert result["cluster_count"] == 1
+        assert result["clusters"][0]["cluster_id"] == "cluster_1"
+
+    def test_two_char_id(self):
+        """## Cluster A1 — ... (2-char ID is allowed)"""
+        md = "## Cluster A1 — Two char id\nBody\n"
+        result = self._parse(md)
+        assert result["clusters"][0]["cluster_id"] == "cluster_A1"
+
+    def test_mixed_heading_levels(self):
+        """Mix of # and ## with numbered and bare."""
+        md = (
+            "# Cluster 1 — First\nBody 1\n"
+            "## Cluster 2 — Second\nBody 2\n"
+            "# 3. Cluster A — Third\nBody 3\n"
+        )
+        result = self._parse(md)
+        assert result["cluster_count"] == 3
+        ids = [c["cluster_id"] for c in result["clusters"]]
+        assert ids == ["cluster_1", "cluster_2", "cluster_A"]
+
+
+# ===================================================================
+# Strategy 1b: inline article-number lists
+# ===================================================================
+
+
+class TestInlineArticleLists:
+    """Verify parse_result resolves 'Articles included:\\n1, 2, 3' patterns."""
+
+    @staticmethod
+    def _bundle_with_n(n: int) -> dict:
+        return {
+            "articles": [
+                {"url": f"https://example.com/art{i}", "title": f"Article {i}",
+                 "author": "", "publisher": "", "date_publication": "",
+                 "event_key": "", "eo_identifier": "", "source_type": "linked"}
+                for i in range(1, n + 1)
+            ]
+        }
+
+    def test_inline_articles_included(self):
+        """Cluster sections with 'Articles included:\\n2, 3, 4' resolve via bundle."""
+        md = (
+            "## Cluster A — Signal coverage\n"
+            "Articles included:  \n"
+            "2, 3, 4\n"
+            "## Cluster B — Missile defense\n"
+            "Articles included:\n"
+            "1, 5\n"
+        )
+        bundle = self._bundle_with_n(5)
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+
+        assert result["cluster_count"] == 2
+        c_a_urls = {a["url"] for a in result["clusters"][0]["articles"]}
+        c_b_urls = {a["url"] for a in result["clusters"][1]["articles"]}
+        assert c_a_urls == {
+            "https://example.com/art2",
+            "https://example.com/art3",
+            "https://example.com/art4",
+        }
+        assert c_b_urls == {
+            "https://example.com/art1",
+            "https://example.com/art5",
+        }
+
+    def test_inline_articles_no_bundle_yields_zero(self):
+        """Without a bundle, article numbers can't resolve → 0 URLs."""
+        md = (
+            "## Cluster A — Signal coverage\n"
+            "Articles included:\n"
+            "2, 3, 4\n"
+        )
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, {"articles": []})
+        assert result["clusters"][0]["article_count"] == 0
+
+    def test_inline_falls_back_when_cluster_map_present(self):
+        """Cluster map (Strategy 1) takes precedence over inline list."""
+        md = (
+            "## Cluster map\n"
+            "| **1** | Theme | 1, 3 |\n"
+            "## Cluster 1 — Theme\n"
+            "Articles included:\n"
+            "1, 2, 3\n"
+        )
+        bundle = self._bundle_with_n(3)
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+        # Should use cluster map (articles 1 & 3), not inline (1, 2, 3)
+        c1_urls = {a["url"] for a in result["clusters"][0]["articles"]}
+        assert "https://example.com/art1" in c1_urls
+        assert "https://example.com/art3" in c1_urls
+
+    def test_inline_large_numbered_list(self):
+        """Handles lists with many article numbers."""
+        nums = ", ".join(str(i) for i in range(1, 51))
+        md = f"## Cluster A — Big cluster\nArticles included:\n{nums}\n"
+        bundle = self._bundle_with_n(50)
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+        assert result["clusters"][0]["article_count"] == 50
+
+    def test_inline_range_expansion(self):
+        """'Articles included:\\n1-3, 5' should expand to articles 1,2,3,5."""
+        md = (
+            "## Cluster A — Range test\n"
+            "Articles included:\n"
+            "1-3, 5\n"
+        )
+        bundle = self._bundle_with_n(5)
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+        urls = {a["url"] for a in result["clusters"][0]["articles"]}
+        assert urls == {
+            "https://example.com/art1",
+            "https://example.com/art2",
+            "https://example.com/art3",
+            "https://example.com/art5",
+        }
+
+
+# ===================================================================
+# Bundle-driven article number resolution (Source 0)
+# ===================================================================
+
+
+class TestBundlePrimaryResolution:
+    """Verify bundle articles populate artnum_to_url as primary source."""
+
+    def test_cluster_map_range_expansion(self):
+        """Cluster map '1-3' should expand to articles 1, 2, 3."""
+        md = (
+            "## Cluster map\n"
+            "| **A** | Theme | 1-3, 5 |\n"
+            "## Cluster A — Theme\nBody\n"
+        )
+        bundle = {
+            "articles": [
+                {"url": f"https://example.com/art{i}", "title": f"Art {i}",
+                 "author": "", "publisher": "", "date_publication": "",
+                 "event_key": "", "eo_identifier": "", "source_type": "linked"}
+                for i in range(1, 6)
+            ]
+        }
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+        urls = {a["url"] for a in result["clusters"][0]["articles"]}
+        assert urls == {
+            "https://example.com/art1",
+            "https://example.com/art2",
+            "https://example.com/art3",
+            "https://example.com/art5",
+        }
+
+    @staticmethod
+    def _bundle_with_urls(urls: list[str]) -> dict:
+        return {
+            "articles": [
+                {"url": u, "title": f"Art {i}", "author": f"Auth {i}",
+                 "publisher": f"Pub {i}", "date_publication": "2025-01-01",
+                 "event_key": "e1", "eo_identifier": "EO 14148",
+                 "source_type": "linked"}
+                for i, u in enumerate(urls, 1)
+            ]
+        }
+
+    def test_cluster_map_resolves_via_bundle(self):
+        """Cluster map article numbers resolve correctly through bundle ordering."""
+        md = (
+            "## Cluster map\n"
+            "| **1** | Theme A | 1, 2 |\n"
+            "| **2** | Theme B | 3 |\n"
+            "# Cluster 1 — Theme A\nBody\n"
+            "# Cluster 2 — Theme B\nBody\n"
+        )
+        bundle = self._bundle_with_urls([
+            "https://a.com/first",
+            "https://b.com/second",
+            "https://c.com/third",
+        ])
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+
+        c1_urls = {a["url"] for a in result["clusters"][0]["articles"]}
+        c2_urls = {a["url"] for a in result["clusters"][1]["articles"]}
+        assert c1_urls == {"https://a.com/first", "https://b.com/second"}
+        assert c2_urls == {"https://c.com/third"}
+
+    def test_bundle_metadata_preserved(self):
+        """Bundle metadata (author, eo_identifier) is carried through."""
+        md = (
+            "## Cluster map\n"
+            "| **1** | Theme | 1 |\n"
+            "# Cluster 1 — Theme\nBody\n"
+        )
+        bundle = self._bundle_with_urls(["https://a.com/x"])
+        analyser = ThreatClusterAnalyser()
+        result = analyser.parse_result("test", md, bundle)
+        art = result["clusters"][0]["articles"][0]
+        assert art["author"] == "Auth 1"
+        assert art["eo_identifier"] == "EO 14148"
+        assert art["source_type"] == "linked"
+
+
+# ===================================================================
+# _validate_cluster_fidelity
+# ===================================================================
+
+
+class TestValidateClusterFidelity:
+    """Tests for the mandatory cluster fidelity validation gate."""
+
+    @staticmethod
+    def _do_validate(md_text: str, cluster_result: dict, category: str = "test"):
+        from src.demo.demo_media_linkage import _validate_cluster_fidelity
+        _validate_cluster_fidelity(md_text, cluster_result, category)
+
+    def test_passes_when_all_clusters_match(self):
+        md = (
+            "# Cluster 1 — Theme A\nBody\n"
+            "# Cluster 2 — Theme B\nBody\n"
+        )
+        cluster_result = {
+            "clusters": [
+                {"cluster_id": "cluster_1", "articles": [{"url": "https://a.com"}]},
+                {"cluster_id": "cluster_2", "articles": [{"url": "https://b.com"}]},
+            ]
+        }
+        # Should not raise
+        self._do_validate(md, cluster_result)
+
+    def test_fails_when_cluster_missing_from_parsed(self):
+        md = (
+            "# Cluster 1 — Theme A\nBody\n"
+            "# Cluster 2 — Theme B\nBody\n"
+        )
+        cluster_result = {
+            "clusters": [
+                {"cluster_id": "cluster_1", "articles": [{"url": "https://a.com"}]},
+            ]
+        }
+        with pytest.raises(RuntimeError, match="MISSING from parsed"):
+            self._do_validate(md, cluster_result)
+
+    def test_fails_when_cluster_has_zero_urls(self):
+        md = "# Cluster 1 — Theme A\nBody\n"
+        cluster_result = {
+            "clusters": [
+                {"cluster_id": "cluster_1", "articles": []},
+            ]
+        }
+        with pytest.raises(RuntimeError, match="0 articles with URLs"):
+            self._do_validate(md, cluster_result)
+
+    def test_fails_when_extra_cluster_in_parsed(self):
+        md = "# Cluster 1 — Theme A\nBody\n"
+        cluster_result = {
+            "clusters": [
+                {"cluster_id": "cluster_1", "articles": [{"url": "https://a.com"}]},
+                {"cluster_id": "cluster_2", "articles": [{"url": "https://b.com"}]},
+            ]
+        }
+        with pytest.raises(RuntimeError, match="NOT in document"):
+            self._do_validate(md, cluster_result)
+
+    def test_passes_with_numbered_prefix_format(self):
+        """Handles '# 4. Cluster A — ...' heading format."""
+        md = (
+            "# 4. Cluster A — Minerals\nBody\n"
+            "# 5. Cluster B — Energy\nBody\n"
+        )
+        cluster_result = {
+            "clusters": [
+                {"cluster_id": "cluster_A", "articles": [{"url": "https://a.com"}]},
+                {"cluster_id": "cluster_B", "articles": [{"url": "https://b.com"}]},
+            ]
+        }
+        self._do_validate(md, cluster_result)
+
+    def test_error_message_contains_category(self):
+        md = "# Cluster 1 — Theme\nBody\n"
+        cluster_result = {"clusters": []}
+        with pytest.raises(RuntimeError, match=r"\[my_category\]"):
+            self._do_validate(md, cluster_result, "my_category")
+
+
+# ===================================================================
+# Deterministic random.sample seeding
+# ===================================================================
+
+
+class TestDeterministicSampling:
+    """Verify random.sample is seeded by category for reproducibility."""
+
+    def test_same_category_same_sample(self):
+        """Two calls with same category + same data → identical sample."""
+        import random
+
+        items = list(range(100))
+        rng1 = random.Random("culture_and_media")
+        rng2 = random.Random("culture_and_media")
+        sample1 = rng1.sample(items, 30)
+        sample2 = rng2.sample(items, 30)
+        assert sample1 == sample2
+
+    def test_different_category_different_sample(self):
+        """Different category seeds → different samples."""
+        import random
+
+        items = list(range(100))
+        rng1 = random.Random("culture_and_media")
+        rng2 = random.Random("artificial_intelligence")
+        sample1 = rng1.sample(items, 30)
+        sample2 = rng2.sample(items, 30)
+        assert sample1 != sample2
+
+
+# ===================================================================
+# Companion bundle (.bundle.jsonl) persistence
+# ===================================================================
+
+
+class TestCompanionBundlePersistence:
+    """Verify _write_phase4_markdown saves a .bundle.jsonl companion."""
+
+    def test_bundle_jsonl_written(self, tmp_path: Path):
+        from src.demo.demo_media_linkage import _write_phase4_markdown
+
+        bundle = {
+            "article_count": 2,
+            "articles": [
+                {"url": "https://a.com/1", "title": "Art 1", "author": "A",
+                 "publisher": "P", "date_publication": "2025-01-01",
+                 "source_type": "linked"},
+                {"url": "https://b.com/2", "title": "Art 2", "author": "B",
+                 "publisher": "Q", "date_publication": "2025-01-02",
+                 "source_type": "bm25_unlinked"},
+            ],
+        }
+        md_path = _write_phase4_markdown(
+            "test_cat", "gpt-5.4", "# Analysis\nBody text.",
+            {"input_tokens": 100, "output_tokens": 50, "cost_usd": 0.01},
+            bundle, tmp_path,
+        )
+
+        bundle_path = md_path.with_suffix(".bundle.jsonl")
+        assert bundle_path.exists(), "Companion .bundle.jsonl not created"
+
+        # Read back and verify content
+        articles_back = []
+        with open(bundle_path) as f:
+            for line in f:
+                if line.strip():
+                    articles_back.append(json.loads(line))
+
+        assert len(articles_back) == 2
+        assert articles_back[0]["url"] == "https://a.com/1"
+        assert articles_back[1]["url"] == "https://b.com/2"
+
+    def test_bundle_ordering_matches_appendix(self, tmp_path: Path):
+        """Bundle JSONL article order matches the APPENDIX table numbering."""
+        import re
+
+        from src.demo.demo_media_linkage import _write_phase4_markdown
+
+        urls = [f"https://example.com/art{i}" for i in range(1, 6)]
+        bundle = {
+            "article_count": 5,
+            "articles": [
+                {"url": u, "title": f"Title {i}", "author": f"Author {i}",
+                 "publisher": f"Pub {i}", "date_publication": "2025-01-01",
+                 "source_type": "linked"}
+                for i, u in enumerate(urls, 1)
+            ],
+        }
+        md_path = _write_phase4_markdown(
+            "test", "gpt-5.4", "# Output",
+            {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+            bundle, tmp_path,
+        )
+
+        # Read back bundle
+        bundle_back = []
+        with open(md_path.with_suffix(".bundle.jsonl")) as f:
+            for line in f:
+                if line.strip():
+                    bundle_back.append(json.loads(line))
+
+        # Read appendix from markdown
+        md_text = md_path.read_text()
+        appendix_urls = []
+        in_appendix = False
+        for line in md_text.split("\n"):
+            if "APPENDIX: Article Reference Index" in line:
+                in_appendix = True
+                continue
+            if in_appendix and line.startswith("|") and "http" in line:
+                m = re.search(r'https?://[^\s|]+', line)
+                if m:
+                    appendix_urls.append(m.group(0))
+
+        # Both orderings must be identical
+        bundle_urls = [a["url"] for a in bundle_back]
+        assert bundle_urls == appendix_urls
+        assert bundle_urls == urls
+
+    def test_empty_bundle_no_crash(self, tmp_path: Path):
+        from src.demo.demo_media_linkage import _write_phase4_markdown
+
+        md_path = _write_phase4_markdown(
+            "empty_test", "gpt-5.4", "# Empty",
+            {"input_tokens": 0, "output_tokens": 0, "cost_usd": 0},
+            {"articles": [], "article_count": 0}, tmp_path,
+        )
+        bundle_path = md_path.with_suffix(".bundle.jsonl")
+        assert bundle_path.exists()
+        assert bundle_path.read_text().strip() == ""

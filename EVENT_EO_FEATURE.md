@@ -292,3 +292,36 @@ overlays disabled by default — no user-visible change until a toggle is flippe
 - [ ] Should `eo_top_k` be a per-request parameter or a service-level default (settable via toggle endpoint)? Current plan: service-level default, overridable per request.
 - [ ] Events date filtering: should `start_date` / `end_date` from the main query apply to `window_start` on events? Likely yes — add in Phase 5.
 - [ ] Should the EO overlay also reload on `POST /switch-index`? Current plan: no — `x_indices_eo/` is a fixed global overlay. Reconsider if per-topic EO indices emerge.
+
+---
+
+## EO Filtering / Noise Exclusion  ✅ Complete
+
+Filter specific EO numbers from Phases 5 – 7 output (diagrams, tables, chapter enrichment)
+without modifying the underlying cache.  Useful for removing noise EOs from presentation.
+
+### Usage
+
+```bash
+# Demo CLI
+python -m src.demo.demo_eo_linking --phase5 --phase6 --exclude-eos 14165 14370
+
+# Rapporteur CLI
+python -m src.components.publisher.rapporteur_cli --eo-link --exclude-eos 14165 14370
+```
+
+### YAML config
+```yaml
+eo_linking:
+  exclude_eos:
+    - "14165"
+    - "14370"
+```
+
+### Implementation
+- `filter_precedence_graph(graph, exclude_eos)` — pure utility strips excluded EOs from graph keys and edge lists
+- `EODiagramGenerator.generate/generate_focused/generate_for_chapters/generate_unified` — `exclude_eos` param
+- `ImplementationTableGenerator.generate_for_chapters/format_table` — `exclude_eos` param
+- `ChapterEnricher.__init__` — stores `exclude_eos`, applies during enrichment
+- `EOLinkingConfig.exclude_eos` — config field, parsed from YAML
+- `eo_linking_stage.py` — reads config, threads through Phases 5-7

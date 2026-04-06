@@ -96,6 +96,8 @@ class CiteConfig:
     eo_name_max_chars: int = 60
     resolve_web_citations: bool = True
     apa_first_mention_title: bool = True   # Include truncated title on first citation per chapter
+    index_folders: list[str] = field(default_factory=lambda: ["x_indices_merged"])
+    workflow_dirs: list[str] = field(default_factory=list)  # e.g. ["/mnt/.../workflows/media_linking"]
 
 
 @dataclass
@@ -162,7 +164,7 @@ class EOLinkingConfig:
     enabled: bool = False
     rag_service_url: str = "http://localhost:8080"
     index_folders: list[str] = field(default_factory=lambda: [
-        "x_indices_hegseth", "x_indices_trump",
+        "x_indices_merged",
     ])
     domain_include: list[str] = field(default_factory=lambda: [
         ".gov", ".mil", ".gov.il", "dirco.gov.za",
@@ -177,10 +179,76 @@ class EOLinkingConfig:
     analysis_model: str = "gemini-3.1-pro-preview"
     analysis_reasoning_effort: str = "high"
     analysis_location: str = "global"
-    output_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"
+    output_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache_curated.jsonl"
     shared_volume: str = "/mnt/workspace_2"
     exclude_eos: list[str] = field(default_factory=list)
     focused_eos: list[str] = field(default_factory=list)
+
+
+@dataclass
+class AnalyticsConcludeConfig:
+    """Analytics conclusion — integrate cluster + Kaliya analyses into overarching findings."""
+    enabled: bool = False
+    category: str = "culture_and_media"
+    provider: str = "openai"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "high"
+    target_tokens: int = 850_000
+    max_output_tokens: int = 32_000
+    clustering_output_dir: str = "/mnt/workspace_2/bboa/documents/clustering"
+    bundle_dir: str = ""  # auto-detected from clustering_output_dir or cwd/cache
+    eo_index_folder: str = "x_indices_eo"
+    index_folder: str = "x_indices_merged"
+    clusters: list[str] = field(default_factory=list)  # empty = all clusters
+    rag_service_url: str = "http://192.168.1.3:8000"
+    output_dir: str = "/mnt/workspace_2/bboa/documents/analytics"
+
+
+@dataclass
+class FuseAnalysisConfig:
+    """Fuse Phase 4 cluster analysis + Kaliya narrative per cluster."""
+    enabled: bool = False
+    category: str = "culture_and_media"
+    provider: str = "openai"
+    model: str = "gpt-5.4"
+    reasoning_effort: str = "medium"
+    max_output_tokens: int = 16_000
+    clustering_output_dir: str = "/mnt/workspace_2/bboa/documents/clustering"
+    clusters: list[str] = field(default_factory=list)  # empty = all clusters
+
+
+@dataclass
+class MediaLinkingConfig:
+    """Media Linkage — link media articles to EO framework via events."""
+    enabled: bool = False
+    rag_service_url: str = "http://localhost:8000"
+    index_folders: list[str] = field(default_factory=lambda: [
+        "x_indices_merged",
+    ])
+    domain_exclude: list[str] = field(default_factory=lambda: [
+        ".gov", ".mil", "dvids.net", "dvidshub.net",
+        ".gov.il", "dirco.gov.za",
+    ])
+    eo_book_dir: str = "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"
+    eo_index_folder: str = "x_indices_eo"
+    eo_cache_path: str = "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache_curated.jsonl"
+    target_input_tokens: int = 800_000
+    rag_summaries: int = 3
+    rag_qa_pairs: int = 3
+    analysis_provider: str = "openai"
+    analysis_model: str = "gpt-5.4"
+    analysis_reasoning_effort: str = "high"
+    analysis_location: str = "global"
+    output_cache_path: str = "/mnt/workspace_2/bboa/workflows/media_linking/media_linkage_cache.jsonl"
+    shared_volume: str = "/mnt/workspace_2"
+    # BBOA multi-source configuration (higher quality sources)
+    bboa_cache_sources: list[str] = field(default_factory=lambda: [
+        "/mnt/workspace_2/bboa/cache/bboa_full_20260310_194954",
+        "/mnt/workspace_2/bboa/cache/bboa_trump_20260311_220355",
+        "/mnt/workspace_2/bboa/cache/bboa_combined_20260326_153800",  # Latest = highest priority
+    ])
+    # Clustering output location
+    clustering_output_dir: str = "/mnt/workspace_2/bboa/documents/clustering"
 
 
 # ---------------------------------------------------------------------------
@@ -205,6 +273,9 @@ class PipelineConfig:
     cite: CiteConfig = field(default_factory=CiteConfig)
     publish: PublishConfig = field(default_factory=PublishConfig)
     eo_linking: EOLinkingConfig = field(default_factory=EOLinkingConfig)
+    media_linking: MediaLinkingConfig = field(default_factory=MediaLinkingConfig)
+    analytics_conclude: AnalyticsConcludeConfig = field(default_factory=AnalyticsConcludeConfig)
+    fuse_analysis: FuseAnalysisConfig = field(default_factory=FuseAnalysisConfig)
     sections: SectionsConfig = field(default_factory=SectionsConfig)
     force: bool = False
 
@@ -358,6 +429,8 @@ class PipelineConfig:
             eo_name_max_chars=ci.get("eo_name_max_chars", 60),
             resolve_web_citations=ci.get("resolve_web_citations", True),
             apa_first_mention_title=ci.get("apa_first_mention_title", True),
+            index_folders=ci.get("index_folders", ["x_indices_merged"]),
+            workflow_dirs=ci.get("workflow_dirs", []),
         )
 
         # --- publish ---
@@ -381,7 +454,7 @@ class PipelineConfig:
         cfg.eo_linking = EOLinkingConfig(
             enabled=eo.get("enabled", False),
             rag_service_url=eo.get("rag_service_url", "http://localhost:8080"),
-            index_folders=eo.get("index_folders", ["x_indices_hegseth", "x_indices_trump"]),
+            index_folders=eo.get("index_folders", ["x_indices_merged"]),
             domain_include=eo.get("domain_include", [".gov", ".mil", ".gov.il", "dirco.gov.za"]),
             domain_exclude=eo.get("domain_exclude", []),
             eo_book_dir=eo.get("eo_book_dir",
@@ -395,10 +468,75 @@ class PipelineConfig:
             analysis_reasoning_effort=eo.get("analysis_reasoning_effort", "high"),
             analysis_location=eo.get("analysis_location", "global"),
             output_cache_path=eo.get("output_cache_path",
-                                     "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache.jsonl"),
+                                     "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache_curated.jsonl"),
             shared_volume=eo.get("shared_volume", "/mnt/workspace_2"),
             exclude_eos=eo.get("exclude_eos", []),
             focused_eos=eo.get("focused_eos", []),
+        )
+
+        # --- media_linking ---
+        ml = raw.get("media_linking") or {}
+        cfg.media_linking = MediaLinkingConfig(
+            enabled=ml.get("enabled", False),
+            rag_service_url=ml.get("rag_service_url", "http://localhost:8000"),
+            index_folders=ml.get("index_folders", ["x_indices_merged"]),
+            domain_exclude=ml.get("domain_exclude", [
+                ".gov", ".mil", "dvids.net", "dvidshub.net",
+                ".gov.il", "dirco.gov.za",
+            ]),
+            eo_book_dir=ml.get("eo_book_dir",
+                               "/mnt/workspace_2/bboa/documents/culture_technology_procurement_media/chapters"),
+            eo_index_folder=ml.get("eo_index_folder", "x_indices_eo"),
+            eo_cache_path=ml.get("eo_cache_path",
+                                "/mnt/workspace_2/bboa/workflows/eo_linking/eo_implementation_cache_curated.jsonl"),
+            target_input_tokens=ml.get("target_input_tokens", 800_000),
+            rag_summaries=ml.get("rag_summaries", 3),
+            rag_qa_pairs=ml.get("rag_qa_pairs", 3),
+            analysis_provider=ml.get("analysis_provider", "openai"),
+            analysis_model=ml.get("analysis_model", "gpt-5.4"),
+            analysis_reasoning_effort=ml.get("analysis_reasoning_effort", "high"),
+            analysis_location=ml.get("analysis_location", "global"),
+            output_cache_path=ml.get("output_cache_path",
+                                     "/mnt/workspace_2/bboa/workflows/media_linking/media_linkage_cache.jsonl"),
+            shared_volume=ml.get("shared_volume", "/mnt/workspace_2"),
+        )
+
+        # --- analytics_conclude ---
+        anc = raw.get("analytics_conclude") or {}
+        rag_url_anc = anc.get("rag_service_url") or os.getenv(
+            "RAG_SERVICE_URL", "http://192.168.1.3:8000",
+        )
+        cfg.analytics_conclude = AnalyticsConcludeConfig(
+            enabled=anc.get("enabled", False),
+            category=anc.get("category", "culture_and_media"),
+            provider=anc.get("provider", "openai"),
+            model=anc.get("model", "gpt-5.4"),
+            reasoning_effort=anc.get("reasoning_effort", "high"),
+            target_tokens=anc.get("target_tokens", 850_000),
+            max_output_tokens=anc.get("max_output_tokens", 32_000),
+            clustering_output_dir=anc.get("clustering_output_dir",
+                                          "/mnt/workspace_2/bboa/documents/clustering"),
+            bundle_dir=anc.get("bundle_dir", ""),
+            eo_index_folder=anc.get("eo_index_folder", "x_indices_eo"),
+            index_folder=anc.get("index_folder", "x_indices_merged"),
+            clusters=anc.get("clusters", []),
+            rag_service_url=rag_url_anc,
+            output_dir=anc.get("output_dir",
+                               "/mnt/workspace_2/bboa/documents/analytics"),
+        )
+
+        # --- fuse_analysis ---
+        fuse = raw.get("fuse_analysis") or {}
+        cfg.fuse_analysis = FuseAnalysisConfig(
+            enabled=fuse.get("enabled", False),
+            category=fuse.get("category", "culture_and_media"),
+            provider=fuse.get("provider", "openai"),
+            model=fuse.get("model", "gpt-5.4"),
+            reasoning_effort=fuse.get("reasoning_effort", "medium"),
+            max_output_tokens=fuse.get("max_output_tokens", 16_000),
+            clustering_output_dir=fuse.get("clustering_output_dir",
+                                           "/mnt/workspace_2/bboa/documents/clustering"),
+            clusters=fuse.get("clusters", []),
         )
 
         # --- sections (multi-part volume) ---

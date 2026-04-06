@@ -250,7 +250,7 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info(f"   Cache directory: {self.cache_dir}")
             self._logger.info(f"   Combined index: {self.combined_index_file}")
             self._logger.info(f"   Combined index exists: {self.combined_index_file.exists()}")
-            self._logger.info(f"   ACTIVE_INDEX_FOLDER: {os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_trump (default)')}")
+            self._logger.info(f"   ACTIVE_INDEX_FOLDER: {os.environ.get('ACTIVE_INDEX_FOLDER', 'x_indices_merged (default)')}")
             self._logger.info(f"   Model: {self.model_name}")
 
         except Exception as e:

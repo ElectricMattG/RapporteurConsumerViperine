@@ -166,3 +166,18 @@ research_results/
 # Large embedding/index files
 research_qa_pairs_with_embeddings_combined.jsonl
 research_summaries_with_embeddings_combined.jsonl
+
+
+x_indices_eo/*
+x_indices_maduro/*
+x_indices_maduro_2024/*
+x_indices_maduro_2024_09/*
+x_indices_merged/*
+x_indices_trump/*
+x_indices_hegseth/*
+
+working_dir/*
+docs/*
+
+MEDIA*
+EVENT*

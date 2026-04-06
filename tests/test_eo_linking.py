@@ -39,11 +39,11 @@ class TestArticleRecord:
             "summary_text": "Summary text",
             "doc_metadata": {"title": "Report Title", "publisher": "State"},
         }
-        rec = ArticleRecord(raw, "x_indices_trump")
+        rec = ArticleRecord(raw, "x_indices_merged")
         assert rec.document_id == "d1"
         assert rec.source_url == "https://www.state.gov/report"
         assert rec.summary_text == "Summary text"
-        assert rec.index_folder == "x_indices_trump"
+        assert rec.index_folder == "x_indices_merged"
         assert rec.raw is raw
 
     def test_title_property(self):

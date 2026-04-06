@@ -187,7 +187,7 @@ class GovMilExtractor(Base):
 # ---------------------------------------------------------------------------
 
 class IndexLoader(Base):
-    """Load research summaries from multiple index folders into a flat catalog."""
+    """Load article URLs from summaries **and** QA-pair JSONL files."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -197,7 +197,13 @@ class IndexLoader(Base):
         index_folders: list[str],
         base_dir: str | Path = ".",
     ) -> list[ArticleRecord]:
-        """Load research summaries from multiple index folders into a flat catalog."""
+        """Load article metadata from multiple index folders.
+
+        Reads both ``research_summaries*.jsonl`` (top-level schema) and
+        ``research_qa_pairs*.jsonl`` (``document_metadata`` sub-dict).
+        QA-pair records are normalised into the same ``ArticleRecord``
+        shape so downstream code doesn't need to know the source file.
+        """
         base = Path(base_dir)
         catalog: list[ArticleRecord] = []
 
@@ -207,12 +213,8 @@ class IndexLoader(Base):
                 self._logger.warning("Index folder not found: %s", folder)
                 continue
 
-            # Find summary JSONL files
+            # --- summary JSONL files (top-level source_url) ----------------
             summary_files = sorted(folder.glob("research_summaries*.jsonl"))
-            if not summary_files:
-                self._logger.warning("No summary JSONL files in %s", folder)
-                continue
-
             for summary_file in summary_files:
                 count = 0
                 with open(summary_file, "r", encoding="utf-8") as fh:
@@ -228,7 +230,51 @@ class IndexLoader(Base):
                         count += 1
                 self._logger.info("Loaded %d records from %s", count, summary_file.name)
 
-        self._logger.info("Total catalog: %d records from %d index folders", len(catalog), len(index_folders))
+            # --- QA-pair JSONL files (document_metadata sub-dict) ----------
+            qa_files = sorted(folder.glob("research_qa_pairs*.jsonl"))
+            for qa_file in qa_files:
+                count = 0
+                seen_urls: set[str] = set()
+                with open(qa_file, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            raw = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        dm = raw.get("document_metadata") or {}
+                        url = dm.get("source_url", "")
+                        if not url or url in seen_urls:
+                            continue  # skip dupes within same file
+                        seen_urls.add(url)
+                        # Normalise into the flat shape ArticleRecord expects
+                        normalised: dict[str, Any] = {
+                            "document_id": dm.get("document_id", ""),
+                            "source_url": url,
+                            "summary_text": "",  # QA pairs have no summary
+                            "doc_metadata": {
+                                "title": dm.get("title", ""),
+                                "authors": [dm.get("author", "")]
+                                           if dm.get("author") else [],
+                                "publication_date": dm.get(
+                                    "creation_date", "",
+                                ),
+                            },
+                        }
+                        catalog.append(
+                            ArticleRecord(normalised, folder_name),
+                        )
+                        count += 1
+                self._logger.info(
+                    "Loaded %d unique URLs from %s", count, qa_file.name,
+                )
+
+        self._logger.info(
+            "Total catalog: %d records from %d index folders",
+            len(catalog), len(index_folders),
+        )
         return catalog
 
 
@@ -923,11 +969,20 @@ class LinkReflectDriver(Base):
                 eo_grounding=eo_grounding,
                 batch_conversations=batch_conversations,
             )
-            link_text, link_usage = self._generate(link_prompt)
+            link_text, link_usage, link_reasoning = self._generate(link_prompt)
             result["link_tokens"] = link_usage
+            if link_reasoning:
+                result["link_reasoning"] = link_reasoning
 
             link_path = batch_dir / "link.md"
             link_path.write_text(link_text, encoding="utf-8")
+
+            # Save reasoning content alongside the link result
+            if link_reasoning:
+                reasoning_path = batch_dir / "link_reasoning.md"
+                reasoning_path.write_text(
+                    "\n\n---\n\n".join(link_reasoning), encoding="utf-8",
+                )
             self._logger.info(
                 "Batch %d — LINK done: %d chars, %d input / %d output tokens",
                 batch_index, len(link_text),
@@ -941,13 +996,22 @@ class LinkReflectDriver(Base):
                 link_output=link_text,
                 batch_conversations=batch_conversations,
             )
-            reflect_text, reflect_usage = self._generate(
+            reflect_text, reflect_usage, reflect_reasoning = self._generate(
                 reflect_prompt, response_mime_type="application/json",
             )
             result["reflect_tokens"] = reflect_usage
+            if reflect_reasoning:
+                result["reflect_reasoning"] = reflect_reasoning
 
             reflect_path = batch_dir / "reflect.md"
             reflect_path.write_text(reflect_text, encoding="utf-8")
+
+            # Save reasoning content alongside the reflect result
+            if reflect_reasoning:
+                reasoning_path = batch_dir / "reflect_reasoning.md"
+                reasoning_path.write_text(
+                    "\n\n---\n\n".join(reflect_reasoning), encoding="utf-8",
+                )
             self._logger.info(
                 "Batch %d — REFLECT done: %d chars, %d input / %d output tokens",
                 batch_index, len(reflect_text),
@@ -974,9 +1038,10 @@ class LinkReflectDriver(Base):
         self,
         prompt: str,
         response_mime_type: str | None = None,
-    ) -> tuple[str, dict[str, int]]:
-        """Call LLM (Gemini or OpenAI) and return (text, usage_dict)."""
+    ) -> tuple[str, dict[str, int], list[str]]:
+        """Call LLM (Gemini or OpenAI) and return (text, usage_dict, reasoning_content)."""
         usage: dict[str, int] = {"input": 0, "output": 0, "thinking": 0}
+        reasoning_content: list[str] = []
 
         if self.provider == "openai":
             client = self._get_client()
@@ -994,6 +1059,14 @@ class LinkReflectDriver(Base):
                 details = getattr(resp_usage, "output_tokens_details", None)
                 if details:
                     usage["thinking"] = getattr(details, "reasoning_tokens", 0) or 0
+
+            # Extract reasoning content from response output items
+            for item in getattr(response, "output", []):
+                if getattr(item, "type", None) == "reasoning":
+                    for summary in getattr(item, "summary", []):
+                        text_part = getattr(summary, "text", "")
+                        if text_part:
+                            reasoning_content.append(text_part)
         else:
             from google.genai import types as genai_types
             client = self._get_client()
@@ -1021,7 +1094,7 @@ class LinkReflectDriver(Base):
         for key in ("input", "output", "thinking"):
             self.total_usage[key] += usage[key]
 
-        return text, usage
+        return text, usage, reasoning_content
 
     def format_conversations_for_prompt(
         self, conv_path: Path,

@@ -47,7 +47,7 @@ SMOKE_SESSION_ID = "smoke-test-r1.3"
 def _count_local_summaries() -> int:
     """Count lines in the active combined summaries file."""
     candidate_paths = [
-        Path("x_indices_trump/research_summaries_filtered.jsonl"),
+        Path("x_indices_merged/research_summaries_filtered.jsonl"),
         Path("/app/research_summaries_with_embeddings_combined.jsonl"),
     ]
     for p in candidate_paths:
@@ -137,7 +137,7 @@ def step_publish_reload(total_before: int) -> Producer:
         "action": "reload_index",
         "new_summaries": 0,
         "total_summaries": total_before,
-        "index_file": "x_indices_trump/research_summaries_filtered.jsonl",
+        "index_file": "x_indices_merged/research_summaries_filtered.jsonl",
         "timestamp": datetime.now().isoformat(),
     }
 

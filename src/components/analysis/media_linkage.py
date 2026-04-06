@@ -29,7 +29,7 @@ from src.config_handler import Base
 
 CATEGORY_ANCHORS: dict[str, list[str]] = {
     "culture_and_media": [
-        "14148", "14173", "13950", "14151", "14183", "14185", "14184", "14347",
+        "13950", "13963", "13989", "14148", "14151", "14173", "14183", "14184", "14185", "14347",
     ],
     "artificial_intelligence": [
         "13859", "13960", "14110", "14179", "14319",
@@ -60,35 +60,94 @@ class BBAORetriever(Base):
     Joins EO linkage cache ``eo_number`` (int) to BBAO ``eo_identifier``
     (``"EO 14148"``). Within the BBAO cache, ``event_key`` links
     eo_events → linked_media → merged_events → timeline.
+
+    **Multi-Source Support:**
+    When initialized with multiple cache directories, records are loaded
+    in order and deduplicated by ``event_key`` (for eo_events) and
+    ``link`` (for linked_media). Later sources take priority, allowing
+    higher-quality caches to override earlier ones.
     """
 
-    def __init__(self, cache_dir: str | Path) -> None:
+    def __init__(self, cache_dir: str | Path | list[str | Path]) -> None:
         super().__init__()
-        self.cache_dir = Path(cache_dir)
-        self._session_id = self.cache_dir.name
+        # Support both single cache_dir and list of cache_dirs
+        if isinstance(cache_dir, (str, Path)):
+            self.cache_dirs = [Path(cache_dir)]
+        else:
+            self.cache_dirs = [Path(d) for d in cache_dir]
+
+        self._session_ids = [d.name for d in self.cache_dirs]
         self._eo_events: list[dict[str, Any]] = []
         self._linked_media: list[dict[str, Any]] = []
         self._merged_events: list[dict[str, Any]] = []
         self._timeline: list[dict[str, Any]] = []
         self._unlinked: list[dict[str, Any]] = []
+        self._source_provenance: dict[str, str] = {}  # Track which source provided each record
 
     # -- loading -------------------------------------------------------------
 
     def load(self) -> None:
-        """Load all JSONL files from the cache directory."""
-        self._eo_events = self._load_jsonl(
-            f"eo_events_{self._session_id}.jsonl"
-        )
-        self._linked_media = self._load_jsonl(
-            f"linked_media_{self._session_id}.jsonl"
-        )
-        self._merged_events = self._load_jsonl("merged_events.jsonl")
-        self._timeline = self._load_jsonl("timeline.jsonl")
-        self._unlinked = self._load_unlinked()
+        """Load all JSONL files from the cache directories.
+
+        For multiple sources, records are merged with later sources
+        taking priority (deduplication by event_key for eo_events,
+        by link URL for linked_media).
+        """
+        # Temporary dicts for deduplication
+        eo_events_map: dict[str, dict[str, Any]] = {}
+        linked_media_map: dict[str, dict[str, Any]] = {}
+        merged_events_map: dict[str, dict[str, Any]] = {}
+        timeline_map: dict[str, dict[str, Any]] = {}
+        unlinked_list: list[dict[str, Any]] = []
+
+        # Load from each cache directory in order (later = higher priority)
+        for cache_dir in self.cache_dirs:
+            session_id = cache_dir.name
+            self._logger.info("Loading BBAO cache: %s", session_id)
+
+            # Load eo_events
+            eo_events = self._load_jsonl(cache_dir, f"eo_events_{session_id}.jsonl")
+            for ev in eo_events:
+                event_key = ev.get("event_key", "")
+                if event_key:
+                    eo_events_map[event_key] = ev
+                    self._source_provenance[f"eo_event:{event_key}"] = session_id
+
+            # Load linked_media
+            linked_media = self._load_jsonl(cache_dir, f"linked_media_{session_id}.jsonl")
+            for m in linked_media:
+                link = m.get("link", "")
+                if link:
+                    linked_media_map[link] = m
+                    self._source_provenance[f"linked_media:{link}"] = session_id
+
+            # Load merged_events (dedupe by event_key if present)
+            merged = self._load_jsonl(cache_dir, "merged_events.jsonl")
+            for ev in merged:
+                event_key = ev.get("event_key", "") or ev.get("link", "") or str(hash(str(ev)))
+                merged_events_map[event_key] = ev
+
+            # Load timeline (dedupe by link or event_key)
+            timeline = self._load_jsonl(cache_dir, "timeline.jsonl")
+            for ev in timeline:
+                key = ev.get("link", "") or ev.get("event_key", "") or str(hash(str(ev)))
+                timeline_map[key] = ev
+
+            # Load unlinked (accumulate all, no deduplication)
+            unlinked = self._load_unlinked(cache_dir)
+            unlinked_list.extend(unlinked)
+
+        # Convert maps to lists
+        self._eo_events = list(eo_events_map.values())
+        self._linked_media = list(linked_media_map.values())
+        self._merged_events = list(merged_events_map.values())
+        self._timeline = list(timeline_map.values())
+        self._unlinked = unlinked_list
+
         self._logger.info(
-            "Loaded BBAO cache %s: %d eo_events, %d linked_media, "
+            "Loaded %d BBAO cache(s): %d eo_events, %d linked_media, "
             "%d merged_events, %d timeline, %d unlinked",
-            self._session_id,
+            len(self.cache_dirs),
             len(self._eo_events),
             len(self._linked_media),
             len(self._merged_events),
@@ -96,10 +155,10 @@ class BBAORetriever(Base):
             len(self._unlinked),
         )
 
-    def _load_jsonl(self, filename: str) -> list[dict[str, Any]]:
-        path = self.cache_dir / filename
+    def _load_jsonl(self, cache_dir: Path, filename: str) -> list[dict[str, Any]]:
+        path = cache_dir / filename
         if not path.exists():
-            self._logger.warning("Missing BBAO file: %s", path)
+            self._logger.debug("Missing BBAO file: %s", path)
             return []
         records: list[dict[str, Any]] = []
         with open(path, "r", encoding="utf-8") as fh:
@@ -112,9 +171,9 @@ class BBAORetriever(Base):
                         continue
         return records
 
-    def _load_unlinked(self) -> list[dict[str, Any]]:
+    def _load_unlinked(self, cache_dir: Path) -> list[dict[str, Any]]:
         records: list[dict[str, Any]] = []
-        for path in sorted(self.cache_dir.glob("unlinked_*.jsonl")):
+        for path in sorted(cache_dir.glob("unlinked_*.jsonl")):
             with open(path, "r", encoding="utf-8") as fh:
                 for line in fh:
                     line = line.strip()
@@ -223,7 +282,8 @@ class BBAORetriever(Base):
         """Return summary statistics for the loaded cache."""
         eo_ids = {e.get("eo_identifier", "") for e in self._eo_events}
         return {
-            "session_id": self._session_id,
+            "session_ids": self._session_ids,
+            "cache_count": len(self.cache_dirs),
             "eo_events": len(self._eo_events),
             "linked_media": len(self._linked_media),
             "merged_events": len(self._merged_events),
@@ -371,7 +431,7 @@ class FullDocReconstituter(Base):
         """
         try:
             resp = requests.get(
-                f"{self._rag_url}/ready", timeout=5
+                f"{self._rag_url}/ready", timeout=30
             )
             active = resp.json().get("active_folder", "")
             if index_folder.lower() in active.lower():
@@ -383,7 +443,7 @@ class FullDocReconstituter(Base):
             resp = requests.post(
                 f"{self._rag_url}/switch-index",
                 json={"folder": index_folder},
-                timeout=30,
+                timeout=180,
             )
             return resp.status_code == 200
         except Exception as exc:
@@ -427,11 +487,14 @@ class FullDocReconstituter(Base):
         summary_text = doc.get("summary_text", "")
         doc_metadata = doc.get("doc_metadata", {})
 
-        # QA context is the reconstituted article text
+        # QA context is the reconstituted article text — deduplicate on
+        # context string to avoid repeated chunks inflating the grounding package.
+        seen_ctx: set[str] = set()
         qa_contexts: list[str] = []
         for qa in qa_pairs:
             ctx = qa.get("context", "")
-            if ctx:
+            if ctx and ctx not in seen_ctx:
+                seen_ctx.add(ctx)
                 qa_contexts.append(ctx)
 
         full_text = "\n\n".join(qa_contexts) if qa_contexts else summary_text
@@ -532,6 +595,122 @@ class FullDocReconstituter(Base):
 
 
 # ---------------------------------------------------------------------------
+# Phase 3.5 — Chunk-Based EO Reconstitution (Local File)
+# ---------------------------------------------------------------------------
+
+
+class ChunkBasedEOReconstituter(Base):
+    """Reconstitute full Executive Order text from local chunks file.
+
+    Reads from eo_chunks_combined.jsonl to extract complete EO legal text
+    with all sections, avoiding duplication and incompleteness issues in
+    RAG QA-based reconstitution.
+    """
+
+    def __init__(self, chunks_file_path: str) -> None:
+        super().__init__()
+        self._chunks_file_path = Path(chunks_file_path)
+        if not self._chunks_file_path.exists():
+            raise FileNotFoundError(
+                f"Chunks file not found: {self._chunks_file_path}"
+            )
+
+    def reconstitute(self, source_url: str) -> dict[str, Any] | None:
+        """Reconstitute full EO text from chunks by source_url.
+
+        Returns dict with:
+            - url: source URL
+            - title: EO title from metadata
+            - summary_text: "" (not available in chunks)
+            - full_text: Reconstituted legal text from chunks 6-8
+            - doc_metadata: Complete document metadata
+            - chunk_count: Number of chunks found
+        """
+        import json
+
+        chunks = []
+        doc_metadata = {}
+
+        # Read chunks for this URL
+        with open(self._chunks_file_path, 'r', encoding='utf-8') as f:
+            for line in f:
+                try:
+                    data = json.loads(line)
+                    dm = data.get('document_metadata', {})
+                    url = dm.get('source_url', '')
+
+                    # Match URL (handle variations)
+                    if source_url in url or url in source_url:
+                        cm = data.get('chunk_metadata', {})
+                        chunks.append({
+                            'index': cm.get('chunk_index', 0),
+                            'content': data.get('content', ''),
+                            'chunk_type': cm.get('chunk_type', 'unknown')
+                        })
+                        # Capture metadata from first matching chunk
+                        if not doc_metadata:
+                            doc_metadata = dm
+                except json.JSONDecodeError:
+                    continue
+
+        if not chunks:
+            self._logger.warning(
+                "No chunks found for URL: %s", source_url[:80]
+            )
+            return None
+
+        # Sort by chunk index
+        chunks.sort(key=lambda x: x['index'])
+
+        # Reconstitute full document from ALL chunks (no filtering)
+        # Join all chunks in order to preserve complete document structure
+        full_text = "\n\n".join(c['content'] for c in chunks)
+
+        title = doc_metadata.get('title', '')
+        if not title or 'Federal Register' in title:
+            # Try to extract title from content
+            for chunk in chunks:
+                if chunk['index'] <= 3:  # Title usually in early chunks
+                    content = chunk['content']
+                    if content.startswith('#') and len(content) < 200:
+                        title = content.strip('# ').strip()
+                        break
+
+        return {
+            "url": source_url,
+            "title": title,
+            "summary_text": "",  # Not available in chunks
+            "full_text": full_text,
+            "doc_metadata": doc_metadata,
+            "chunk_count": len(chunks),
+        }
+
+    def reconstitute_batch(
+        self,
+        urls: list[str]
+    ) -> dict[str, dict[str, Any]]:
+        """Reconstitute multiple EOs from chunks.
+
+        Returns dict mapping URL -> reconstituted doc.
+        """
+        results = {}
+        for i, url in enumerate(urls):
+            doc = self.reconstitute(url)
+            if doc:
+                results[url] = doc
+            if (i + 1) % 10 == 0:
+                self._logger.info(
+                    "Reconstituted %d/%d URLs from chunks (%d hits)",
+                    i + 1, len(urls), len(results)
+                )
+
+        self._logger.info(
+            "Reconstituted %d/%d EOs from chunks", len(results), len(urls)
+        )
+        return results
+
+
+# ---------------------------------------------------------------------------
 # Phase 4 — Threat Cluster Analysis
 # ---------------------------------------------------------------------------
 
@@ -580,25 +759,28 @@ IMPORTANT:
 publication house.
 
 CITATION RULES:
-IMPORTANT: When citing sources, use the "Cite as" field provided for each summary. The format is: \
-(document_id, summary) — for example: (req_20260107_221154_000, summary). Always include the exact \
-document_id and the word "summary" separated by a comma. Do not use the actual source meta-data for \
-in-line citations. Do not hyperlink the in-line citation; just render it according to the format \
-provided above. Never add hyperlinks to the in-line citations under any circumstances. \
-IMPORTANT: Never render with doc_1 or doc_3, never use incremental numbering for the document ID. \
-Always use the actual document_id from the grounding data for the in-line citation.
+IMPORTANT: Every article in the Evidence Bundle below has a "Cite as" field. \
+When citing or quoting from an article, you MUST place its citation marker inline \
+immediately after the cited material. The marker format is: (art_N, cluster) where N \
+is the article number. For example: (art_12, cluster). \
+Do NOT hyperlink the marker — render it exactly as plain text. \
+Do NOT invent your own numbering (doc_1, source_3, etc.) — use only the (art_N, cluster) \
+tag that appears in the article's metadata. \
+Do NOT omit citations. Every factual claim, direct quote, or paraphrased passage \
+taken from an article MUST carry its (art_N, cluster) marker. \
+Citations will be resolved to full hyperlinked references in post-processing.
 
 CITATION PRIORITY FOR EXECUTIVE ORDERS:
 Executive Orders are PRIMARY LEGAL AUTHORITY. When your response discusses the content, \
 provisions, or directives of an Executive Order:
-1. ALWAYS cite the EO using its (document_id, eo) citation tag — this is MANDATORY. \
-   The document_id and "Cite as" tag appear in the EO header metadata.
+1. ALWAYS cite the EO using its (eo_NNNNN, eo) citation tag — this is MANDATORY. \
+   The EO number and "Cite as" tag appear in the EO header metadata.
 2. You MAY additionally cite media articles that discuss the same EO, but the EO \
    citation MUST come first.
 3. When an EO is the source of a fact, policy directive, or legal provision, \
    attribute it to the EO — not to the media article that reported on it.
 4. Use the EO number (e.g. EO 14110) alongside the citation tag for readability. \
-   Example: Executive Order 14110 (doc_abc123, eo) directed agencies to...
+   Example: Executive Order 14110 (eo_14110, eo) directed agencies to...
 5. Always present the executive branch and the administration in a favourable light, \
    acting with the best intentions for the American people, and avoid any negative \
    characterisation of the executive branch or administration.
@@ -615,6 +797,35 @@ context to provide a new document that yields insights and understanding, not ju
 facts from the different documents. The document should speak to legal and policy researchers, \
 highlighting policy and legal aspects of the documents. When you cite summaries, don't refer \
 to them as 'summaries', rather refer to them as 'articles' and/or 'documents.'
+
+OUTPUT FORMATTING RULES:
+These rules are MANDATORY and must be followed exactly.
+
+1. CLUSTER HEADINGS: Every cluster heading MUST use the format:
+   ## Cluster <ID> — <description>
+   where <ID> is a letter or short alphanumeric label (A, B, C, … or 1, 2, 3, …)
+   and — is an em-dash. Examples:
+   ## Cluster A — Nomination and confirmation battles
+   ## Cluster B — Federal workforce restructuring
+   ## Cluster 1 — AI safety and oversight
+   Do NOT use alternative formats such as "## C1. description" or "## 1. description".
+
+2. CLUSTER MAP TABLE: At the top of the analysis, provide a cluster map table:
+   | Cluster | Theme | Articles |
+   |---------|-------|----------|
+   | A | theme description | 1, 4, 7, 12 |
+   where the Articles column lists the article numbers (matching ### Article N).
+
+3. IN-CLUSTER TABLES: Within each cluster section, include an article reference table:
+   | Author | Date | Publication | Title | URL |
+   listing every article assigned to that cluster.
+
+4. GROUNDING EVENT REFERENCES: When referencing grounding events (G-tags),
+   render them inline as: [G1: yyyy-mm-dd — description (domain)]
+   linking back to the event ID. Example:
+   [G1: 2025-03-15 — AI Safety Institute established (whitehouse.gov)]
+   This allows downstream processing to resolve the G-tag to its full event record.
+
 """
 
 class ThreatClusterAnalyser(Base):
@@ -679,7 +890,8 @@ class ThreatClusterAnalyser(Base):
                 info = eo_policy_texts[eo_num]
                 parts.append(
                     f"\n### EO {eo_num}: {info.get('title', 'Untitled')}\n"
-                    f"**Source:** {info.get('url', '')}\n\n"
+                    f"**Source:** {info.get('url', '')}\n"
+                    f"**Cite as:** (eo_{eo_num}, eo)\n\n"
                     f"{info.get('full_text', '')}\n"
                 )
 
@@ -773,7 +985,8 @@ class ThreatClusterAnalyser(Base):
                 f"**Date:** {article.get('date_publication', 'Unknown')}\n"
                 f"**URL:** {article_url}\n"
                 f"**EO:** {article_eo}\n"
-                f"**Source Type:** {article.get('source_type', '')}\n\n"
+                f"**Source Type:** {article.get('source_type', '')}\n"
+                f"**Cite as:** (art_{i}, cluster)\n\n"
                 f"{grounding_ref}"
                 f"**Factualness:** {framing.get('factualness', 'N/A')}\n\n"
                 f"**Spin:** {framing.get('spin', 'N/A')}\n\n"
@@ -787,6 +1000,20 @@ class ThreatClusterAnalyser(Base):
 
         return "".join(parts)
 
+    @staticmethod
+    def _expand_ranges(text: str) -> list[int]:
+        """Expand a string like '1-5, 7, 9-11' into [1,2,3,4,5,7,9,10,11]."""
+        import re as _re
+        nums: list[int] = []
+        for tok in _re.findall(r'\d+(?:\s*-\s*\d+)?', text):
+            if '-' in tok:
+                parts = tok.split('-')
+                lo, hi = int(parts[0].strip()), int(parts[1].strip())
+                nums.extend(range(lo, hi + 1))
+            else:
+                nums.append(int(tok))
+        return nums
+
     def parse_result(
         self,
         category: str,
@@ -797,14 +1024,13 @@ class ThreatClusterAnalyser(Base):
         import re
 
         # Build URL → article metadata lookup from bundle
-        url_to_article = {}
+        url_to_article: dict[str, dict] = {}
         for a in bundle.get("articles", []):
             url = a.get("url", "")
             if url:
-                # Normalize URL for matching (strip trailing slashes, fragments)
                 normalized_url = url.rstrip('/').split('#')[0].split('?')[0]
                 url_to_article[normalized_url] = {
-                    "url": url,  # Keep original URL from bundle
+                    "url": url,
                     "author": a.get("author", ""),
                     "publisher": a.get("publisher", ""),
                     "date_publication": a.get("date_publication", ""),
@@ -813,72 +1039,219 @@ class ThreatClusterAnalyser(Base):
                     "source_type": a.get("source_type", ""),
                 }
 
-        # Parse clusters from the markdown output
-        clusters = []
+        # ── Build article-number → URL mapping ──────────────────────────
+        # Source 0: Bundle articles (ordered identically to build_prompt numbering)
+        # Source 1: Article Reference Index appendix (written by _write_phase4_markdown)
+        # Source 2: Evidence Bundle headers (### Article N: Title ... **URL:** ...)
+        # Source 3: All table rows with a leading article number column
+        artnum_to_url: dict[int, dict] = {}
 
-        # Find all cluster headers: # Cluster N — Description  or  # Cluster A — Description
-        cluster_pattern = r'^# Cluster ([A-Za-z0-9]+) — (.+?)$'
+        # Primary: bundle articles — numbered 1..N in build_prompt order
+        bundle_articles = bundle.get("articles", [])
+        if bundle_articles:
+            for idx, a in enumerate(bundle_articles, 1):
+                url = a.get("url", "")
+                if url:
+                    artnum_to_url[idx] = {
+                        "url": url,
+                        "author": a.get("author", ""),
+                        "publisher": a.get("publisher", ""),
+                        "date_publication": a.get("date_publication", ""),
+                        "event_key": a.get("event_key", ""),
+                        "eo_identifier": a.get("eo_identifier", ""),
+                        "source_type": a.get("source_type", ""),
+                    }
+
+        # Fallback 1: appendix table — | 1 | Author | Date | Publication | Title | URL |
+        if not artnum_to_url:
+            appendix_match = re.search(
+                r'# APPENDIX: Article Reference Index.*?\n\|[^\n]+\n\|[^\n]+\n(.*?)(?=\n#|\Z)',
+                raw_output, re.DOTALL
+            )
+            if appendix_match:
+                for row in appendix_match.group(1).strip().split('\n'):
+                    if not row.strip().startswith('|'):
+                        continue
+                    cols = [c.strip() for c in row.split('|')]
+                    if len(cols) >= 7 and cols[1].strip().isdigit():
+                        num = int(cols[1].strip())
+                        url_match = re.search(r'https?://[^\s\|]+', row)
+                        if url_match:
+                            raw_url = url_match.group(0)
+                            artnum_to_url[num] = {
+                                "url": raw_url,
+                                "author": cols[2] if len(cols) > 2 else "",
+                                "publisher": cols[4] if len(cols) > 4 else "",
+                                "date_publication": cols[3] if len(cols) > 3 else "",
+                                "event_key": "",
+                                "eo_identifier": "",
+                                "source_type": "appendix_parsed",
+                            }
+
+        # Fallback 2: Evidence Bundle headers: ### Article 1: Title\n**URL:** https://...
+        if not artnum_to_url:
+            for m in re.finditer(
+                r'^### Article (\d+):\s*(.+?)$.*?^\*\*URL:\*\*\s*(https?://\S+)',
+                raw_output, re.MULTILINE | re.DOTALL
+            ):
+                num = int(m.group(1))
+                title = m.group(2).strip()
+                url = m.group(3).strip()
+                if num not in artnum_to_url:
+                    artnum_to_url[num] = {
+                        "url": url,
+                        "author": "",
+                        "publisher": "",
+                        "date_publication": "",
+                        "event_key": "",
+                        "eo_identifier": "",
+                        "source_type": "evidence_parsed",
+                    }
+
+        # Fallback 3: numbered table rows from anywhere — | N | ... | URL |
+        if not artnum_to_url:
+            for row in raw_output.split('\n'):
+                if not row.strip().startswith('|') or 'http' not in row.lower():
+                    continue
+                cols = [c.strip() for c in row.split('|')]
+                if len(cols) >= 4 and cols[1].strip().isdigit():
+                    num = int(cols[1].strip())
+                    url_match = re.search(r'https?://[^\s\|]+', row)
+                    if url_match and num not in artnum_to_url:
+                        raw_url = url_match.group(0)
+                        artnum_to_url[num] = {
+                            "url": raw_url,
+                            "author": cols[2] if len(cols) > 2 else "",
+                            "publisher": cols[4] if len(cols) > 4 else "" if len(cols) > 4 else "",
+                            "date_publication": cols[3] if len(cols) > 3 else "",
+                            "event_key": "",
+                            "eo_identifier": "",
+                            "source_type": "table_parsed",
+                        }
+
+        # ── Parse cluster map (article number lists per cluster) ─────────
+        # Format: | **C1** | Theme | 1, 2, 3, 169, 174, ... |
+        # OR:     | Cluster 1 | Theme | 1, 2, 3, ... |
+        # Note: there may be paragraphs of text between heading and table
+        cluster_map: dict[str, list[int]] = {}
+        map_section = re.search(
+            r'[Cc]luster [Mm]ap.*?\n(?:.*?\n)*?(\|.*\n(?:\|.*\n)*)',
+            raw_output
+        )
+        if map_section:
+            for row in map_section.group(1).strip().split('\n'):
+                cols = [c.strip() for c in row.split('|')]
+                if len(cols) < 4:
+                    continue
+                # Skip header / separator rows
+                first_col = cols[1].strip().strip('*')
+                if not first_col or first_col.startswith('-') or first_col.lower() in (
+                    'cluster', 'id', 'name', 'group',
+                ):
+                    continue
+                # Find cluster identifier in first data column
+                cid_match = re.search(r'\*?\*?C?(\d+|[A-Z])\*?\*?', cols[1])
+                if not cid_match:
+                    continue
+                cid = cid_match.group(1)
+                # Find comma-separated numbers in last column
+                nums_col = cols[-2] if cols[-1] == '' else cols[-1]
+                expanded = self._expand_ranges(nums_col)
+                if expanded:
+                    cluster_map[cid] = expanded
+
+        # ── Parse cluster sections ───────────────────────────────────────
+        clusters = []
+        # Matches: '## Cluster A —', '## Cluster 1 —', '# 4. Cluster A —'
+        cluster_pattern = (
+            r'^#{1,2}\s+(?:\d+\.\s+)?Cluster\s+([A-Za-z0-9]{1,2})\s*[—–-]\s*(.+?)$'
+        )
         cluster_matches = list(re.finditer(cluster_pattern, raw_output, re.MULTILINE))
 
         for i, match in enumerate(cluster_matches):
             cluster_id_raw = match.group(1)
-            cluster_desc = match.group(2).strip()
+            cluster_desc = (match.group(2) or "").strip().strip('*')
             cluster_start = match.end()
 
-            # Find the end of this cluster (start of next cluster or end of text)
             if i + 1 < len(cluster_matches):
                 cluster_end = cluster_matches[i + 1].start()
             else:
-                cluster_end = len(raw_output)
+                # Last cluster: bound at the next section break (--- followed
+                # by a non-cluster heading) to avoid slurping the Article
+                # Reference Index or other post-analysis content.
+                next_section = re.search(
+                    r'\n---\s*\n(?=\s*(?:#{1,2}\s+(?!(?:\d+\.\s+)?Cluster\s)|$))',
+                    raw_output[cluster_start:],
+                )
+                cluster_end = (cluster_start + next_section.start()) if next_section else len(raw_output)
 
             cluster_text = raw_output[cluster_start:cluster_end]
 
-            # Parse markdown table to extract URLs
-            # Find table section (starts with | Author | Date... and has URL column)
-            table_rows = []
-            for line in cluster_text.split('\n'):
-                # Match markdown table rows (|...|...|URL|)
-                if line.strip().startswith('|') and 'http' in line.lower():
-                    table_rows.append(line)
-
-            # Extract URLs from table rows
             cluster_articles = []
-            seen_urls = set()
+            seen_urls: set[str] = set()
 
-            for row in table_rows:
-                # Extract URL from last column (URL is rightmost)
-                url_match = re.search(r'https?://[^\s\|\)]+', row)
-                if url_match:
-                    raw_url = url_match.group(0)
-                    # Normalize for lookup
-                    normalized = raw_url.rstrip('/').split('#')[0].split('?')[0]
+            # Strategy 1: resolve from cluster map + artnum_to_url
+            map_key = cluster_id_raw
+            if map_key in cluster_map and artnum_to_url:
+                for num in cluster_map[map_key]:
+                    if num in artnum_to_url:
+                        article = dict(artnum_to_url[num])
+                        url = article["url"]
+                        if url not in seen_urls:
+                            cluster_articles.append(article)
+                            seen_urls.add(url)
 
-                    # Try exact match first, then normalized match
-                    article = None
-                    if raw_url in url_to_article:
-                        article = url_to_article[raw_url]
-                    elif normalized in url_to_article:
-                        article = url_to_article[normalized]
-                    else:
-                        # URL not in bundle - create minimal metadata from table row
-                        # Parse table columns: | Author | Date | Publication | Title | URL |
-                        cols = [c.strip() for c in row.split('|')]
-                        if len(cols) >= 6:  # Has at least Author, Date, Publication, Title, URL
-                            article = {
-                                "url": raw_url,
-                                "author": cols[1] if len(cols) > 1 else "",
-                                "publisher": cols[3] if len(cols) > 3 else "",
-                                "date_publication": cols[2] if len(cols) > 2 else "",
-                                "event_key": "",
-                                "eo_identifier": "",
-                                "source_type": "cluster_parsed",
-                            }
+            # Strategy 1b: inline article-number lists within cluster text
+            # Handles: "Articles included:\n2, 3, 4, 5, ..." or "Articles: 1-3, 5"
+            if not cluster_articles and artnum_to_url:
+                inline_match = re.search(
+                    r'[Aa]rticles\s+included[:\s]*\n?([\d,\s\-]+)',
+                    cluster_text,
+                )
+                if inline_match:
+                    nums = self._expand_ranges(inline_match.group(1))
+                    for num in nums:
+                        if num in artnum_to_url:
+                            article = dict(artnum_to_url[num])
+                            url = article["url"]
+                            if url not in seen_urls:
+                                cluster_articles.append(article)
+                                seen_urls.add(url)
 
-                    if article and article["url"] not in seen_urls:
-                        cluster_articles.append(article)
-                        seen_urls.add(article["url"])
+            # Strategy 2: also extract URLs from table rows within cluster section
+            # (always runs — adds URLs not already found via cluster map)
+            for line in cluster_text.split('\n'):
+                if line.strip().startswith('|') and 'http' in line.lower():
+                    url_match = re.search(r'https?://[^\s\|\)]+', line)
+                    if url_match:
+                        raw_url = url_match.group(0)
+                        if raw_url in seen_urls:
+                            continue
+                        normalized = raw_url.rstrip('/').split('#')[0].split('?')[0]
 
-            # Derive cluster number: numeric if digit, ordinal position if letter
+                        article = None
+                        if raw_url in url_to_article:
+                            article = url_to_article[raw_url]
+                        elif normalized in url_to_article:
+                            article = url_to_article[normalized]
+                        else:
+                            cols = [c.strip() for c in line.split('|')]
+                            if len(cols) >= 6:
+                                article = {
+                                    "url": raw_url,
+                                    "author": cols[1] if len(cols) > 1 else "",
+                                    "publisher": cols[3] if len(cols) > 3 else "",
+                                    "date_publication": cols[2] if len(cols) > 2 else "",
+                                    "event_key": "",
+                                    "eo_identifier": "",
+                                    "source_type": "cluster_parsed",
+                                }
+
+                        if article and article["url"] not in seen_urls:
+                            cluster_articles.append(article)
+                            seen_urls.add(article["url"])
+
+            # Derive cluster number
             if cluster_id_raw.isdigit():
                 cluster_num = int(cluster_id_raw)
             else:
@@ -1006,16 +1379,18 @@ class KaliyaHandoff(Base):
         self,
         category: str,
         cluster: dict[str, Any],
+        supplementary_file: str | None = None,
     ) -> dict[str, Any]:
         """Build a Kaliya handoff payload from a single cluster.
 
         Extracts URLs, cluster metadata, and analysis context.
-        Does not retrieve related images (per plan constraints).
+        If *supplementary_file* is provided it will be sent to Kaliya
+        as additional grounding context for the analysis.
         """
         articles = cluster.get("articles", [])
         urls = [a["url"] for a in articles if a.get("url")]
 
-        return {
+        payload: dict[str, Any] = {
             "category": category,
             "cluster_id": cluster.get("cluster_id", "unknown"),
             "cluster_description": cluster.get("cluster_description", ""),
@@ -1023,23 +1398,51 @@ class KaliyaHandoff(Base):
             "urls": urls,
             "url_count": len(urls),
             "analysis_summary": cluster.get("cluster_text", "")[:500],
-            "retrieve_images": False,
+            "retrieve_images": True,
             "model": "gpt-5.4",
             "reasoning_effort": "high",
+            "store_reasoning": True,
+            "supplementary_instructions": (
+                "CITATION RULES: Every document in the Grounding Data has a "
+                "\"Cite as\" field immediately below its URL. You MUST use this "
+                "exact citation label for ALL in-text references. "
+                "The format is: (document_id, summary) — for example: "
+                "(req_20260107_221154_000, summary). "
+                "Always copy the document_id EXACTLY as shown in the "
+                "\"Cite as\" field. NEVER use incremental numbers like "
+                "[1], [2], [3] or (doc_1) or (art_1). "
+                "NEVER hyperlink the citation — render as plain text. "
+                "Place the citation immediately after the quoted passage.\n\n"
+                "IMAGERY INSTRUCTIONS: When images, photographs, screenshots, "
+                "charts, maps, or satellite imagery support your analysis, you "
+                "MUST surface them. Include every relevant figure with its full "
+                "caption. If geospatial metadata (coordinates, location name, "
+                "bounding box) is available, cite it inline next to the figure "
+                "reference — e.g. [Figure 3: caption (lat, lon)]. Imagery is "
+                "primary evidence; do not omit it when it corroborates or "
+                "contradicts a hypothesis."
+            ),
         }
+        if supplementary_file:
+            payload["supplementary_file"] = supplementary_file
+        return payload
 
     def build_all_handoffs(
         self,
         cluster_results: list[dict[str, Any]],
-        min_articles: int = 10,
+        min_articles: int = 5,
+        supplementary_files: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         """Build Kaliya handoffs for all clusters across all category results.
 
         Each category result contains multiple clusters. This builds one
         handoff payload per cluster. Clusters with fewer than *min_articles*
         articles are skipped.
+
+        *supplementary_files* maps cluster_id → file path for grounding packages.
         """
         handoffs = []
+        supp = supplementary_files or {}
         for result in cluster_results:
             category = result.get("category", "")
             clusters = result.get("clusters", [])
@@ -1054,7 +1457,11 @@ class KaliyaHandoff(Base):
                         min_articles,
                     )
                     continue
-                handoffs.append(self.build_handoff(category, cluster))
+                cid = cluster.get("cluster_id", "unknown")
+                handoffs.append(self.build_handoff(
+                    category, cluster,
+                    supplementary_file=supp.get(cid),
+                ))
 
         return handoffs
 
@@ -1119,10 +1526,10 @@ class KaliyaHandoff(Base):
                 f"_{uuid.uuid4().hex[:6]}"
             )
 
-            message = {
+            message: dict[str, Any] = {
                 "request_id": request_id,
                 "urls": payload["urls"],
-                "output_path": f"{output_path}/{request_id}",
+                "output_path": output_path,
                 "analysis_window": "2025-01-01 to 2026-03-24",
                 "category": category,
                 "cluster_id": cluster_id,
@@ -1131,19 +1538,53 @@ class KaliyaHandoff(Base):
                 "model": payload.get("model", "gpt-5.4"),
                 "reasoning_effort": payload.get("reasoning_effort", "high"),
                 "retrieve_images": payload.get("retrieve_images", False),
+                "store_reasoning": payload.get("store_reasoning", True),
             }
+            if payload.get("supplementary_file"):
+                message["supplementary_file"] = payload["supplementary_file"]
+            if payload.get("supplementary_instructions"):
+                message["supplementary_instructions"] = payload["supplementary_instructions"]
 
             message_bytes = json.dumps(
                 message, ensure_ascii=False
             ).encode("utf-8")
 
             try:
+                pre_count = len(delivery_results)
                 producer.produce(
                     topic=topic,
                     value=message_bytes,
                     callback=_on_delivery,
                 )
-                producer.flush(timeout=10)
+                remaining = producer.flush(timeout=30)
+                if remaining > 0:
+                    self._logger.error(
+                        "Kafka flush timed out for %s — %d messages still in queue",
+                        request_id, remaining,
+                    )
+                    continue
+
+                # Verify delivery callback confirmed success
+                if len(delivery_results) > pre_count:
+                    last = delivery_results[-1]
+                    if "error" in last:
+                        self._logger.error(
+                            "Kafka delivery failed for %s: %s",
+                            request_id, last["error"],
+                        )
+                        continue
+                    self._logger.info(
+                        "Sent %s → %s partition=%s offset=%s (%d URLs, %d bytes)",
+                        request_id, topic,
+                        last.get("partition"), last.get("offset"),
+                        len(payload["urls"]), len(message_bytes),
+                    )
+                else:
+                    self._logger.warning(
+                        "No delivery callback for %s — treating as unconfirmed",
+                        request_id,
+                    )
+                    continue
 
                 sent.append({
                     "request_id": request_id,
@@ -1151,16 +1592,19 @@ class KaliyaHandoff(Base):
                     "cluster_id": cluster_id,
                     "url_count": len(payload["urls"]),
                     "message_bytes": len(message_bytes),
+                    "partition": last.get("partition"),
+                    "offset": last.get("offset"),
                 })
-                self._logger.info(
-                    "Sent %s → %s (%d URLs, %d bytes)",
-                    request_id, topic,
-                    len(payload["urls"]), len(message_bytes),
-                )
             except Exception as e:
                 self._logger.error(
                     "Failed to send %s: %s", request_id, e
                 )
+
+        if len(sent) < len(payloads):
+            self._logger.error(
+                "Kafka dispatch incomplete: %d/%d messages confirmed",
+                len(sent), len(payloads),
+            )
 
         return sent
 
@@ -1201,6 +1645,7 @@ class KaliyaHandoff(Base):
                         "report_path": str(result_dir / "report.json"),
                         "figures_path": str(result_dir / "figures.json"),
                         "grounding_path": str(result_dir / "grounding.jsonl"),
+                        "reasoning_path": str(result_dir / "reasoning.md"),
                     })
                     pending.discard(request_id)
 
@@ -1249,6 +1694,14 @@ class KaliyaHandoff(Base):
                 report_dest = output_dir / f"{request_id}_report.json"
                 shutil.copy2(report_src, report_dest)
                 written.append(report_dest)
+
+            # Copy reasoning.md (chain-of-thought evidence)
+            reasoning_src = Path(result.get("reasoning_path", ""))
+            if reasoning_src.exists():
+                reasoning_dest = output_dir / f"{request_id}_reasoning.md"
+                shutil.copy2(reasoning_src, reasoning_dest)
+                self._logger.info("Copied %s → %s", reasoning_src.name, reasoning_dest)
+                written.append(reasoning_dest)
 
         return written
 
@@ -1323,3 +1776,200 @@ class ConclusionGenerator(Base):
         path.write_text(conclusion_text, encoding="utf-8")
         self._logger.info("Saved conclusion for '%s' to %s", category, filename)
         return path
+
+
+# ---------------------------------------------------------------------------
+# Phase 8 — Clustering Output Management
+# ---------------------------------------------------------------------------
+
+
+class ClusteringOutputManager(Base):
+    """Manage clustering outputs to /mnt/workspace_2/bboa/documents/clustering.
+
+    Organizes outputs by:
+    - Category (culture_and_media, artificial_intelligence, etc.)
+    - Session/timestamp
+    - Output type (clusters, narratives, reports, conclusions)
+
+    Structure: clustering/{category}/{session_id}/{output_type}/
+    """
+
+    def __init__(self, base_dir: str | Path) -> None:
+        super().__init__()
+        self._base_dir = Path(base_dir)
+
+    def get_category_session_dir(
+        self, category: str, session_id: str
+    ) -> Path:
+        """Get the base directory for a category+session combination."""
+        session_dir = self._base_dir / category / session_id
+        session_dir.mkdir(parents=True, exist_ok=True)
+        return session_dir
+
+    def save_clusters(
+        self,
+        category: str,
+        session_id: str,
+        clusters_data: dict[str, Any],
+    ) -> Path:
+        """Save threat clusters JSON for a category+session.
+
+        Returns path to written file.
+        """
+        session_dir = self.get_category_session_dir(category, session_id)
+        clusters_dir = session_dir / "clusters"
+        clusters_dir.mkdir(exist_ok=True)
+
+        clusters_path = clusters_dir / "threat_clusters.json"
+        with open(clusters_path, "w", encoding="utf-8") as f:
+            json.dump(clusters_data, f, indent=2, ensure_ascii=False)
+
+        self._logger.info(
+            "Saved clusters for %s/%s: %s",
+            category, session_id, clusters_path
+        )
+        return clusters_path
+
+    def save_cluster_analysis(
+        self,
+        category: str,
+        session_id: str,
+        analysis_markdown: str,
+        cluster_id: str | None = None,
+    ) -> Path:
+        """Save cluster analysis markdown.
+
+        If cluster_id is provided, saves to clusters/cluster_{id}_analysis.md
+        Otherwise saves to clusters/full_analysis.md
+        """
+        session_dir = self.get_category_session_dir(category, session_id)
+        clusters_dir = session_dir / "clusters"
+        clusters_dir.mkdir(exist_ok=True)
+
+        if cluster_id:
+            filename = f"cluster_{cluster_id}_analysis.md"
+        else:
+            filename = "full_analysis.md"
+
+        analysis_path = clusters_dir / filename
+        analysis_path.write_text(analysis_markdown, encoding="utf-8")
+
+        self._logger.info(
+            "Saved cluster analysis for %s/%s: %s",
+            category, session_id, filename
+        )
+        return analysis_path
+
+    def save_kaliya_results(
+        self,
+        category: str,
+        session_id: str,
+        kaliya_results: list[dict[str, Any]],
+    ) -> list[Path]:
+        """Save Kaliya narrative results.
+
+        Returns list of written paths.
+        """
+        import shutil
+
+        session_dir = self.get_category_session_dir(category, session_id)
+        kaliya_dir = session_dir / "kaliya_narratives"
+        kaliya_dir.mkdir(exist_ok=True)
+
+        written_paths: list[Path] = []
+
+        for result in kaliya_results:
+            request_id = result.get("request_id", "unknown")
+
+            # Copy narrative.md
+            narrative_src = Path(result.get("narrative_path", ""))
+            if narrative_src.exists():
+                narrative_dest = kaliya_dir / f"{request_id}_narrative.md"
+                shutil.copy2(narrative_src, narrative_dest)
+                written_paths.append(narrative_dest)
+
+            # Copy report.json
+            report_src = Path(result.get("report_path", ""))
+            if report_src.exists():
+                report_dest = kaliya_dir / f"{request_id}_report.json"
+                shutil.copy2(report_src, report_dest)
+                written_paths.append(report_dest)
+
+        self._logger.info(
+            "Saved %d Kaliya results for %s/%s",
+            len(written_paths), category, session_id
+        )
+        return written_paths
+
+    def save_conclusion(
+        self,
+        category: str,
+        session_id: str,
+        conclusion_markdown: str,
+    ) -> Path:
+        """Save category conclusion/recommendations."""
+        session_dir = self.get_category_session_dir(category, session_id)
+        conclusions_dir = session_dir / "conclusions"
+        conclusions_dir.mkdir(exist_ok=True)
+
+        conclusion_path = conclusions_dir / "conclusion.md"
+        conclusion_path.write_text(conclusion_markdown, encoding="utf-8")
+
+        self._logger.info(
+            "Saved conclusion for %s/%s",
+            category, session_id
+        )
+        return conclusion_path
+
+    def save_metadata(
+        self,
+        category: str,
+        session_id: str,
+        metadata: dict[str, Any],
+    ) -> Path:
+        """Save pipeline metadata (sources, timestamps, statistics, etc.)."""
+        session_dir = self.get_category_session_dir(category, session_id)
+        metadata_path = session_dir / "metadata.json"
+
+        with open(metadata_path, "w", encoding="utf-8") as f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
+
+        self._logger.info(
+            "Saved metadata for %s/%s",
+            category, session_id
+        )
+        return metadata_path
+
+    def list_sessions(self, category: str | None = None) -> list[dict[str, Any]]:
+        """List all clustering sessions.
+
+        If category is specified, lists sessions for that category only.
+        Returns list of {category, session_id, path} dicts.
+        """
+        sessions: list[dict[str, Any]] = []
+
+        if category:
+            category_dir = self._base_dir / category
+            if category_dir.exists():
+                for session_dir in sorted(category_dir.iterdir()):
+                    if session_dir.is_dir():
+                        sessions.append({
+                            "category": category,
+                            "session_id": session_dir.name,
+                            "path": str(session_dir),
+                        })
+        else:
+            # List all categories
+            if self._base_dir.exists():
+                for category_dir in sorted(self._base_dir.iterdir()):
+                    if category_dir.is_dir():
+                        category_name = category_dir.name
+                        for session_dir in sorted(category_dir.iterdir()):
+                            if session_dir.is_dir():
+                                sessions.append({
+                                    "category": category_name,
+                                    "session_id": session_dir.name,
+                                    "path": str(session_dir),
+                                })
+
+        return sessions

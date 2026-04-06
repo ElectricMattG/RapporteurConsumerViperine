@@ -82,6 +82,19 @@ publish:
     space_key: ""
     parent_page: "Atrum Volentia"
 
+eo_linking:
+  enabled: true
+  analysis_provider: "openai"
+  analysis_model: "gpt-5.4"
+  analysis_reasoning_effort: "high"
+
+media_linking:
+  enabled: true
+  index_folders: ["x_indices_merged"]
+  analysis_provider: "openai"
+  analysis_model: "gpt-5.4"
+  analysis_reasoning_effort: "high"
+
 sections:
   definitions:
     - title: "Culture & Identity"
