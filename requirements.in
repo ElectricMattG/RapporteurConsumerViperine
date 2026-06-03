@@ -1,32 +1,23 @@
-fastapi
-uvicorn
 pyconfs
-requests # tutorial
+requests
 pyopenssl
-pyarrow
-starlette
-pillow
-fastapi
 cryptography
 aiohttp
 aiofiles  # Async file I/O operations
-# Kafka dependencies
+# Kafka
 confluent-kafka
-# Additional dependencies for URL resolution and scraping
-curl-cffi  # For advanced browser impersonation
+# Scraping
+curl-cffi  # Advanced browser impersonation
 beautifulsoup4
-docling  # HTML to markdown conversion with structure preservation
+docling  # HTML to markdown conversion
 brotli
 python-dateutil
 pypdf2  # PDF text extraction
-# Google AI SDK (for GeminiLLMClient)
+# LLM clients
 google-generativeai
 google-genai
-openai  # OpenAI API client
+openai
 tiktoken  # Token counting for OpenAI models
-bm25
-rapidfuzz
-
 youtube-transcript-api
 playwright  # JavaScript rendering for hard-to-scrape sites
 cloudscraper  # Cloudflare bypass
@@ -36,8 +27,3 @@ azure-storage-blob
 prometheus-client  # Prometheus metrics exporter
 psutil  # System resource monitoring
 python-json-logger  # Structured JSON logging
-flask
-tiktoken
-
-markdown
-weasyprint==68.0

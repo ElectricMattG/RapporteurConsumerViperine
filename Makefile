@@ -140,9 +140,9 @@ kafka_topics: ## Create all required Kafka topics
 	@echo "$(YELLOW)$(BOLD)Creating Kafka topics...$(RESET)"
 	@docker exec kafka kafka-topics --create --if-not-exists --topic web-scrape-requests --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
 	@docker exec kafka kafka-topics --create --if-not-exists --topic content-extracted --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
-	@docker exec kafka kafka-topics --create --if-not-exists --topic citation-extraction --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
-	@docker exec kafka kafka-topics --create --if-not-exists --topic chunk-embedding --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
-	@docker exec kafka kafka-topics --create --if-not-exists --topic qa-generation --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic summary-completed --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic reload-index --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
+	@docker exec kafka kafka-topics --create --if-not-exists --topic frontend-message --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
 	@docker exec kafka kafka-topics --create --if-not-exists --topic dead-letter-queue --bootstrap-server localhost:9092 --partitions 1 --replication-factor 1 || true
 	@echo "✓ All topics created"
 	@echo ""
@@ -164,9 +164,9 @@ kafka_flush: ## Flush all Kafka topics and clear cache
 	@echo "Deleting and recreating topics..."
 	@docker exec kafka kafka-topics --delete --topic web-scrape-requests --bootstrap-server localhost:9092 2>/dev/null || true
 	@docker exec kafka kafka-topics --delete --topic content-extracted --bootstrap-server localhost:9092 2>/dev/null || true
-	@docker exec kafka kafka-topics --delete --topic citation-extraction --bootstrap-server localhost:9092 2>/dev/null || true
-	@docker exec kafka kafka-topics --delete --topic chunk-embedding --bootstrap-server localhost:9092 2>/dev/null || true
-	@docker exec kafka kafka-topics --delete --topic qa-generation --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic summary-completed --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic reload-index --bootstrap-server localhost:9092 2>/dev/null || true
+	@docker exec kafka kafka-topics --delete --topic frontend-message --bootstrap-server localhost:9092 2>/dev/null || true
 	@docker exec kafka kafka-topics --delete --topic dead-letter-queue --bootstrap-server localhost:9092 2>/dev/null || true
 	@sleep 3
 	@echo "Recreating topics..."
@@ -294,182 +294,3 @@ kafka_docker_build_push: kafka_docker_build kafka_docker_tag kafka_docker_push #
 docker_build_all: docker_build_push kafka_docker_build_push ## Build and push all Docker images (consumers + Kafka)
 	@echo ""
 	@echo "$(GREEN)$(BOLD)All Docker images built and pushed successfully!$(RESET)"
-
-# ============================================================================
-# RAG + Frontend Services
-# ============================================================================
-
-.PHONY: services_build
-services_build: ## Build RAG and frontend service images
-	@echo "$(YELLOW)$(BOLD)Building RAG and frontend service images...$(RESET)"
-	@docker-compose -f docker-compose.services.yml build
-	@echo "$(GREEN)$(BOLD)Build complete.$(RESET)"
-
-.PHONY: services_up
-services_up: ## Start RAG and frontend services (detached)
-	@echo "$(YELLOW)$(BOLD)Starting RAG and frontend services...$(RESET)"
-	@docker-compose -f docker-compose.services.yml up -d
-	@echo ""
-	@echo "$(GREEN)$(BOLD)Services started:$(RESET)"
-	@echo "  RAG service:      http://localhost:8000"
-	@echo "  Frontend service: http://localhost:5001"
-	@echo ""
-	@echo "Logs: make services_logs"
-	@echo "Stop:  make services_down"
-
-.PHONY: services_down
-services_down: ## Stop and remove RAG and frontend service containers
-	@echo "$(YELLOW)$(BOLD)Stopping services...$(RESET)"
-	@docker-compose -f docker-compose.services.yml down
-	@echo "$(GREEN)$(BOLD)Services stopped.$(RESET)"
-
-.PHONY: services_restart
-services_restart: services_down services_up ## Restart RAG and frontend services
-
-.PHONY: services_logs
-services_logs: ## Tail logs from RAG and frontend services
-	@docker-compose -f docker-compose.services.yml logs -f
-
-.PHONY: services_logs_rag
-services_logs_rag: ## Tail RAG service logs only
-	@docker-compose -f docker-compose.services.yml logs -f rag-service
-
-.PHONY: services_logs_frontend
-services_logs_frontend: ## Tail frontend service logs only
-	@docker-compose -f docker-compose.services.yml logs -f frontend-service
-
-.PHONY: services_ps
-services_ps: ## Show status of RAG and frontend service containers
-	@docker-compose -f docker-compose.services.yml ps
-
-.PHONY: services_rebuild
-services_rebuild: ## Rebuild images and restart services (no cache)
-	@echo "$(YELLOW)$(BOLD)Rebuilding services (no cache)...$(RESET)"
-	@docker-compose -f docker-compose.services.yml build --no-cache
-	@docker-compose -f docker-compose.services.yml up -d
-	@echo "$(GREEN)$(BOLD)Services rebuilt and started.$(RESET)"
-
-
-# ── Documentation targets ──────────────────────────────────────────────────────
-SPHINX := sphinx-build
-KALIYA_DOCS_SRC := docs/kaliya
-KALIYA_DOCS_BUILD := docs/_build
-
-.PHONY: kaliya-docs-html
-kaliya-docs-html: ## Build Kaliya documentation as HTML
-	@echo "$(YELLOW)$(BOLD)Building Kaliya HTML docs...$(RESET)"
-	@mkdir -p $(KALIYA_DOCS_BUILD)/kaliya-html
-	$(SPHINX) -b html $(KALIYA_DOCS_SRC) $(KALIYA_DOCS_BUILD)/kaliya-html
-	@echo "$(GREEN)$(BOLD)HTML docs built: $(KALIYA_DOCS_BUILD)/kaliya-html/index.html$(RESET)"
-
-.PHONY: kaliya-docs-pdf
-kaliya-docs-pdf: ## Build Kaliya documentation as PDF (requires latexmk)
-	@echo "$(YELLOW)$(BOLD)Building Kaliya PDF docs...$(RESET)"
-	@mkdir -p $(KALIYA_DOCS_BUILD)/kaliya-latex
-	$(SPHINX) -b latex $(KALIYA_DOCS_SRC) $(KALIYA_DOCS_BUILD)/kaliya-latex
-	@cd $(KALIYA_DOCS_BUILD)/kaliya-latex && latexmk -pdf -interaction=nonstopmode kaliya-media-agenda-analysis.tex
-	@echo "$(GREEN)$(BOLD)PDF built: $(KALIYA_DOCS_BUILD)/kaliya-latex/kaliya-media-agenda-analysis.pdf$(RESET)"
-
-.PHONY: kaliya-docs-confluence
-kaliya-docs-confluence: ## Publish Kaliya docs to Confluence (requires CONFLUENCE_* env vars)
-	@echo "$(YELLOW)$(BOLD)Publishing Kaliya docs to Confluence...$(RESET)"
-	@mkdir -p $(KALIYA_DOCS_BUILD)/kaliya-confluence
-	$(SPHINX) -b confluence $(KALIYA_DOCS_SRC) $(KALIYA_DOCS_BUILD)/kaliya-confluence
-	@echo "$(GREEN)$(BOLD)Confluence publish complete.$(RESET)"
-
-.PHONY: kaliya-docs-clean
-kaliya-docs-clean: ## Remove Kaliya documentation build artifacts
-	@echo "$(YELLOW)$(BOLD)Cleaning Kaliya docs build...$(RESET)"
-	@rm -rf $(KALIYA_DOCS_BUILD)/kaliya-html \
-	        $(KALIYA_DOCS_BUILD)/kaliya-latex \
-	        $(KALIYA_DOCS_BUILD)/kaliya-confluence
-	@echo "$(GREEN)$(BOLD)Kaliya docs build cleaned.$(RESET)"
-
-.PHONY: kaliya-docs
-kaliya-docs: kaliya-docs-html ## Alias: build Kaliya HTML docs
-
-# ── Midnight Hammer doc targets ───────────────────────────────────────────────
-MH_DOCS_SRC := docs/midnight_hammer
-MH_DOCS_BUILD := docs/_build
-
-.PHONY: mh-docs-generate
-mh-docs-generate: ## Re-generate Midnight Hammer markdown from agent state
-	@echo "$(YELLOW)$(BOLD)Generating Midnight Hammer markdown...$(RESET)"
-	python3 docs/rapporteur_docs.py $(MH_DOCS_SRC)/manifest.json
-	@echo "$(GREEN)$(BOLD)Markdown generation complete.$(RESET)"
-
-.PHONY: mh-docs-html
-mh-docs-html: ## Build Midnight Hammer docs as HTML
-	@echo "$(YELLOW)$(BOLD)Building Midnight Hammer HTML docs...$(RESET)"
-	@mkdir -p $(MH_DOCS_BUILD)/midnight-hammer-html
-	$(SPHINX) -b html $(MH_DOCS_SRC) $(MH_DOCS_BUILD)/midnight-hammer-html
-	@echo "$(GREEN)$(BOLD)HTML docs built: $(MH_DOCS_BUILD)/midnight-hammer-html/index.html$(RESET)"
-
-.PHONY: mh-docs-pdf
-mh-docs-pdf: ## Build Midnight Hammer docs as PDF (requires latexmk)
-	@echo "$(YELLOW)$(BOLD)Building Midnight Hammer PDF docs...$(RESET)"
-	@mkdir -p $(MH_DOCS_BUILD)/midnight-hammer-latex
-	$(SPHINX) -b latex $(MH_DOCS_SRC) $(MH_DOCS_BUILD)/midnight-hammer-latex
-	@cd $(MH_DOCS_BUILD)/midnight-hammer-latex && latexmk -pdf -f -interaction=nonstopmode midnight-hammer.tex; true
-	@echo "$(GREEN)$(BOLD)PDF built: $(MH_DOCS_BUILD)/midnight-hammer-latex/midnight-hammer.pdf$(RESET)"
-
-.PHONY: mh-docs-confluence
-mh-docs-confluence: ## Publish Midnight Hammer docs to Confluence (requires CONFLUENCE_* env vars)
-	@echo "$(YELLOW)$(BOLD)Publishing Midnight Hammer docs to Confluence...$(RESET)"
-	@mkdir -p $(MH_DOCS_BUILD)/midnight-hammer-confluence
-	$(SPHINX) -b confluence $(MH_DOCS_SRC) $(MH_DOCS_BUILD)/midnight-hammer-confluence
-	@echo "$(GREEN)$(BOLD)Confluence publish complete.$(RESET)"
-
-.PHONY: mh-docs-clean
-mh-docs-clean: ## Remove Midnight Hammer documentation build artifacts
-	@echo "$(YELLOW)$(BOLD)Cleaning Midnight Hammer docs build...$(RESET)"
-	@rm -rf $(MH_DOCS_BUILD)/midnight-hammer-html \
-	        $(MH_DOCS_BUILD)/midnight-hammer-latex \
-	        $(MH_DOCS_BUILD)/midnight-hammer-confluence
-	@echo "$(GREEN)$(BOLD)Midnight Hammer docs build cleaned.$(RESET)"
-
-.PHONY: mh-docs
-mh-docs: mh-docs-html ## Alias: build Midnight Hammer HTML docs
-
-# ── Atrum Volentia doc targets ────────────────────────────────────────────────
-AV_DOCS_SRC := docs/AtrumVolentia
-AV_DOCS_BUILD := docs/_build
-
-.PHONY: av-docs-generate
-av-docs-generate: ## Re-generate Atrum Volentia markdown from agent state
-	@echo "$(YELLOW)$(BOLD)Generating Atrum Volentia markdown...$(RESET)"
-	python3 docs/rapporteur_docs.py $(AV_DOCS_SRC)/manifest.json
-	@echo "$(GREEN)$(BOLD)Markdown generation complete.$(RESET)"
-
-.PHONY: av-docs-html
-av-docs-html: ## Build Atrum Volentia docs as HTML
-	@echo "$(YELLOW)$(BOLD)Building Atrum Volentia HTML docs...$(RESET)"
-	@mkdir -p $(AV_DOCS_BUILD)/atrum-volentia-html
-	$(SPHINX) -b html $(AV_DOCS_SRC) $(AV_DOCS_BUILD)/atrum-volentia-html
-	@echo "$(GREEN)$(BOLD)HTML docs built: $(AV_DOCS_BUILD)/atrum-volentia-html/index.html$(RESET)"
-
-.PHONY: av-docs-pdf
-av-docs-pdf: ## Build Atrum Volentia docs as PDF (requires latexmk)
-	@echo "$(YELLOW)$(BOLD)Building Atrum Volentia PDF docs...$(RESET)"
-	@mkdir -p $(AV_DOCS_BUILD)/atrum-volentia-latex
-	$(SPHINX) -b latex $(AV_DOCS_SRC) $(AV_DOCS_BUILD)/atrum-volentia-latex
-	@cd $(AV_DOCS_BUILD)/atrum-volentia-latex && latexmk -pdf -f -interaction=nonstopmode atrum-volentia.tex; true
-	@echo "$(GREEN)$(BOLD)PDF built: $(AV_DOCS_BUILD)/atrum-volentia-latex/atrum-volentia.pdf$(RESET)"
-
-.PHONY: av-docs-confluence
-av-docs-confluence: ## Publish Atrum Volentia docs to Confluence (requires CONFLUENCE_* env vars)
-	@echo "$(YELLOW)$(BOLD)Publishing Atrum Volentia docs to Confluence...$(RESET)"
-	@mkdir -p $(AV_DOCS_BUILD)/atrum-volentia-confluence
-	$(SPHINX) -b confluence $(AV_DOCS_SRC) $(AV_DOCS_BUILD)/atrum-volentia-confluence
-	@echo "$(GREEN)$(BOLD)Confluence publish complete.$(RESET)"
-
-.PHONY: av-docs-clean
-av-docs-clean: ## Remove Atrum Volentia documentation build artifacts
-	@echo "$(YELLOW)$(BOLD)Cleaning Atrum Volentia docs build...$(RESET)"
-	@rm -rf $(AV_DOCS_BUILD)/atrum-volentia-html \
-	        $(AV_DOCS_BUILD)/atrum-volentia-latex \
-	        $(AV_DOCS_BUILD)/atrum-volentia-confluence
-	@echo "$(GREEN)$(BOLD)Atrum Volentia docs build cleaned.$(RESET)"
-
-.PHONY: av-docs
-av-docs: av-docs-html ## Alias: build Atrum Volentia HTML docs

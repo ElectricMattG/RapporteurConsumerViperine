@@ -118,8 +118,7 @@ class CitationResearchClient(Base):
         """Initialize Gemini client."""
         # Import Gemini client
         try:
-            sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../../'))
-            from _clients.llm_gcp_client import GeminiLLMClient
+            from src.clients.llm_gcp_client import GeminiLLMClient
         except ImportError as e:
             raise ImportError(f"Failed to import GeminiLLMClient: {e}")
 
