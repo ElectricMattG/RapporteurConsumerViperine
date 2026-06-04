@@ -10,15 +10,27 @@ env_files = ["tests/.env"]
 python_files = ["test_*.py", "*_tests.py"]
 testpaths = ["tests"]
 timeout = 30
+pythonpath = ["src", "src/consumers", "src/utils"]
+addopts = ["--tb=short"]
+filterwarnings = [
+    "ignore::DeprecationWarning:pythonjsonlogger.*",
+]
 
 [tool.coverage.run]
 branch = true
-source = ["."]
+source = ["src"]
 omit = [
-    "tests/**"
+    "tests/**",
+    "src/consumers/run_*.py",
 ]
 
 [tool.coverage.report]
 fail_under = 0
 show_missing = true
 sort = "miss"
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "def start\\(",
+    "def main\\(",
+]

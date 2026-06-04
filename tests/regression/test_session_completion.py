@@ -21,9 +21,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-# ──────────────────────────────────────────────────────────────────────────────
-# Helpers to import under test
-# ──────────────────────────────────────────────────────────────────────────────
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -32,14 +29,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-SRC = Path(__file__).resolve().parent.parent / "src"
-sys.path.insert(0, str(SRC))
-sys.path.insert(0, str(SRC / "consumers"))
-sys.path.insert(0, str(SRC / "utils"))
-
 from consumers._doc_id import make_document_id
 from consumers._failure_taxonomy import FailureClassification, classify_error
 from utils.url_normalize import normalize_url
+
+# sys.path is configured by tests/conftest.py
+
 
 
 # ──────────────────────────────────────────────────────────────────────────────

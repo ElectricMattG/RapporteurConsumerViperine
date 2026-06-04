@@ -80,6 +80,11 @@ test: | install
 	@echo "$(YELLOW)$(BOLD)Running tests$(RESET)"
 	pytest
 
+.PHONY: cov
+cov: | install
+	@echo "$(YELLOW)$(BOLD)Running tests with coverage$(RESET)"
+	pytest --cov=src --cov-report=term-missing --cov-report=html:htmlcov
+
 
 .PHONY: gcp_gemini
 gcp_gemini: ## Setup GCP authentication and environment for Gemini API
