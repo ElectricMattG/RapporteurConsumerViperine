@@ -60,7 +60,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -86,13 +86,18 @@ except ImportError:
 # Import components
 try:
     from ..config_handler import Base
+    from ..utils.url_normalize import normalize_url
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     from config_handler import Base
+    from utils.url_normalize import normalize_url
 
 # Import embedding client
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../clients'))
 from embedding_client import EmbeddingServiceClient
+
+# Sessions idle longer than this (seconds) are force-aggregated by the sweeper.
+SESSION_IDLE_TIMEOUT: int = int(os.getenv('SESSION_IDLE_TIMEOUT', '120'))
 
 
 class KafkaSummaryIndexerConsumer(Base):
@@ -356,8 +361,11 @@ class KafkaSummaryIndexerConsumer(Base):
             'total_requests': 0,
             'received_count': 0,
             'document_ids_processed': [],
-            'started_at': datetime.now().isoformat(),
-            'last_updated': datetime.now().isoformat(),
+            'dedup_keys_processed': [],
+            'failed': [],
+            'started_at': datetime.now(timezone.utc).isoformat(),
+            'last_event_at': datetime.now(timezone.utc).isoformat(),
+            'last_updated': datetime.now(timezone.utc).isoformat(),
             'completed': False
         }
 
@@ -404,11 +412,12 @@ class KafkaSummaryIndexerConsumer(Base):
             json.dump(entry, f, ensure_ascii=False)
             f.write('\n')
 
-    def _publish_session_complete(self, session_id: str, total_summaries: int):
+    def _publish_session_complete(self, session_id: str, total_summaries: int, failed: List[str] | None = None):
         """Publish session-complete message to Index Aggregator"""
         if not self.producer:
             self._create_producer()
 
+        failed = failed or []
         session_dir = self._get_session_dir(session_id)
         index_file = session_dir / f"{session_id}_summaries_embedded.jsonl"
 
@@ -417,7 +426,9 @@ class KafkaSummaryIndexerConsumer(Base):
             'summary_index_file': str(index_file),
             'total_summaries': total_summaries,
             'index_type': 'summaries',
-            'completed_at': datetime.now().isoformat()
+            'partial': len(failed) > 0,
+            'failed_request_ids': failed,
+            'completed_at': datetime.now(timezone.utc).isoformat(),
         }
 
         try:
@@ -510,7 +521,10 @@ class KafkaSummaryIndexerConsumer(Base):
     ):
         """Inner aggregation routine; caller must hold the combined-index lock."""
         try:
-            existing_doc_ids = set()
+            existing_doc_ids: set = set()
+            existing_dedup_keys: set = set()
+            import hashlib as _hashlib
+
             if self.combined_index_file.exists():
                 with open(self.combined_index_file, 'r', encoding='utf-8') as f:
                     for line in f:
@@ -520,6 +534,12 @@ class KafkaSummaryIndexerConsumer(Base):
                                 doc_id = entry.get('document_id')
                                 if doc_id:
                                     existing_doc_ids.add(doc_id)
+                                # Accept stored dedup_key or derive from url (legacy records)
+                                dk = entry.get('dedup_key')
+                                if not dk and entry.get('source_url'):
+                                    dk = _hashlib.md5(normalize_url(entry['source_url']).encode()).hexdigest()
+                                if dk:
+                                    existing_dedup_keys.add(dk)
                             except json.JSONDecodeError:
                                 continue
 
@@ -537,21 +557,30 @@ class KafkaSummaryIndexerConsumer(Base):
                             try:
                                 entry = json.loads(line)
                                 doc_id = entry.get('document_id')
+                                dk = entry.get('dedup_key')
+                                if not dk and entry.get('source_url'):
+                                    dk = _hashlib.md5(normalize_url(entry['source_url']).encode()).hexdigest()
 
-                                if doc_id and doc_id not in existing_doc_ids:
-                                    # New document, append to combined index
-                                    json.dump(entry, target, ensure_ascii=False)
-                                    target.write('\n')
-                                    existing_doc_ids.add(doc_id)
-                                    new_count += 1
-
-                                    # Track new addition for frontend message
-                                    new_additions.append({
-                                        'url': entry.get('source_url', ''),
-                                        'title': entry.get('doc_metadata', {}).get('title', 'Untitled')
-                                    })
-                                else:
+                                # Dedup: skip if either document_id or dedup_key already present
+                                if (doc_id and doc_id in existing_doc_ids) or \
+                                   (dk and dk in existing_dedup_keys):
                                     duplicate_count += 1
+                                    continue
+
+                                # New document — append to combined index
+                                json.dump(entry, target, ensure_ascii=False)
+                                target.write('\n')
+                                if doc_id:
+                                    existing_doc_ids.add(doc_id)
+                                if dk:
+                                    existing_dedup_keys.add(dk)
+                                new_count += 1
+
+                                # Track new addition for frontend message
+                                new_additions.append({
+                                    'url': entry.get('source_url', ''),
+                                    'title': entry.get('doc_metadata', {}).get('title', 'Untitled')
+                                })
 
                             except json.JSONDecodeError as e:
                                 self._logger.warning(f"   ⚠️ Invalid JSON in session index: {e}")
@@ -619,30 +648,93 @@ class KafkaSummaryIndexerConsumer(Base):
             request_id = message_data.get('request_id')
             session_id = message_data.get('session_id')
             document_id = message_data.get('document_id')
+            dedup_key = message_data.get('dedup_key')  # new field; may be absent in legacy messages
             source_url = message_data.get('source_url')
             summary_file = message_data.get('summary_file')
             current_count = message_data.get('current_count', 1)
             total_requests = message_data.get('total_requests', 1)
+            status = message_data.get('status', 'success')  # 'success' | 'degraded' | 'failed'
 
             self._logger.info("="*80)
             self._logger.info(f"📝 Processing Summary Indexing")
             self._logger.info(f"   Session ID: {session_id}")
             self._logger.info(f"   Document ID: {document_id}")
+            self._logger.info(f"   Status: {status}")
             self._logger.info(f"   Progress: {current_count}/{total_requests}")
             self._logger.info(f"   Summary file: {summary_file}")
 
             # Load session state
             state = self._load_session_state(session_id)
 
+            # Ensure new state fields exist (backward-compat with persisted states)
+            state.setdefault('dedup_keys_processed', [])
+            state.setdefault('failed', [])
+            state.setdefault('last_event_at', datetime.now(timezone.utc).isoformat())
+
             # Update total if not set
             if state['total_requests'] == 0:
                 state['total_requests'] = total_requests
 
-            # Check if already processed (idempotency)
+            # Stamp last_event_at so the idle sweeper knows this session is alive
+            state['last_event_at'] = datetime.now(timezone.utc).isoformat()
+
+            # ── Idempotency check ─────────────────────────────────────────────
+            # For new messages: dedup on dedup_key (md5 of normalized URL).
+            # For legacy messages without dedup_key: fall back to document_id.
+            _eff_dedup = dedup_key or (
+                __import__('hashlib').md5(normalize_url(source_url).encode()).hexdigest()
+                if source_url else None
+            )
+            if _eff_dedup and _eff_dedup in state['dedup_keys_processed']:
+                self._logger.info(f"   ⏭️  URL already indexed (dedup_key={_eff_dedup}), skipping")
+                # Still count toward total so session can complete
+                state['received_count'] += 1
+                self._save_session_state(session_id, state)
+                self._logger.info("="*80)
+                return {'session_id': session_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
+
             if document_id in state['document_ids_processed']:
                 self._logger.info(f"   ⏭️  Document {document_id} already processed, skipping")
-                return None
+                state['received_count'] += 1
+                self._save_session_state(session_id, state)
+                self._logger.info("="*80)
+                return {'session_id': session_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
 
+            # ── Handle failed terminal events ─────────────────────────────────
+            # The summarizer publishes status='failed' when it exhausts retries.
+            # We count the doc toward the session total (so it can complete) but
+            # do NOT try to embed or write it to the JSONL index.
+            if status == 'failed':
+                self._logger.warning(
+                    f"   ⚠️  Summarizer reported failure for {request_id} ({source_url}); "
+                    f"counting as received, not embedding."
+                )
+                state['received_count'] += 1
+                state['failed'].append(request_id)
+                if document_id:
+                    state['document_ids_processed'].append(document_id)
+                if _eff_dedup:
+                    state['dedup_keys_processed'].append(_eff_dedup)
+                self._save_session_state(session_id, state)
+
+                # Check if session is now complete (failure was the last outstanding doc)
+                if state['received_count'] >= state['total_requests'] and not state.get('completed', False):
+                    self._logger.info(f"   🎉 Session complete (with failures): {state['received_count']}/{state['total_requests']}")
+                    state['completed'] = True
+                    self._save_session_state(session_id, state)
+                    self._publish_session_complete(session_id, state['received_count'], failed=state['failed'])
+                    self._aggregate_to_combined_index(session_id)
+
+                self._logger.info("="*80)
+                return {
+                    'session_id': session_id,
+                    'document_id': document_id,
+                    'indexed': False,
+                    'failed': True,
+                    'session_complete': state['completed']
+                }
+
+            # ── Happy path: embed and index ───────────────────────────────────
             # Track embedding start time
             embed_start = time.time() if self.telemetry_enabled else None
 
@@ -668,20 +760,22 @@ class KafkaSummaryIndexerConsumer(Base):
             embedding = await self._embed_summary(summary_text)
             self._logger.info(f"   ✅ Embedding generated: {len(embedding)}-dim")
 
-            # Create index entry
+            # Create index entry — include dedup_key for future cross-session dedup
             index_entry = {
                 'document_id': document_id,
+                'dedup_key': _eff_dedup,
                 'source_url': source_url,
                 'summary_text': summary_text,
                 'summary_embedding': embedding,
                 'doc_metadata': doc_metadata,
+                'degraded': summary_data.get('degraded', False),
                 'embedding_metadata': {
                     'embedding_id': f"sum_{document_id}",
                     'embedding_dim': len(embedding),
                     'embedding_model': self.model_name,
-                    'embedded_at': datetime.now().isoformat()
+                    'embedded_at': datetime.now(timezone.utc).isoformat()
                 },
-                'indexed_at': datetime.now().isoformat()
+                'indexed_at': datetime.now(timezone.utc).isoformat()
             }
 
             # Append to index file
@@ -691,6 +785,8 @@ class KafkaSummaryIndexerConsumer(Base):
             # Update state
             state['received_count'] += 1
             state['document_ids_processed'].append(document_id)
+            if _eff_dedup:
+                state['dedup_keys_processed'].append(_eff_dedup)
             self._save_session_state(session_id, state)
 
             # Track metrics
@@ -714,7 +810,7 @@ class KafkaSummaryIndexerConsumer(Base):
                 self._save_session_state(session_id, state)
 
                 # Publish session-complete message
-                self._publish_session_complete(session_id, state['received_count'])
+                self._publish_session_complete(session_id, state['received_count'], failed=state.get('failed', []))
 
                 # Aggregate session index to combined master index
                 self._aggregate_to_combined_index(session_id)
@@ -747,6 +843,76 @@ class KafkaSummaryIndexerConsumer(Base):
                 ).observe(embed_duration)
 
             return None
+
+    def _check_idle_sessions(self) -> None:
+        """
+        Sweep open (non-completed) sessions and aggregate any that have been
+        idle longer than SESSION_IDLE_TIMEOUT seconds.
+
+        Called periodically inside the main poll loop.  Uses wall-clock
+        difference against `last_event_at` stored in session state on disk.
+        """
+        now = datetime.now(timezone.utc)
+        try:
+            if not self.cache_dir.exists():
+                return
+            for state_file in self.cache_dir.glob("*/*_state.json"):
+                try:
+                    with open(state_file, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                except Exception:
+                    continue
+
+                if state.get('completed', False):
+                    continue
+                if state.get('total_requests', 0) == 0:
+                    continue
+
+                last_event_str = state.get('last_event_at') or state.get('started_at')
+                if not last_event_str:
+                    continue
+
+                try:
+                    # Handle both offset-aware and naive timestamps
+                    last_event = datetime.fromisoformat(last_event_str)
+                    if last_event.tzinfo is None:
+                        last_event = last_event.replace(tzinfo=timezone.utc)
+                    idle_seconds = (now - last_event).total_seconds()
+                except ValueError:
+                    continue
+
+                if idle_seconds < SESSION_IDLE_TIMEOUT:
+                    continue
+
+                session_id = state.get('session_id')
+                if not session_id:
+                    continue
+
+                self._logger.warning(
+                    f"⏰ Idle sweeper: session {session_id} has been idle "
+                    f"{idle_seconds:.0f}s (>{SESSION_IDLE_TIMEOUT}s); force-aggregating "
+                    f"({state.get('received_count', 0)}/{state.get('total_requests', 0)} received)"
+                )
+
+                # Mark as completed so it won't be re-triggered
+                state['completed'] = True
+                state['last_updated'] = now.isoformat()
+                try:
+                    with open(state_file, 'w', encoding='utf-8') as f:
+                        json.dump(state, f, indent=2, ensure_ascii=False)
+                except Exception as save_err:
+                    self._logger.error(f"   ❌ Sweeper: failed to update state file: {save_err}")
+                    continue
+
+                self._publish_session_complete(
+                    session_id,
+                    state.get('received_count', 0),
+                    failed=state.get('failed', []),
+                )
+                self._aggregate_to_combined_index(session_id)
+
+        except Exception as e:
+            self._logger.error(f"❌ Error in idle session sweeper: {e}", exc_info=True)
 
     async def consume_messages(self):
         """Main consumer loop"""
@@ -795,8 +961,18 @@ class KafkaSummaryIndexerConsumer(Base):
             if self.telemetry_enabled:
                 self.metrics.set_state(1)
 
+            # Sweeper: fire every SWEEPER_INTERVAL polls (≈ seconds given poll timeout=1s)
+            _SWEEPER_INTERVAL = 30  # check every ~30 seconds
+            _poll_count = 0
+
             while self.running:
                 msg = self.consumer.poll(timeout=1.0)
+
+                # Periodic idle-session sweeper
+                _poll_count += 1
+                if _poll_count >= _SWEEPER_INTERVAL:
+                    _poll_count = 0
+                    self._check_idle_sessions()
 
                 if msg is None:
                     continue

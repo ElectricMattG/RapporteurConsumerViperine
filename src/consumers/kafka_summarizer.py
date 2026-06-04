@@ -33,7 +33,7 @@ import os
 import signal
 import sys
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -63,8 +63,13 @@ try:
     from ..components.summarise.llm_citation_researcher import \
         CitationResearchClient
     from ..config_handler import Base
+    from ._doc_id import make_document_id
+    from ._failure_taxonomy import classify_error
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from _doc_id import make_document_id
+    from _failure_taxonomy import classify_error
+
     from components.summarise.llm_citation_researcher import \
         CitationResearchClient
     from config_handler import Base
@@ -306,116 +311,160 @@ class KafkaSummarizerConsumer(Base):
         # Track summarization start time
         summarization_start = time.time() if self.telemetry_enabled else None
 
-        try:
-            # Generate summary using LLM
-            if extraction_failed:
-                self._logger.info("🌐 Generating summary from URL using Gemini web grounding...")
-            else:
-                self._logger.info("🤖 Generating summary from extracted content...")
+        # ── Retry loop ────────────────────────────────────────────────────────
+        # classify_error() drives the retry/degrade policy for each category.
+        # On the final attempt we always publish a terminal summary-completed
+        # event (success or failure) so the indexer session never gets stuck.
+        _last_exc: Exception | None = None
+        _attempt = 0
+        _classification = None
+        summary_result = None
+        summary_file_path: str | None = None
 
-            # Track LLM API call
-            if self.telemetry_enabled:
-                llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
-                self.llm_api_calls.labels(
-                    consumer_id=f"summarizer_{os.getpid()}",
-                    provider=llm_provider
-                ).inc()
+        while True:
+            _attempt += 1
+            try:
+                # Generate summary using LLM
+                if extraction_failed:
+                    self._logger.info("🌐 Generating summary from URL using Gemini web grounding...")
+                else:
+                    self._logger.info("🤖 Generating summary from extracted content...")
 
-            # Create a citation-like prompt from the content
-            title = metadata.get('title', 'Untitled')
-            author = metadata.get('author', 'Unknown')
-            citation = f"{author}. {title}. {url}"
-
-            # Detect language from text or metadata (default to English)
-            detected_language = metadata.get('language') or 'en'
-            if not detected_language and text:
-                # Simple language detection: if mostly ASCII, assume English
-                detected_language = 'en'
-
-            # For failed extractions with Gemini, rely on web grounding
-            context_text = text[:2000] if text and not extraction_failed else None
-
-            # Small delay to avoid rate limiting (stagger async calls)
-            await asyncio.sleep(0.2)
-
-            # Generate structured summary
-            summary_result = await self.llm_client.generate_summary(
-                citation=citation,
-                urls=[url],
-                context=context_text,
-                use_web_grounding=extraction_failed  # Tell Gemini to fetch the URL directly
-            )
-
-            self._logger.info(f"   ✅ Summary generated successfully")
-            self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
-
-            # Add query_id to summary result for traceability
-            summary_result['query_id'] = query_id
-
-            # Track successful summarization metrics
-            if self.telemetry_enabled and summarization_start:
-                summarization_duration = time.time() - summarization_start
-                consumer_id_label = f"summarizer_{os.getpid()}"
-                llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
-
-                # Record summarization duration
-                self.summarization_duration.labels(
-                    consumer_id=consumer_id_label,
-                    status='success'
-                ).observe(summarization_duration)
-
-                # Increment documents summarized
-                self.documents_summarized.labels(
-                    consumer_id=consumer_id_label
-                ).inc()
-
-                # Track summary length
-                summary_text = summary_result.get('markdown_summary', '')
-                self.summary_length.labels(
-                    consumer_id=consumer_id_label
-                ).observe(len(summary_text))
-
-                # Track token usage if available in summary_result
-                tokens_used = summary_result.get('tokens_used', 0)
-                if tokens_used > 0:
-                    self.llm_tokens_used.labels(
-                        consumer_id=consumer_id_label,
+                # Track LLM API call
+                if self.telemetry_enabled:
+                    llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
+                    self.llm_api_calls.labels(
+                        consumer_id=f"summarizer_{os.getpid()}",
                         provider=llm_provider
-                    ).inc(tokens_used)
+                    ).inc()
 
-            # Save summary to cache as JSONL
-            summary_file = request_dir / "summary.jsonl"
-            # Ensure directory exists before writing
-            summary_file.parent.mkdir(parents=True, exist_ok=True)
-            with open(summary_file, 'w', encoding='utf-8') as f:
-                f.write(json.dumps(summary_result, ensure_ascii=False) + '\n')
+                # Create a citation-like prompt from the content
+                title = metadata.get('title', 'Untitled')
+                author = metadata.get('author', 'Unknown')
+                citation = f"{author}. {title}. {url}"
 
-            self._logger.info(f"   💾 Summary saved to: {summary_file}")
+                # Detect language from text or metadata (default to English)
+                detected_language = metadata.get('language') or 'en'
+                if not detected_language and text:
+                    detected_language = 'en'
 
-            result['success'] = True
-            result['summary_file'] = str(summary_file)
+                # For failed extractions with Gemini, rely on web grounding
+                context_text = text[:2000] if text and not extraction_failed else None
 
-            # Publish summary-completed message for Summary Indexer.
-            # document_id is ALWAYS derived from the source URL (see
-            # _publish_summary_completed). We deliberately do NOT forward an
-            # upstream document_id, because upstream producers (RAG, web
-            # scraper, extraction-failure re-entry) historically supplied
-            # several incompatible shapes (request_id-based, uuid_url-based,
-            # date+counter-based) which caused the combined index to hold
-            # multiple variants of the same logical document and broke dedup.
+                # Small delay to avoid rate limiting (stagger async calls)
+                await asyncio.sleep(0.2)
+
+                # Generate structured summary
+                summary_result = await self.llm_client.generate_summary(
+                    citation=citation,
+                    urls=[url],
+                    context=context_text,
+                    use_web_grounding=extraction_failed
+                )
+
+                self._logger.info(f"   ✅ Summary generated successfully (attempt {_attempt})")
+                self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
+
+                # Add query_id to summary result for traceability
+                summary_result['query_id'] = query_id
+
+                # Track successful summarization metrics
+                if self.telemetry_enabled and summarization_start:
+                    summarization_duration = time.time() - summarization_start
+                    consumer_id_label = f"summarizer_{os.getpid()}"
+                    llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
+                    self.summarization_duration.labels(
+                        consumer_id=consumer_id_label,
+                        status='success'
+                    ).observe(summarization_duration)
+                    self.documents_summarized.labels(consumer_id=consumer_id_label).inc()
+                    summary_text_len = len(summary_result.get('markdown_summary', ''))
+                    self.summary_length.labels(consumer_id=consumer_id_label).observe(summary_text_len)
+                    tokens_used = summary_result.get('tokens_used', 0)
+                    if tokens_used > 0:
+                        self.llm_tokens_used.labels(
+                            consumer_id=consumer_id_label,
+                            provider=llm_provider
+                        ).inc(tokens_used)
+
+                # Save summary to cache
+                summary_file = request_dir / "summary.jsonl"
+                summary_file.parent.mkdir(parents=True, exist_ok=True)
+                with open(summary_file, 'w', encoding='utf-8') as f:
+                    f.write(json.dumps(summary_result, ensure_ascii=False) + '\n')
+                self._logger.info(f"   💾 Summary saved to: {summary_file}")
+                summary_file_path = str(summary_file)
+                result['success'] = True
+                result['summary_file'] = summary_file_path
+                _last_exc = None
+                break  # success — exit retry loop
+
+            except Exception as e:
+                _last_exc = e
+                _classification = classify_error(e)
+                self._logger.error(
+                    f"❌ Error generating summary (attempt {_attempt}/{_classification.max_attempts},"
+                    f" category={_classification.category}): {e}"
+                )
+                import traceback
+                self._logger.error(traceback.format_exc())
+
+                if self.telemetry_enabled and summarization_start:
+                    summarization_duration = time.time() - summarization_start
+                    consumer_id_label = f"summarizer_{os.getpid()}"
+                    self.summarization_duration.labels(
+                        consumer_id=consumer_id_label,
+                        status='failure'
+                    ).observe(summarization_duration)
+                    error_type = type(e).__name__
+                    self.llm_api_errors.labels(
+                        consumer_id=consumer_id_label,
+                        error_type=error_type
+                    ).inc()
+
+                if _classification.retryable and _attempt < _classification.max_attempts:
+                    backoff = min(2 ** (_attempt - 1), 8)
+                    self._logger.info(f"   ↩️  Retrying in {backoff}s (attempt {_attempt+1}/{_classification.max_attempts})")
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # Final failure — build degraded stub if applicable
+                if _classification.degrade:
+                    self._logger.warning(f"   ⚠️  Degrading: emitting stub summary for {url}")
+                    summary_result = {
+                        'markdown_summary': f'[Summary unavailable — model returned empty response for: {url}]',
+                        'metadata': metadata,
+                        'query_id': query_id,
+                        'degraded': True,
+                    }
+                    summary_file = request_dir / "summary.jsonl"
+                    summary_file.parent.mkdir(parents=True, exist_ok=True)
+                    with open(summary_file, 'w', encoding='utf-8') as f:
+                        f.write(json.dumps(summary_result, ensure_ascii=False) + '\n')
+                    summary_file_path = str(summary_file)
+                    result['success'] = True
+                    result['summary_file'] = summary_file_path
+                    result['degraded'] = True
+                    _last_exc = None
+
+                break  # exit retry loop — either degraded or hard failure
+
+        # ── Always emit a terminal event ─────────────────────────────────────
+        # Whether we succeeded, degraded, or hard-failed, we MUST publish
+        # summary-completed so the indexer session count closes properly.
+        if _last_exc is None:
+            # success (or degraded success)
             await self._publish_summary_completed(
                 request_id=request_id,
                 session_id=session_id,
                 document_id=None,
                 source_url=url,
-                summary_file=str(summary_file),
-                message_data=message_data
+                summary_file=summary_file_path,
+                message_data=message_data,
+                status='degraded' if result.get('degraded') else 'success',
             )
-
-            # CONTINGENCY: If extraction failed (403/404) but summary succeeded,
-            # publish the summary content to content-extracted topic for chunking
-            # This ensures 100% coverage even when direct scraping fails
-            if extraction_failed:
+            # Publish for chunking if extraction originally failed
+            if extraction_failed and summary_result:
                 self._logger.info("   🔄 Extraction failed but summary succeeded - publishing summary for chunking")
                 await self._publish_summary_for_chunking(
                     request_id=request_id,
@@ -423,34 +472,32 @@ class KafkaSummarizerConsumer(Base):
                     url=url,
                     summary_text=summary_result.get('markdown_summary', ''),
                     metadata=metadata,
-                    title=title,
+                    title=metadata.get('title', 'Untitled'),
                     summary_metadata=summary_result.get('metadata', {}),
-                    language=detected_language
+                    language=metadata.get('language') or 'en',
                 )
-
-        except Exception as e:
-            result['error'] = str(e)
-            self._logger.error(f"❌ Error generating summary: {e}")
-            import traceback
-            self._logger.error(traceback.format_exc())
-
-            # Track failed summarization metrics
-            if self.telemetry_enabled and summarization_start:
-                summarization_duration = time.time() - summarization_start
-                consumer_id_label = f"summarizer_{os.getpid()}"
-
-                # Record failed summarization duration
-                self.summarization_duration.labels(
-                    consumer_id=consumer_id_label,
-                    status='failure'
-                ).observe(summarization_duration)
-
-                # Track API error type
-                error_type = type(e).__name__
-                self.llm_api_errors.labels(
-                    consumer_id=consumer_id_label,
-                    error_type=error_type
-                ).inc()
+        else:
+            # Hard failure after all retries — publish failed terminal event
+            result['error'] = str(_last_exc)
+            await self._publish_summary_completed(
+                request_id=request_id,
+                session_id=session_id,
+                document_id=None,
+                source_url=url,
+                summary_file=None,
+                message_data=message_data,
+                status='failed',
+            )
+            await self._publish_to_dlq(
+                stage='summarizer',
+                session_id=session_id,
+                request_id=request_id,
+                query_id=query_id,
+                url=url,
+                exc=_last_exc,
+                classification=_classification,
+                attempts=_attempt,
+            )
 
         self._logger.info("=" * 80)
         return result
@@ -566,19 +613,24 @@ class KafkaSummarizerConsumer(Base):
         session_id: str,
         document_id: str,
         source_url: str,
-        summary_file: str,
-        message_data: Dict
+        summary_file: str | None,
+        message_data: Dict,
+        status: str = 'success',
     ):
         """
         Publish summary-completed message for Summary Indexer.
 
+        Always called — on success, degraded success, AND failure — so the
+        indexer session count can always reach its total and aggregate.
+
         Args:
-            request_id: Request identifier
-            session_id: Session identifier
-            document_id: Document identifier
-            source_url: Source URL
-            summary_file: Path to saved summary file
+            request_id:   Request identifier
+            session_id:   Session identifier
+            document_id:  Ignored (generated here from source_url + timestamp)
+            source_url:   Source URL
+            summary_file: Path to saved summary file, or None on hard failure
             message_data: Original message data (to extract total_requests)
+            status:       'success' | 'degraded' | 'failed'
         """
         try:
             # Get or initialize session count
@@ -591,30 +643,27 @@ class KafkaSummarizerConsumer(Base):
             current_count = self.session_counts[session_id]['count']
             total_requests = self.session_counts[session_id]['total']
 
-            # Build a fully deterministic document_id from the source URL.
-            # Format: doc_<md5(url)[:12]>
-            #   - Pure function of the URL: same URL -> same id, always.
-            #   - No date, no session, no per-message counter -- those broke
-            #     dedup because the same URL reprocessed on another day, in
-            #     another session, or via the extraction-failure re-entry
-            #     path produced a different id and slipped past the
-            #     document_id-keyed dedup in the summary indexer.
-            #   - Matches the `doc_<hex>` shape already used by the chunker
-            #     side of the index (research_chunks_*), so summaries and
-            #     chunks share one canonical document identifier.
+            # Build timestamp-based document_id unique per research event.
+            # dedup_key (md5 of normalized URL) is the deduplication handle;
+            # the indexer uses it to avoid writing the same URL twice even
+            # when the same URL is re-processed in a later session.
             _url_for_id = source_url or request_id
-            document_id = f"doc_{hashlib.md5(_url_for_id.encode()).hexdigest()[:12]}"
+            new_document_id, dedup_key = make_document_id(
+                _url_for_id, batch_index=current_count
+            )
 
             # Create message
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
-                'document_id': document_id,
+                'document_id': new_document_id,
+                'dedup_key': dedup_key,
                 'source_url': source_url,
                 'summary_file': summary_file,
+                'status': status,
                 'current_count': current_count,
                 'total_requests': total_requests,
-                'completed_at': datetime.now().isoformat()
+                'completed_at': datetime.now(timezone.utc).isoformat(),
             }
 
             # Publish to summary-completed topic
@@ -627,7 +676,10 @@ class KafkaSummarizerConsumer(Base):
 
             self.producer.poll(0)
 
-            self._logger.info(f"   📤 Published to '{self.summary_completed_topic}' ({current_count}/{total_requests})")
+            self._logger.info(
+                f"   📤 Published to '{self.summary_completed_topic}' "
+                f"({current_count}/{total_requests}) status={status}"
+            )
 
         except Exception as e:
             self._logger.error(f"   ❌ Error publishing summary-completed: {e}")
@@ -643,6 +695,52 @@ class KafkaSummarizerConsumer(Base):
                 self.metrics.increment_dead_letter(self.output_topic if hasattr(self, 'output_topic') else 'unknown', 'delivery_failed')
         else:
             self._logger.debug(f"✅ Message delivered to {msg.topic()} [{msg.partition()}]")
+
+    async def _publish_to_dlq(
+        self,
+        stage: str,
+        session_id: str,
+        request_id: str,
+        query_id: str,
+        url: str,
+        exc: Exception,
+        classification,  # FailureClassification
+        attempts: int,
+        first_attempt_at: str | None = None,
+    ):
+        """Publish a failure record to the dead-letter-queue topic."""
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            record = {
+                'stage': stage,
+                'category': classification.category if classification else 'unknown',
+                'session_id': session_id,
+                'request_id': request_id,
+                'query_id': query_id,
+                'url': url,
+                'error_class': type(exc).__name__,
+                'error_message': str(exc),
+                'occurred_at': now,
+                'attempts': attempts,
+                'retryable': classification.retryable if classification else False,
+                'degraded': classification.degrade if classification else False,
+                'first_attempt_at': first_attempt_at or now,
+                'last_attempt_at': now,
+            }
+            self.producer.produce(
+                topic='dead-letter-queue',
+                key=session_id.encode('utf-8'),
+                value=json.dumps(record).encode('utf-8'),
+                callback=self._delivery_callback,
+            )
+            self.producer.poll(0)
+            self._logger.info(
+                f"   📨 Published DLQ record: stage={stage} category={record['category']}"
+            )
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter('dead-letter-queue', record['category'])
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing to DLQ: {e}")
 
     def start(self):
         """Start the Kafka consumer"""
