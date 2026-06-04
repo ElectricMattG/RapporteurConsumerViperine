@@ -1,0 +1,9 @@
+apiVersion: v2
+name: rapporteur-consumer-group
+description: >
+  Deploys a named consumer group (one helm release = one group) into the
+  shared `consumers` namespace. Multiple groups can coexist; all resources
+  are prefixed with {{ .Release.Name }} to avoid collisions.
+type: application
+version: 0.1.0
+appVersion: "0.0.1"

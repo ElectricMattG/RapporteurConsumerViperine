@@ -160,7 +160,9 @@ class KafkaDeadLetterConsumer(Base):
         """Load configuration"""
         try:
             # Kafka configuration
-            bootstrap_servers = self._app_config.get('kafka.bootstrap_servers') or 'localhost:9092'
+            bootstrap_servers = self._app_config.get('kafka.bootstrap_servers')
+            if not bootstrap_servers:
+                bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
             consumer_group_id = self._app_config.get('dead_letter.consumer_group_id') or 'dead-letter-consumer'
             self.input_topic = self._app_config.get('dead_letter.input_topic') or 'dead-letter-queue'
 

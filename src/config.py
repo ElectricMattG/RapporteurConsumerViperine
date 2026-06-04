@@ -29,13 +29,17 @@ defaults = {
         "output_full_path": "./logs/logfile.log",
     },
     "gemini": {
-        # GCP Gemini configuration (alternative to local LLM)
+        # GCP Gemini configuration. Provider-scoped: NEVER mix with openai.* keys.
         "project_id": "rapporteurclients",  # Set via PROJECT_ID env var or config
         "location": "global",  # GCP region for Vertex AI
         "model_name": "gemini-2.5-pro",  # Fast model with good performance
         "timeout": 600,  # Request timeout for Gemini API
         "api_key": None,  # Set via GOOGLE_API_KEY env var or config (for direct API, not Vertex AI)
-        # Note: Uses llm.* settings for temperature, top_p, max_length, etc.
+        # Generation parameters (Gemini-specific; do NOT read openai.* values).
+        # Vertex AI Gemini caps maxOutputTokens at 65536 (exclusive upper bound).
+        "temperature": 0.5,
+        "top_p": 0.9,
+        "max_output_tokens": 65000,
     },
     "embedding_service": {
         # Embedding service configuration
@@ -303,7 +307,7 @@ defaults = {
         "model": "gpt-4o",  # Model to use for generation
         "model_name": "gpt-4o",  # Specific model name for citation research (faster than gpt-5.1)
         "timeout": 600,  # Request timeout in seconds
-        "max_tokens": 250000,  # Maximum tokens in response (increased to prevent truncation)
+        "max_tokens": 32000,  # Maximum tokens in response (OpenAI-only; Gemini reads gemini.max_output_tokens)
         "temperature": 0.5,  # Temperature for generation
         "reasoning_effort": "high",  # Reasoning effort: low, medium, high
         "verbosity": "medium",  # Verbosity level: low, medium, high

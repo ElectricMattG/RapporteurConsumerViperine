@@ -1,0 +1,130 @@
+{{- range $name, $config := .Values.consumers }}
+{{- if $config.enabled }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+  labels:
+    app: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+    role: {{ $name | kebabcase }}
+    consumer-group: {{ $.Release.Name }}
+    component: kafka-consumer
+spec:
+  replicas: {{ $config.replicas }}
+  {{- if $config.strategy }}
+  strategy:
+    {{- toYaml $config.strategy | nindent 4 }}
+  {{- end }}
+  selector:
+    matchLabels:
+      app: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+  template:
+    metadata:
+      labels:
+        app: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+        role: {{ $name | kebabcase }}
+        consumer-group: {{ $.Release.Name }}
+        component: kafka-consumer
+    spec:
+      {{- if $.Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml $.Values.imagePullSecrets | nindent 8 }}
+      {{- end }}
+      {{- if $.Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml $.Values.nodeSelector | nindent 8 }}
+      {{- end }}
+      {{- if $.Values.tolerations }}
+      tolerations:
+        {{- toYaml $.Values.tolerations | nindent 8 }}
+      {{- end }}
+      containers:
+      - name: consumer
+        image: "{{ $.Values.image.registry }}/{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+        imagePullPolicy: {{ $.Values.image.pullPolicy }}
+        command:
+          {{- toYaml $config.command | nindent 10 }}
+        ports:
+        - name: metrics
+          containerPort: {{ $config.metricsPort }}
+          protocol: TCP
+        # Shared non-secret config injected from ConfigMap
+        envFrom:
+        - configMapRef:
+            name: {{ $.Release.Name }}-consumer-config
+        # Secret / credential env vars (override any ConfigMap keys of same name)
+        env:
+        {{- if $.Values.gcpCredentials.enabled }}
+        - name: GOOGLE_APPLICATION_CREDENTIALS
+          value: {{ $.Values.gcpCredentials.mountPath }}/{{ $.Values.gcpCredentials.fileName }}
+        {{- end }}
+        {{- if $.Values.azureStorage.enabled }}
+        - name: AZURE_STORAGE_CONNECTION_STRING
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Values.azureStorage.secretName }}
+              key: connection-string
+              optional: true
+        - name: AZURE_INDICES_CONTAINER
+          value: {{ $.Values.azureStorage.containerNames.indices }}
+        - name: AZURE_ARCHIVE_CONTAINER
+          value: {{ $.Values.azureStorage.containerNames.archive }}
+        - name: AZURE_SESSION_BACKUPS_CONTAINER
+          value: {{ $.Values.azureStorage.containerNames.sessionBackups }}
+        {{- end }}
+        {{- if $config.env }}
+        {{- toYaml $config.env | nindent 8 }}
+        {{- end }}
+        resources:
+          {{- toYaml $config.resources | nindent 10 }}
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: metrics
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: metrics
+          initialDelaySeconds: 15
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+        volumeMounts:
+        - name: cache
+          mountPath: {{ $.Values.persistence.mountPath }}
+        {{- if $.Values.indices.enabled }}
+        - name: indices
+          mountPath: {{ $.Values.indices.mountPath }}
+          readOnly: {{ $.Values.indices.readOnly }}
+        {{- end }}
+        {{- if $.Values.gcpCredentials.enabled }}
+        - name: gcp-credentials
+          mountPath: {{ $.Values.gcpCredentials.mountPath }}
+          readOnly: true
+        {{- end }}
+      volumes:
+      - name: cache
+        {{- if $.Values.persistence.enabled }}
+        persistentVolumeClaim:
+          claimName: {{ $.Release.Name }}-cache
+        {{- else }}
+        emptyDir: {}
+        {{- end }}
+      {{- if $.Values.indices.enabled }}
+      - name: indices
+        hostPath:
+          path: {{ $.Values.indices.hostPath }}
+          type: Directory
+      {{- end }}
+      {{- if $.Values.gcpCredentials.enabled }}
+      - name: gcp-credentials
+        secret:
+          secretName: {{ $.Values.gcpCredentials.secretName }}
+      {{- end }}
+{{- end }}
+{{- end }}

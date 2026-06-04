@@ -27,6 +27,7 @@ Usage:
 """
 
 import asyncio
+import hashlib
 import json
 import os
 import signal
@@ -394,11 +395,18 @@ class KafkaSummarizerConsumer(Base):
             result['success'] = True
             result['summary_file'] = str(summary_file)
 
-            # Publish summary-completed message for Summary Indexer
+            # Publish summary-completed message for Summary Indexer.
+            # document_id is ALWAYS derived from the source URL (see
+            # _publish_summary_completed). We deliberately do NOT forward an
+            # upstream document_id, because upstream producers (RAG, web
+            # scraper, extraction-failure re-entry) historically supplied
+            # several incompatible shapes (request_id-based, uuid_url-based,
+            # date+counter-based) which caused the combined index to hold
+            # multiple variants of the same logical document and broke dedup.
             await self._publish_summary_completed(
                 request_id=request_id,
                 session_id=session_id,
-                document_id=metadata.get('document_id', request_id),
+                document_id=None,
                 source_url=url,
                 summary_file=str(summary_file),
                 message_data=message_data
@@ -582,6 +590,20 @@ class KafkaSummarizerConsumer(Base):
             self.session_counts[session_id]['count'] += 1
             current_count = self.session_counts[session_id]['count']
             total_requests = self.session_counts[session_id]['total']
+
+            # Build a fully deterministic document_id from the source URL.
+            # Format: doc_<md5(url)[:12]>
+            #   - Pure function of the URL: same URL -> same id, always.
+            #   - No date, no session, no per-message counter -- those broke
+            #     dedup because the same URL reprocessed on another day, in
+            #     another session, or via the extraction-failure re-entry
+            #     path produced a different id and slipped past the
+            #     document_id-keyed dedup in the summary indexer.
+            #   - Matches the `doc_<hex>` shape already used by the chunker
+            #     side of the index (research_chunks_*), so summaries and
+            #     chunks share one canonical document identifier.
+            _url_for_id = source_url or request_id
+            document_id = f"doc_{hashlib.md5(_url_for_id.encode()).hexdigest()[:12]}"
 
             # Create message
             message = {

@@ -54,6 +54,7 @@ Usage:
 """
 
 import asyncio
+import fcntl
 import json
 import os
 import signal
@@ -482,7 +483,33 @@ class KafkaSummaryIndexerConsumer(Base):
             # Ensure parent directory exists for combined index file
             self.combined_index_file.parent.mkdir(parents=True, exist_ok=True)
 
-            # Load existing document IDs from combined index to avoid duplicates
+            # Acquire an exclusive advisory lock on a sibling lockfile so that
+            # concurrent writers (e.g. old + new pod overlap during a rolling
+            # update, or retries within the same pod) cannot interleave reads
+            # and appends — that race produced both duplicated document_ids
+            # and torn JSONL lines (records glued together without a newline).
+            # CRITICAL: Resolve symlinks first so all processes use the same lock file
+            real_index_file = self.combined_index_file.resolve()
+            lock_path = real_index_file.with_suffix(
+                real_index_file.suffix + '.lock'
+            )
+            with open(lock_path, 'w') as lock_fh:
+                fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+                try:
+                    self._aggregate_session_into_combined(
+                        session_id, session_index_file
+                    )
+                finally:
+                    fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
+
+        except Exception as e:
+            self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
+
+    def _aggregate_session_into_combined(
+        self, session_id: str, session_index_file: Path
+    ):
+        """Inner aggregation routine; caller must hold the combined-index lock."""
+        try:
             existing_doc_ids = set()
             if self.combined_index_file.exists():
                 with open(self.combined_index_file, 'r', encoding='utf-8') as f:
@@ -546,15 +573,6 @@ class KafkaSummaryIndexerConsumer(Base):
 
                 except Exception as e:
                     self._logger.error(f"   ❌ Error publishing notifications: {e}")
-
-        except Exception as e:
-            self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
-            self._logger.info(f"      Duplicates skipped: {duplicate_count}")
-            self._logger.info(f"      Total in combined index: {len(existing_doc_ids)}")
-
-            # Publish frontend message with aggregation results
-            if new_count > 0:
-                self._publish_frontend_message(session_id, new_additions, len(existing_doc_ids))
 
         except Exception as e:
             self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)

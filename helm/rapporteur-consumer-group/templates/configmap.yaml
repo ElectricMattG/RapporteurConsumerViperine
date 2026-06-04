@@ -1,0 +1,29 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Release.Name }}-consumer-config
+  namespace: {{ .Release.Namespace }}
+  labels:
+    consumer-group: {{ .Release.Name }}
+    component: kafka-consumer
+data:
+  # Kafka
+  KAFKA_BOOTSTRAP_SERVERS: {{ .Values.kafka.bootstrapServers | quote }}
+
+  # GCP / Vertex AI
+  GCP_PROJECT_ID:  {{ .Values.config.gcpProjectId | quote }}
+  GCLOUD_PROJECT:  {{ .Values.config.gcpProjectId | quote }}
+  PROJECT_ID:      {{ .Values.config.gcpProjectId | quote }}
+  LOCATION:        {{ .Values.config.gcpLocation | quote }}
+
+  # Embedding service
+  EMBEDDING_SERVICE_URL: {{ .Values.config.embeddingServiceUrl | quote }}
+
+  # Index / search
+  ACTIVE_INDEX_FOLDER: {{ .Values.config.activeIndexFolder | quote }}
+
+  # LLM
+  SUMMARIZER_LLM_PROVIDER: {{ .Values.config.summarizerLlmProvider | quote }}
+
+  # Observability
+  LOG_LEVEL: {{ .Values.config.logLevel | quote }}

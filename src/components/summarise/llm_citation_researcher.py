@@ -58,11 +58,14 @@ class CitationResearchClient(Base):
 
         # Citation research settings (with fallback defaults) - set these BEFORE initializing clients
         self.summary_word_count = self._app_config.get('citation_research.summary_word_count') if self._app_config.get('citation_research.summary_word_count') else 100
-        self.timeout = self._app_config.get('openai.timeout') if self._app_config.get('openai.timeout') else 180
 
+        # Provider-scoped timeout. Providers are mutually exclusive: NEVER read
+        # openai.* keys when llm_provider == 'gemini' (and vice versa).
         if self.llm_provider == 'openai':
+            self.timeout = self._app_config.get('openai.timeout') or 180
             self._init_openai(api_key, model_name, organization)
         elif self.llm_provider == 'gemini':
+            self.timeout = self._app_config.get('gemini.timeout') or 180
             self._init_gemini(api_key, model_name)
         else:
             raise ValueError(f"Unsupported LLM provider: {llm_provider}. Choose 'openai' or 'gemini'.")
@@ -287,14 +290,23 @@ class CitationResearchClient(Base):
         if enable_search:
             self._logger.info(f"   🔍 Google Search grounding ENABLED for web access")
 
-        # Gemini uses the async generate_content method with optional search grounding
-        temperature = self._app_config.get('openai.temperature') or 0.5
-        max_tokens = self._app_config.get('openai.max_tokens') or 16000
+        # Gemini-only config. NEVER read openai.* keys here — providers are
+        # mutually exclusive. Vertex AI caps max_output_tokens at 65536
+        # (exclusive), so we clamp defensively as well.
+        temperature = self._app_config.get('gemini.temperature')
+        if temperature is None:
+            temperature = 0.5
+        max_tokens = self._app_config.get('gemini.max_output_tokens') or 32000
+        if max_tokens >= 65536:
+            self._logger.warning(
+                f"   ⚠️  gemini.max_output_tokens={max_tokens} exceeds Vertex limit; clamping to 65535"
+            )
+            max_tokens = 65535
         response = await self.client.generate_content(
             prompt=prompt,
             temperature=temperature,
             max_tokens=max_tokens,
-            enable_search=enable_search  # Enable Google Search tool for web grounding
+            enable_search=enable_search,  # Enable Google Search tool for web grounding
         )
 
         return response

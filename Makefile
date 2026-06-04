@@ -234,63 +234,108 @@ azure_login: ## Login to Azure
 	@echo "✓ Azure login successful"
 
 
-# Kafka Docker images
-KAFKA_VERSION ?= 7.5.0
-KAFKA_IMAGE = kafka
-ZOOKEEPER_IMAGE = zookeeper
-KAFKA_FULL_IMAGE = $(ACR_LOGIN_SERVER)/$(KAFKA_IMAGE):$(KAFKA_VERSION)
-KAFKA_LATEST_IMAGE = $(ACR_LOGIN_SERVER)/$(KAFKA_IMAGE):latest
-ZOOKEEPER_FULL_IMAGE = $(ACR_LOGIN_SERVER)/$(ZOOKEEPER_IMAGE):$(KAFKA_VERSION)
-ZOOKEEPER_LATEST_IMAGE = $(ACR_LOGIN_SERVER)/$(ZOOKEEPER_IMAGE):latest
+# ──────────────────────────────────────────────────────────────────────────────
+# k8s deployment targets — aligned with RapporteurRAG / RapporteurFrontEnd
+#
+# A "consumer group" = one helm release inside the shared `consumers`
+# namespace. Override RELEASE_NAME to deploy additional groups:
+#   make k8s_deploy RELEASE_NAME=viperine
+#   make k8s_deploy RELEASE_NAME=indexing
+# ──────────────────────────────────────────────────────────────────────────────
+REGISTRY      ?= 192.168.1.3:5000
+K8S_IMAGE     ?= rapporteur-consumer-viperine
+K8S_VERSION   ?= 0.0.1
+K8S_NS        ?= consumers
+HELM_CHART    ?= ./helm/rapporteur-consumer-group
+RELEASE_NAME  ?= viperine
+DOCKER_BUILD_ENV ?= DOCKER_BUILDKIT=0
 
 
-.PHONY: kafka_docker_build
-kafka_docker_build: ## Build Kafka Docker images
-	@echo "$(YELLOW)$(BOLD)Building Kafka Docker image...$(RESET)"
-	docker build --platform linux/amd64 -f Dockerfile.kafka -t $(KAFKA_IMAGE):$(KAFKA_VERSION) .
-	@echo "$(YELLOW)$(BOLD)Building ZooKeeper Docker image...$(RESET)"
-	docker build --platform linux/amd64 -f Dockerfile.zookeeper -t $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) .
-	@echo "✓ Kafka images built"
+.PHONY: k8s_prereqs
+k8s_prereqs: ## One-time bootstrap: hostPath dir, namespace, copy gcp-credentials from rag-service
+	@echo "$(YELLOW)$(BOLD)Setting up k8s prerequisites...$(RESET)"
+	@sudo mkdir -p /mnt/workspace_2/$(RELEASE_NAME)-cache
+	@sudo chmod 777 /mnt/workspace_2/$(RELEASE_NAME)-cache
+	@kubectl get ns $(K8S_NS) >/dev/null 2>&1 \
+		|| kubectl create ns $(K8S_NS)
+	@kubectl get secret gcp-credentials -n $(K8S_NS) >/dev/null 2>&1 \
+		|| kubectl get secret gcp-credentials -n rag-service -o yaml \
+			| sed "s/namespace: rag-service/namespace: $(K8S_NS)/" \
+			| kubectl apply -f -
+	@echo "$(GREEN)$(BOLD)Prereqs ready in namespace $(K8S_NS).$(RESET)"
 
 
-.PHONY: kafka_docker_tag
-kafka_docker_tag: ## Tag Kafka Docker images for ACR
-	@echo "$(YELLOW)$(BOLD)Tagging Kafka images for ACR...$(RESET)"
-	docker tag $(KAFKA_IMAGE):$(KAFKA_VERSION) $(KAFKA_FULL_IMAGE)
-	docker tag $(KAFKA_IMAGE):$(KAFKA_VERSION) $(KAFKA_LATEST_IMAGE)
-	docker tag $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) $(ZOOKEEPER_FULL_IMAGE)
-	docker tag $(ZOOKEEPER_IMAGE):$(KAFKA_VERSION) $(ZOOKEEPER_LATEST_IMAGE)
-	@echo "✓ Tagged: $(KAFKA_FULL_IMAGE)"
-	@echo "✓ Tagged: $(KAFKA_LATEST_IMAGE)"
-	@echo "✓ Tagged: $(ZOOKEEPER_FULL_IMAGE)"
-	@echo "✓ Tagged: $(ZOOKEEPER_LATEST_IMAGE)"
+.PHONY: k8s_build
+k8s_build: ## Build container image and tag for local registry
+	@echo "$(YELLOW)$(BOLD)Building $(REGISTRY)/$(K8S_IMAGE):$(K8S_VERSION)...$(RESET)"
+	@$(DOCKER_BUILD_ENV) docker build -f Dockerfile -t $(REGISTRY)/$(K8S_IMAGE):$(K8S_VERSION) .
+	@echo "$(GREEN)$(BOLD)Build complete.$(RESET)"
 
 
-.PHONY: kafka_docker_push
-kafka_docker_push: ## Push Kafka Docker images to ACR
-	@echo "$(YELLOW)$(BOLD)Pushing Kafka images to ACR...$(RESET)"
-	@echo "Logging in to ACR: $(ACR_LOGIN_SERVER)..."
-	@az acr login --name $(ACR_NAME)
-	docker push $(KAFKA_FULL_IMAGE)
-	docker push $(KAFKA_LATEST_IMAGE)
-	docker push $(ZOOKEEPER_FULL_IMAGE)
-	docker push $(ZOOKEEPER_LATEST_IMAGE)
-	@echo "✓ Successfully pushed Kafka images to ACR!"
+.PHONY: k8s_push
+k8s_push: ## Push image to local registry
+	@echo "$(YELLOW)$(BOLD)Pushing $(REGISTRY)/$(K8S_IMAGE):$(K8S_VERSION)...$(RESET)"
+	@docker push $(REGISTRY)/$(K8S_IMAGE):$(K8S_VERSION)
+	@echo "$(GREEN)$(BOLD)Push complete.$(RESET)"
+
+
+.PHONY: k8s_install
+k8s_install: ## Helm install/upgrade $(RELEASE_NAME) into namespace $(K8S_NS)
+	@echo "$(YELLOW)$(BOLD)Deploying $(RELEASE_NAME) via Helm...$(RESET)"
+	@helm upgrade --install $(RELEASE_NAME) $(HELM_CHART) \
+		--namespace $(K8S_NS) --create-namespace \
+		--set image.tag=$(K8S_VERSION)
+	@echo "$(GREEN)$(BOLD)Release $(RELEASE_NAME) installed.$(RESET)"
+
+
+.PHONY: k8s_deploy
+k8s_deploy: k8s_build k8s_push k8s_install k8s_status ## Full release pipeline: build → push → install → status
+
+
+.PHONY: k8s_status
+k8s_status: ## Show rollout status and pods/svcs for this consumer group
+	@for d in $$(kubectl -n $(K8S_NS) get deploy -l consumer-group=$(RELEASE_NAME) -o name); do \
+		kubectl -n $(K8S_NS) rollout status $$d --timeout=180s ; \
+	done
 	@echo ""
-	@echo "Images available at:"
-	@echo "  $(KAFKA_FULL_IMAGE)"
-	@echo "  $(KAFKA_LATEST_IMAGE)"
-	@echo "  $(ZOOKEEPER_FULL_IMAGE)"
-	@echo "  $(ZOOKEEPER_LATEST_IMAGE)"
+	@kubectl -n $(K8S_NS) get pods,svc -l consumer-group=$(RELEASE_NAME)
 
 
-.PHONY: kafka_docker_build_push
-kafka_docker_build_push: kafka_docker_build kafka_docker_tag kafka_docker_push ## Build, tag, and push Kafka images to ACR
-	@echo ""
-	@echo "$(GREEN)$(BOLD)Kafka images built and pushed successfully!$(RESET)"
+.PHONY: k8s_logs
+k8s_logs: ## Tail logs from all pods in this consumer group (Ctrl-C to stop)
+	@kubectl -n $(K8S_NS) logs -f -l consumer-group=$(RELEASE_NAME) --all-containers=true --max-log-requests=10
 
 
-.PHONY: docker_build_all
-docker_build_all: docker_build_push kafka_docker_build_push ## Build and push all Docker images (consumers + Kafka)
-	@echo ""
-	@echo "$(GREEN)$(BOLD)All Docker images built and pushed successfully!$(RESET)"
+.PHONY: k8s_restart
+k8s_restart: ## Rolling restart of every deployment in this consumer group
+	@kubectl -n $(K8S_NS) rollout restart deploy -l consumer-group=$(RELEASE_NAME)
+
+
+.PHONY: k8s_shell
+k8s_shell: ## Open a shell inside one consumer pod (override ROLE=<role-kebabcase>)
+	@kubectl -n $(K8S_NS) exec -it deploy/$(RELEASE_NAME)-$(or $(ROLE),web-scraper) -- /bin/bash
+
+
+.PHONY: k8s_smoke
+k8s_smoke: ## E2E smoke test: health probes → RAG trigger → pipeline Kafka flow → indexing
+	@RELEASE_NAME=$(RELEASE_NAME) K8S_NS=$(K8S_NS) \
+		RAG_HOST=$(or $(RAG_HOST),192.168.1.3) \
+		RAG_VHOST=$(or $(RAG_VHOST),rag.rapporteur.ai) \
+		ENRICH=$(or $(ENRICH),true) \
+		bash scripts/smoke_test_e2e.sh
+
+.PHONY: k8s_smoke_search
+k8s_smoke_search: ## Search-only smoke test (no web scraping): health probes + RAG response only
+	@RELEASE_NAME=$(RELEASE_NAME) K8S_NS=$(K8S_NS) \
+		RAG_HOST=$(or $(RAG_HOST),192.168.1.3) \
+		RAG_VHOST=$(or $(RAG_VHOST),rag.rapporteur.ai) \
+		ENRICH=false \
+		bash scripts/smoke_test_e2e.sh
+
+
+.PHONY: k8s_uninstall
+k8s_uninstall: ## Uninstall the helm release (leaves namespace and secrets intact)
+	@echo "$(YELLOW)$(BOLD)Uninstalling $(RELEASE_NAME) from $(K8S_NS)...$(RESET)"
+	@helm uninstall $(RELEASE_NAME) -n $(K8S_NS) || true
+	@echo "$(GREEN)Done. Namespace $(K8S_NS) and secrets preserved.$(RESET)"
+	@echo "To delete the namespace: kubectl delete ns $(K8S_NS)"

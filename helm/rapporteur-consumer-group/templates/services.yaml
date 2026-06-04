@@ -1,0 +1,25 @@
+{{- range $name, $config := .Values.consumers }}
+{{- if $config.enabled }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+  namespace: {{ $.Release.Namespace }}
+  labels:
+    app: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+    role: {{ $name | kebabcase }}
+    consumer-group: {{ $.Release.Name }}
+    component: kafka-consumer
+    metrics: "true"
+spec:
+  type: ClusterIP
+  ports:
+  - name: metrics
+    port: {{ $config.metricsPort }}
+    targetPort: metrics
+    protocol: TCP
+  selector:
+    app: {{ printf "%s-%s" $.Release.Name ($name | kebabcase) }}
+{{- end }}
+{{- end }}
