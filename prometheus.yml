@@ -1,0 +1,136 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: local-k3s
+    environment: development
+
+scrape_configs:
+  # Prometheus self-monitoring
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Kafka broker
+  - job_name: 'kafka_kafka_broker'
+    static_configs:
+      - targets: ['kafka-headless.kafka.svc.cluster.local:5556']
+        labels:
+          consumer: 'kafka_broker'
+          service: 'kafka_consumer'
+
+  # --- Legacy host-process consumers (non-Viperine) ---
+  - job_name: 'kafka_document_chunker'
+    static_configs:
+      - targets: ['192.168.1.3:8002']
+        labels:
+          consumer: 'document_chunker'
+          service: 'kafka_consumer'
+
+  - job_name: 'kafka_chunk_embedder'
+    static_configs:
+      - targets: ['192.168.1.3:8003']
+        labels:
+          consumer: 'chunk_embedder'
+          service: 'kafka_consumer'
+
+  - job_name: 'kafka_qa_generator'
+    static_configs:
+      - targets: ['192.168.1.3:8004']
+        labels:
+          consumer: 'qa_generator'
+          service: 'kafka_consumer'
+
+  - job_name: 'kafka_qa_embedder'
+    static_configs:
+      - targets: ['192.168.1.3:8005']
+        labels:
+          consumer: 'qa_embedder'
+          service: 'kafka_consumer'
+
+  - job_name: 'kafka_citation_extractor'
+    static_configs:
+      - targets: ['192.168.1.3:8007']
+        labels:
+          consumer: 'citation_extractor'
+          service: 'kafka_consumer'
+
+  - job_name: 'kafka_index_aggregator'
+    static_configs:
+      - targets: ['192.168.1.3:8008']
+        labels:
+          consumer: 'index_aggregator'
+          service: 'kafka_consumer'
+
+  # --- Viperine consumers (k8s-native, consumers namespace) ---
+  - job_name: 'viperine_web_scraper'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['viperine-web-scraper.consumers.svc.cluster.local:8001']
+        labels:
+          consumer: 'web_scraper'
+          pipeline: 'viperine'
+          service: 'kafka_consumer'
+
+  - job_name: 'viperine_summarizer'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['viperine-summarizer.consumers.svc.cluster.local:8010']
+        labels:
+          consumer: 'summarizer'
+          pipeline: 'viperine'
+          service: 'kafka_consumer'
+
+  - job_name: 'viperine_summary_indexer'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['viperine-summary-indexer.consumers.svc.cluster.local:8006']
+        labels:
+          consumer: 'summary_indexer'
+          pipeline: 'viperine'
+          service: 'kafka_consumer'
+
+  - job_name: 'viperine_index_aggregator'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['viperine-index-aggregator.consumers.svc.cluster.local:8008']
+        labels:
+          consumer: 'index_aggregator'
+          pipeline: 'viperine'
+          service: 'kafka_consumer'
+
+  - job_name: 'viperine_dead_letter'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['viperine-dead-letter-consumer.consumers.svc.cluster.local:8009']
+        labels:
+          consumer: 'dead_letter'
+          pipeline: 'viperine'
+          service: 'kafka_consumer'
+
+  # --- kaliya / lamia / bboa (rag-service namespace) ---
+  - job_name: 'bboa_consumer'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['bboa-consumer-metrics.rag-service.svc.cluster.local:8009']
+        labels:
+          service: 'bboa_consumer'
+
+  - job_name: 'lamia_consumer'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['lamia-consumer-metrics.rag-service.svc.cluster.local:8009']
+        labels:
+          service: 'lamia_consumer'
+
+  - job_name: 'kaliya_consumer'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['kaliya-consumer-metrics.rag-service.svc.cluster.local:8015']
+        labels:
+          service: 'kaliya_consumer'

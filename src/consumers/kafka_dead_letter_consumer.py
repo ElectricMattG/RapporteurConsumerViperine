@@ -130,6 +130,19 @@ class KafkaDeadLetterConsumer(Base):
                 buckets=[0.1, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0]
             )
 
+            self.dlq_messages_by_origin = Counter(
+                'kafka_consumer_dlq_messages_by_origin_total',
+                'Total DLQ messages by the topic that originated the failure',
+                ['consumer_id', 'origin_topic']
+            )
+
+            self.dlq_age_seconds = Histogram(
+                'kafka_consumer_dlq_age_seconds',
+                'Time between failure timestamp and DLQ processing (message age in DLQ)',
+                ['consumer_id'],
+                buckets=[1, 10, 30, 60, 300, 600, 1800, 3600, 86400]
+            )
+
             # Create metrics server with health checks
             self.metrics_server = MetricsServer(
                 port=8009,
@@ -256,6 +269,7 @@ class KafkaDeadLetterConsumer(Base):
         session_id = message_data.get('session_id', 'unknown')
         error = message_data.get('error', 'Unknown error')
         timestamp = message_data.get('timestamp', datetime.now().isoformat())
+        origin_topic = message_data.get('origin_topic') or message_data.get('source_topic', 'unknown')
 
         self._logger.info("=" * 80)
         self._logger.info("⚠️  PIPELINE FAILURE DETECTED")
@@ -277,6 +291,26 @@ class KafkaDeadLetterConsumer(Base):
                 consumer_id=consumer_id_label,
                 failed_stage=failed_stage
             ).inc()
+
+            # Track message age in the DLQ
+            if hasattr(self, 'dlq_age_seconds'):
+                try:
+                    from datetime import timezone as _tz
+                    failure_ts = datetime.fromisoformat(timestamp.replace('Z', '+00:00'))
+                    if failure_ts.tzinfo is None:
+                        failure_ts = failure_ts.replace(tzinfo=_tz.utc)
+                    age = (datetime.now(_tz.utc) - failure_ts).total_seconds()
+                    if age >= 0:
+                        self.dlq_age_seconds.labels(consumer_id=consumer_id_label).observe(age)
+                except Exception:
+                    pass
+
+            # Track origin topic
+            if hasattr(self, 'dlq_messages_by_origin'):
+                self.dlq_messages_by_origin.labels(
+                    consumer_id=consumer_id_label,
+                    origin_topic=origin_topic
+                ).inc()
 
         # Log statistics
         try:

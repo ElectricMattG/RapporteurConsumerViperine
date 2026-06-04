@@ -51,8 +51,9 @@ from PyPDF2 import PdfReader
 
 # Telemetry imports
 try:
-    from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
-                                PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring import (CacheMetricsCollector, KafkaMetricsWrapper,
+                                MetricsServer, PrometheusMetrics,
+                                SystemMetricsCollector)
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError as e:
@@ -61,8 +62,9 @@ except ImportError as e:
         import os
         import sys
         sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..'))
-        from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
-                                    PrometheusMetrics, SystemMetricsCollector)
+        from src.monitoring import (CacheMetricsCollector, KafkaMetricsWrapper,
+                                    MetricsServer, PrometheusMetrics,
+                                    SystemMetricsCollector)
         from src.monitoring.logging_config import configure_logging
         TELEMETRY_AVAILABLE = True
     except ImportError:
@@ -158,7 +160,7 @@ class KafkaWebScraperConsumer(Base):
             )
 
             # Consumer-specific metrics
-            from prometheus_client import Counter, Gauge, Histogram
+            from prometheus_client import Counter, Histogram
 
             self.urls_scraped = Counter(
                 'kafka_consumer_urls_scraped_total',
@@ -173,16 +175,17 @@ class KafkaWebScraperConsumer(Base):
                 buckets=[0.1, 0.5, 1.0, 2.5, 5.0, 10.0, 30.0, 60.0]
             )
 
-            self.cache_files = Gauge(
-                'kafka_consumer_cache_files_total',
-                'Number of files in cache',
-                ['consumer_id']
+            # Cache metrics — managed by CacheMetricsCollector (replaces standalone gauges)
+            self.cache_metrics = CacheMetricsCollector(
+                consumer_id=consumer_id,
+                directories={'scrapes': str(self.cache_dir) if hasattr(self, 'cache_dir') else './cache/web_scrapes'},
+                scan_interval=60,
             )
 
-            self.cache_size_bytes = Gauge(
-                'kafka_consumer_cache_size_bytes',
-                'Total size of cache in bytes',
-                ['consumer_id']
+            self.scrape_strategy_total = Counter(
+                'kafka_consumer_scrape_strategy_total',
+                'Total URL fetches by extraction strategy',
+                ['consumer_id', 'strategy', 'outcome']
             )
 
             self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8001")
@@ -332,34 +335,20 @@ class KafkaWebScraperConsumer(Base):
             extraction_method: Method used (cloudscraper, playwright, curl_cffi, etc.)
         """
         if self.telemetry_enabled:
-            self.urls_scraped.labels(consumer_id=f"web_scraper_{os.getpid()}").inc()
-            self.scraping_duration.labels(
-                consumer_id=f"web_scraper_{os.getpid()}",
-                status='success'
-            ).observe(duration)
+            consumer_id = f"web_scraper_{os.getpid()}"
+            self.urls_scraped.labels(consumer_id=consumer_id).inc()
+            self.scraping_duration.labels(consumer_id=consumer_id, status='success').observe(duration)
+            if hasattr(self, 'scrape_strategy_total'):
+                self.scrape_strategy_total.labels(
+                    consumer_id=consumer_id, strategy=extraction_method, outcome='success'
+                ).inc()
             self._logger.debug(f"📊 Metrics tracked: URL scraped in {duration:.2f}s using {extraction_method}")
 
     def _update_cache_metrics(self):
-        """Update cache size and file count metrics."""
-        if self.telemetry_enabled:
+        """Trigger an immediate cache scan via CacheMetricsCollector."""
+        if self.telemetry_enabled and hasattr(self, 'cache_metrics'):
             try:
-                total_files = 0
-                total_size = 0
-
-                for root, dirs, files in os.walk(self.cache_dir):
-                    total_files += len(files)
-                    for file in files:
-                        file_path = os.path.join(root, file)
-                        try:
-                            total_size += os.path.getsize(file_path)
-                        except OSError:
-                            pass
-
-                consumer_id = f"web_scraper_{os.getpid()}"
-                self.cache_files.labels(consumer_id=consumer_id).set(total_files)
-                self.cache_size_bytes.labels(consumer_id=consumer_id).set(total_size)
-
-                self._logger.debug(f"📊 Cache metrics updated: {total_files} files, {total_size / 1024 / 1024:.2f} MB")
+                self.cache_metrics.collect_metrics()
             except Exception as e:
                 self._logger.warning(f"⚠️ Failed to update cache metrics: {e}")
 
@@ -667,6 +656,12 @@ class KafkaWebScraperConsumer(Base):
                             error_msg += f" (Attempted: {', '.join(extraction_attempts)})"
                         result['error'] = error_msg
                         self._logger.warning(f"   ❌ {error_msg}")
+                        if self.telemetry_enabled and hasattr(self, 'scrape_strategy_total'):
+                            self.scrape_strategy_total.labels(
+                                consumer_id=f"web_scraper_{os.getpid()}",
+                                strategy='all',
+                                outcome='failure'
+                            ).inc()
                         self._create_failure_document(request_dir, final_url, error_msg, response.status_code, session_id, request_id)
 
                         # Still attempt to generate summary from URL and title
@@ -2053,6 +2048,8 @@ class KafkaWebScraperConsumer(Base):
                 self._logger.info("📊 Starting telemetry services...")
                 self.system_metrics.start()
                 self.metrics_server.start()
+                if hasattr(self, 'cache_metrics'):
+                    self.cache_metrics.start()
                 self.metrics.set_state(1)  # running
                 self._logger.info("✅ Telemetry services started")
 

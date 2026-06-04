@@ -11,7 +11,12 @@ metadata:
     role: {{ $name | kebabcase }}
     consumer-group: {{ $.Release.Name }}
     component: kafka-consumer
+    pipeline: viperine
     metrics: "true"
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: {{ $config.metricsPort | quote }}
+    prometheus.io/path: "/metrics"
 spec:
   type: ClusterIP
   ports:

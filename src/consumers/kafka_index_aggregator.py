@@ -165,6 +165,12 @@ class KafkaIndexAggregatorConsumer(Base):
                 ['consumer_id']
             )
 
+            self.azure_upload_failures = Counter(
+                'kafka_consumer_azure_upload_failures_total',
+                'Total Azure Blob upload failures (after all retries)',
+                ['consumer_id', 'index_type']
+            )
+
             # Create metrics server with health checks
             self.metrics_server = MetricsServer(
                 port=8008,
@@ -1065,6 +1071,10 @@ class KafkaIndexAggregatorConsumer(Base):
                     blob_type='chunks',
                     status='failure'
                 ).observe(0)
+                if hasattr(self, 'azure_upload_failures'):
+                    self.azure_upload_failures.labels(
+                        consumer_id=consumer_id_label, index_type='chunks'
+                    ).inc()
 
             # Fallback to local storage
             try:

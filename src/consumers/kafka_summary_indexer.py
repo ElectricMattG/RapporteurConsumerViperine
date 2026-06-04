@@ -163,6 +163,18 @@ class KafkaSummaryIndexerConsumer(Base):
                 buckets=[0, 5, 10, 20, 50, 100, 200, 500]
             )
 
+            self.duplicates_detected = Counter(
+                'kafka_consumer_summary_duplicates_detected_total',
+                'Total summaries skipped during aggregation as duplicates',
+                ['consumer_id', 'match']
+            )
+
+            self.summary_id_scheme = Counter(
+                'kafka_consumer_summary_id_scheme_total',
+                'Total summaries received by document_id scheme (req_/doc_/uuid_legacy)',
+                ['consumer_id', 'scheme']
+            )
+
             self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8006")
         else:
             self.metrics = None
@@ -562,9 +574,22 @@ class KafkaSummaryIndexerConsumer(Base):
                                     dk = _hashlib.md5(normalize_url(entry['source_url']).encode()).hexdigest()
 
                                 # Dedup: skip if either document_id or dedup_key already present
-                                if (doc_id and doc_id in existing_doc_ids) or \
-                                   (dk and dk in existing_dedup_keys):
+                                doc_id_match = bool(doc_id and doc_id in existing_doc_ids)
+                                dedup_key_match = bool(dk and dk in existing_dedup_keys)
+                                if doc_id_match or dedup_key_match:
                                     duplicate_count += 1
+                                    if self.telemetry_enabled and hasattr(self, 'duplicates_detected'):
+                                        consumer_id_label = f"summary_indexer_{os.getpid()}"
+                                        if doc_id_match and dedup_key_match:
+                                            match_label = 'both'
+                                        elif doc_id_match:
+                                            match_label = 'document_id'
+                                        else:
+                                            match_label = 'dedup_key'
+                                        self.duplicates_detected.labels(
+                                            consumer_id=consumer_id_label,
+                                            match=match_label
+                                        ).inc()
                                     continue
 
                                 # New document — append to combined index
@@ -654,6 +679,17 @@ class KafkaSummaryIndexerConsumer(Base):
             current_count = message_data.get('current_count', 1)
             total_requests = message_data.get('total_requests', 1)
             status = message_data.get('status', 'success')  # 'success' | 'degraded' | 'failed'
+
+            # Track document_id scheme to surface rogue producers
+            if self.telemetry_enabled and hasattr(self, 'summary_id_scheme') and document_id:
+                consumer_id_label = f"summary_indexer_{os.getpid()}"
+                if document_id.startswith('req_'):
+                    scheme = 'req'
+                elif document_id.startswith('doc_'):
+                    scheme = 'doc'
+                else:
+                    scheme = 'uuid_legacy'
+                self.summary_id_scheme.labels(consumer_id=consumer_id_label, scheme=scheme).inc()
 
             self._logger.info("="*80)
             self._logger.info(f"📝 Processing Summary Indexing")

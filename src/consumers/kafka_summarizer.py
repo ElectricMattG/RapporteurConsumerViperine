@@ -157,6 +157,31 @@ class KafkaSummarizerConsumer(Base):
                 buckets=[100, 500, 1000, 2000, 5000, 10000, 20000, 50000]
             )
 
+            self.llm_input_tokens = Counter(
+                'kafka_consumer_llm_input_tokens_total',
+                'Total LLM input (prompt) tokens consumed',
+                ['consumer_id', 'model']
+            )
+
+            self.llm_output_tokens = Counter(
+                'kafka_consumer_llm_output_tokens_total',
+                'Total LLM output (completion) tokens produced',
+                ['consumer_id', 'model']
+            )
+
+            self.llm_estimated_cost_usd = Counter(
+                'kafka_consumer_llm_estimated_cost_usd_total',
+                'Total estimated LLM cost in USD',
+                ['consumer_id', 'model']
+            )
+
+            self.llm_latency = Histogram(
+                'kafka_consumer_llm_latency_seconds',
+                'LLM call end-to-end latency',
+                ['consumer_id', 'model'],
+                buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0]
+            )
+
             self._logger.info(f"✅ Telemetry initialized - consumer_id: {consumer_id}, port: 8010")
         else:
             self.metrics = None
@@ -380,12 +405,31 @@ class KafkaSummarizerConsumer(Base):
                     self.documents_summarized.labels(consumer_id=consumer_id_label).inc()
                     summary_text_len = len(summary_result.get('markdown_summary', ''))
                     self.summary_length.labels(consumer_id=consumer_id_label).observe(summary_text_len)
-                    tokens_used = summary_result.get('tokens_used', 0)
-                    if tokens_used > 0:
-                        self.llm_tokens_used.labels(
-                            consumer_id=consumer_id_label,
-                            provider=llm_provider
-                        ).inc(tokens_used)
+
+                    # LLM latency (per-call, not total summarization time)
+                    self.llm_latency.labels(
+                        consumer_id=consumer_id_label,
+                        model=llm_provider
+                    ).observe(summarization_duration)
+
+                    # Token tracking — split input/output if available, fall back to combined
+                    usage = summary_result.get('usage') or {}
+                    input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens', 0)
+                    output_tokens = usage.get('output_tokens') or usage.get('completion_tokens', 0)
+                    total_tokens = summary_result.get('tokens_used', 0) or (input_tokens + output_tokens)
+                    if input_tokens > 0:
+                        self.llm_input_tokens.labels(consumer_id=consumer_id_label, model=llm_provider).inc(input_tokens)
+                    if output_tokens > 0:
+                        self.llm_output_tokens.labels(consumer_id=consumer_id_label, model=llm_provider).inc(output_tokens)
+                    if total_tokens > 0:
+                        self.llm_tokens_used.labels(consumer_id=consumer_id_label, provider=llm_provider).inc(total_tokens)
+
+                    # Estimated cost: rough Gemini Flash pricing (update via config if needed)
+                    cost_per_1k_in = float(self._app_config.get('summarizer.cost_per_1k_input_tokens') or 0.000075)
+                    cost_per_1k_out = float(self._app_config.get('summarizer.cost_per_1k_output_tokens') or 0.0003)
+                    estimated_cost = (input_tokens / 1000 * cost_per_1k_in) + (output_tokens / 1000 * cost_per_1k_out)
+                    if estimated_cost > 0:
+                        self.llm_estimated_cost_usd.labels(consumer_id=consumer_id_label, model=llm_provider).inc(estimated_cost)
 
                 # Save summary to cache
                 summary_file = request_dir / "summary.jsonl"

@@ -27,6 +27,7 @@ Usage:
     server.start()
 """
 
+from .cache_metrics import CacheMetricsCollector
 from .exporters.metrics_server import MetricsServer
 from .kafka_metrics import KafkaMetricsWrapper
 from .logging_config import configure_logging, generate_trace_id
@@ -34,6 +35,7 @@ from .prometheus_metrics import PrometheusMetrics
 from .system_metrics import SystemMetricsCollector
 
 __all__ = [
+    'CacheMetricsCollector',
     'PrometheusMetrics',
     'SystemMetricsCollector',
     'KafkaMetricsWrapper',
