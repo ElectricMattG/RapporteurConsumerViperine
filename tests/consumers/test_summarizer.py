@@ -31,7 +31,8 @@ def _make_summarizer(mock_producer):
 
     inst = KafkaSummarizerConsumer.__new__(KafkaSummarizerConsumer)
     inst.producer = mock_producer
-    inst.summary_completed_topic = "summary-completed"
+    inst.summary_completed_topic = "viperine.summary-completed"
+    inst.dead_letter_topic = "viperine.dead-letter-queue"
     inst.session_counts = {}
     inst.telemetry_enabled = False
     inst._logger = logging.getLogger("test.summarizer")
@@ -181,7 +182,7 @@ class TestTerminalEvent:
 # ── TestDlqPublish ────────────────────────────────────────────────────────────
 
 class TestDlqPublish:
-    """_publish_to_dlq must produce to dead-letter-queue with correct schema."""
+    """_publish_to_dlq must produce to viperine.dead-letter-queue with correct schema."""
 
     async def test_produces_to_dlq_topic(self, mock_producer):
         s = _make_summarizer(mock_producer)
@@ -202,7 +203,7 @@ class TestDlqPublish:
 
         assert mock_producer.produce.called
         call_kwargs = mock_producer.produce.call_args[1]
-        assert call_kwargs["topic"] == "dead-letter-queue"
+        assert call_kwargs["topic"] == "viperine.dead-letter-queue"
 
     async def test_dlq_schema_fields(self, mock_producer):
         s = _make_summarizer(mock_producer)

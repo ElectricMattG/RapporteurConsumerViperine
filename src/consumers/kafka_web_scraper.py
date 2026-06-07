@@ -229,8 +229,9 @@ class KafkaWebScraperConsumer(Base):
                     self.kafka_config['sasl.password'] = os.getenv('KAFKA_SASL_PASSWORD', '')
 
             # Topic configuration
-            self.input_topic = self._app_config.get('kafka.input_topic') or 'web-scrape-requests'
-            self.output_topic = self._app_config.get('kafka.output_topic') or 'content-extracted'
+            self.input_topic = self._app_config.get('kafka.input_topic') or 'viperine.web-scrape-requests'
+            self.output_topic = self._app_config.get('kafka.output_topic') or 'viperine.content-extracted'
+            self.summarise_document_topic = self._app_config.get('kafka.summarise_document_topic') or 'viperine.summarise-document'
 
             # Web scraper configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
@@ -1946,7 +1947,7 @@ class KafkaWebScraperConsumer(Base):
             # Publish to BOTH topics to ensure always-on summarization
             # 1. Summarization topic - AI will generate high-quality summary
             self.producer.produce(
-                topic='summarise-document',
+                topic=self.summarise_document_topic,
                 key=request_id.encode('utf-8'),
                 value=message_bytes,
                 callback=self._delivery_callback
@@ -1963,7 +1964,7 @@ class KafkaWebScraperConsumer(Base):
             # Flush to ensure delivery
             self.producer.poll(0)
 
-            self._logger.info(f"📤 Published to 'summarise-document' and '{self.output_topic}' topics: request_id={request_id}")
+            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics: request_id={request_id}")
 
         except Exception as e:
             self._logger.error(f"❌ Error publishing to Kafka: {e}")

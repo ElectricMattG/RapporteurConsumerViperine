@@ -137,15 +137,16 @@ defaults = {
     "kafka": {
         # Kafka consumer configuration
         "bootstrap_servers": None,  # Set via KAFKA_BOOTSTRAP_SERVERS env var (e.g., "localhost:9092")
-        "group_id": "web-scraper-consumer",  # Consumer group ID for web scraper
+        "group_id": "viperine-web-scraper-v2",  # Consumer group ID for web scraper
         "auto_offset_reset": "earliest",  # Start from earliest message if no offset
         "enable_auto_commit": True,  # Auto-commit offsets
         "session_timeout_ms": 30000,  # Session timeout (30 seconds)
         "max_poll_records": 10,  # Maximum records to poll at once
 
         # Topic configuration
-        "input_topic": "web-scrape-requests",  # Topic to consume messages from (web scraper input)
-        "output_topic": "content-extracted",   # Topic to publish extracted content to (chunker & summarizer input)
+        "input_topic": "viperine.web-scrape-requests",  # Topic to consume messages from (web scraper input)
+        "output_topic": "viperine.content-extracted",   # Topic to publish extracted content to (chunker & summarizer input)
+        "summarise_document_topic": "viperine.summarise-document",  # Topic for AI summarization (web scraper → summarizer)
 
         # Security configuration (optional)
         "security_protocol": "PLAINTEXT",  # PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL
@@ -155,11 +156,14 @@ defaults = {
     },
     "summarizer": {
         # Summarizer consumer configuration
-        "consumer_group_id": "summarizer-consumer",  # Consumer group ID for summarizer
-        "summary_completed_topic": "summary-completed",  # Topic to publish summary completion messages
+        "consumer_group_id": "viperine-summarizer-v2",  # Consumer group ID for summarizer
+        "summary_completed_topic": "viperine.summary-completed",  # Topic to publish summary completion messages
+        "dead_letter_topic": "viperine.dead-letter-queue",  # Topic for failed/unprocessable messages
         "llm_provider": "gemini",  # LLM provider: 'openai' or 'gemini' (Gemini has native web grounding)
         "summary_word_count": 500,  # Target word count for summaries
         "max_concurrent_requests": 1,  # Max concurrent LLM API requests (rate limiting for 429 errors)
+        "cost_per_1k_input_tokens": 0.00125,   # Gemini 2.5 Pro: $1.25 per 1M input tokens
+        "cost_per_1k_output_tokens": 0.01,      # Gemini 2.5 Pro: $10.00 per 1M output tokens
     },
     "chunker": {
         # Document chunker consumer configuration
@@ -216,9 +220,10 @@ defaults = {
     },
     "summary_indexer": {
         # Summary indexer consumer configuration
-        "consumer_group_id": "summary-indexer-consumer",  # Consumer group ID for summary indexer
-        "input_topic": "summary-completed",  # Topic to consume summary completion messages from
-        "output_topic": "session-complete",  # Topic to publish session completion to index aggregator
+        "consumer_group_id": "viperine-summary-indexer-v2",  # Consumer group ID for summary indexer
+        "input_topic": "viperine.summary-completed",  # Topic to consume summary completion messages from
+        "output_topic": "viperine.session-complete",  # Topic to publish session completion to index aggregator
+        "frontend_topic": "viperine.frontend-message",  # Topic for UI notifications (consumed by FrontEnd SSE consumer)
         "cache_directory": "cache/summaries",  # Directory for summary index files
         "model_name": "all-MiniLM-L6-v2",  # Sentence transformer model for embeddings
         # Derived from ACTIVE_INDEX_FOLDER env var so config stays in sync with the active index.
@@ -229,7 +234,7 @@ defaults = {
         # Index aggregator consumer configuration
         "consumer_group_id": "index-aggregator-consumer",  # Consumer group ID for aggregator
         "input_topic": "qa-indexed",  # Topic to consume indexed Q&A pairs from
-        "session_complete_topic": "session-complete",  # Topic for session completion signals
+        "session_complete_topic": "viperine.session-complete",  # Topic for session completion signals
         "session_timeout": 300,  # Session timeout in seconds (2 minutes - aggregate even if incomplete)
         "cache_dir": "./cache/web_scrapes",  # Cache directory for processing files
         "session_backup_dir": "./cache/session_backups",  # Directory for session backups
@@ -245,8 +250,8 @@ defaults = {
     },
     "dead_letter": {
         # Dead letter queue consumer configuration
-        "consumer_group_id": "dead-letter-consumer",  # Consumer group ID for DLQ
-        "input_topic": "dead-letter-queue",  # Topic to consume failed messages from
+        "consumer_group_id": "viperine-dead-letter-v2",  # Consumer group ID for DLQ
+        "input_topic": "viperine.dead-letter-queue",  # Topic to consume failed messages from
         "output_directory": "cache/failures",  # Directory for failure logs
     },
     "qa_generation": {

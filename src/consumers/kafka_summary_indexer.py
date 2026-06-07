@@ -218,8 +218,9 @@ class KafkaSummaryIndexerConsumer(Base):
             }
 
             # Topic configuration
-            self.input_topic = self._app_config.get('summary_indexer.input_topic') or 'summary-completed'
-            self.output_topic = self._app_config.get('summary_indexer.output_topic') or 'session-complete'
+            self.input_topic = self._app_config.get('summary_indexer.input_topic') or 'viperine.summary-completed'
+            self.output_topic = self._app_config.get('summary_indexer.output_topic') or 'viperine.session-complete'
+            self.frontend_topic = self._app_config.get('summary_indexer.frontend_topic') or 'viperine.frontend-message'
 
             # Cache directory
             self.cache_dir = Path(self._app_config.get('summary_indexer.cache_directory') or 'cache/summaries')
@@ -655,7 +656,7 @@ class KafkaSummaryIndexerConsumer(Base):
 
         try:
             self.producer.produce(
-                'frontend-message',
+                self.frontend_topic,
                 key=session_id.encode('utf-8'),
                 value=json.dumps(message).encode('utf-8')
             )

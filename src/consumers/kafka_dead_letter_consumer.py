@@ -176,8 +176,8 @@ class KafkaDeadLetterConsumer(Base):
             bootstrap_servers = self._app_config.get('kafka.bootstrap_servers')
             if not bootstrap_servers:
                 bootstrap_servers = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
-            consumer_group_id = self._app_config.get('dead_letter.consumer_group_id') or 'dead-letter-consumer'
-            self.input_topic = self._app_config.get('dead_letter.input_topic') or 'dead-letter-queue'
+            consumer_group_id = self._app_config.get('dead_letter.consumer_group_id') or 'viperine-dead-letter-v2'
+            self.input_topic = self._app_config.get('dead_letter.input_topic') or 'viperine.dead-letter-queue'
 
             # Output configuration
             output_dir = self._app_config.get('dead_letter.output_directory') or 'cache/failures'

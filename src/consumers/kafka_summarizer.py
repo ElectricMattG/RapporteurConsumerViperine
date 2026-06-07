@@ -228,13 +228,14 @@ class KafkaSummarizerConsumer(Base):
 
             # Topic configuration
             # Support environment variable override for slim pipeline
-            # In slim pipeline: SUMMARIZER_INPUT_TOPIC=content-extracted (web scraper output)
-            # In full pipeline: use 'summarise-document' (default)
+            # In slim pipeline: SUMMARIZER_INPUT_TOPIC=viperine.content-extracted (web scraper output)
+            # In full pipeline: use 'viperine.summarise-document' (default)
             self.input_topic = os.getenv('SUMMARIZER_INPUT_TOPIC') or \
                               self._app_config.get('kafka.output_topic') or \
-                              'summarise-document'
-            self.output_topic = 'content-extracted'  # Publish summary back for chunking when extraction failed
-            self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'summary-completed'
+                              'viperine.summarise-document'
+            self.output_topic = self._app_config.get('kafka.output_topic') or 'viperine.content-extracted'  # Publish summary back for chunking when extraction failed
+            self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'viperine.summary-completed'
+            self.dead_letter_topic = self._app_config.get('summarizer.dead_letter_topic') or 'viperine.dead-letter-queue'
 
             # Session state tracking for summary indexer
             self.session_counts = {}  # {session_id: {count: int, total: int}}
@@ -772,7 +773,7 @@ class KafkaSummarizerConsumer(Base):
                 'last_attempt_at': now,
             }
             self.producer.produce(
-                topic='dead-letter-queue',
+                topic=self.dead_letter_topic,
                 key=session_id.encode('utf-8'),
                 value=json.dumps(record).encode('utf-8'),
                 callback=self._delivery_callback,
@@ -782,7 +783,7 @@ class KafkaSummarizerConsumer(Base):
                 f"   📨 Published DLQ record: stage={stage} category={record['category']}"
             )
             if self.telemetry_enabled:
-                self.metrics.increment_dead_letter('dead-letter-queue', record['category'])
+                self.metrics.increment_dead_letter(self.dead_letter_topic, record['category'])
         except Exception as e:
             self._logger.error(f"   ❌ Error publishing to DLQ: {e}")
 

@@ -1,10 +1,11 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "rapporteur-consumer-group.fullname" . }}-alerts
+  name: {{ .Release.Name }}-alerts
   namespace: {{ .Release.Namespace }}
   labels:
-    {{- include "rapporteur-consumer-group.labels" . | nindent 4 }}
+    consumer-group: {{ .Release.Name }}
+    component: kafka-consumer
     grafana_alert: "true"
 data:
   viperine-alerts.yml: |
@@ -20,8 +21,8 @@ data:
               severity: critical
               pipeline: viperine
             annotations:
-              summary: "Viperine consumer {{ $labels.consumer_id }} is not running"
-              description: "Consumer state is {{ $value }} (expected 1=running). Check pod logs."
+              summary: "Viperine consumer {{ "{{" }} $labels.consumer_id {{ "}}" }} is not running"
+              description: "Consumer state is {{ "{{" }} $value {{ "}}" }} (expected 1=running). Check pod logs."
 
           - alert: ViperineConsumerStalled
             expr: (time() - kafka_consumer_last_successful_poll_timestamp{pipeline="viperine"}) > 300
@@ -30,8 +31,8 @@ data:
               severity: critical
               pipeline: viperine
             annotations:
-              summary: "Viperine consumer {{ $labels.consumer_id }} has not polled Kafka for 5+ minutes"
-              description: "Last successful poll was {{ $value | humanizeDuration }} ago."
+              summary: "Viperine consumer {{ "{{" }} $labels.consumer_id {{ "}}" }} has not polled Kafka for 5+ minutes"
+              description: "Last successful poll was {{ "{{" }} $value | humanizeDuration {{ "}}" }} ago."
 
           - alert: ViperineTargetMissing
             expr: up{job=~"viperine_.*"} == 0
@@ -40,8 +41,8 @@ data:
               severity: critical
               pipeline: viperine
             annotations:
-              summary: "Prometheus cannot reach Viperine consumer {{ $labels.job }}"
-              description: "Scrape target {{ $labels.instance }} is unreachable."
+              summary: "Prometheus cannot reach Viperine consumer {{ "{{" }} $labels.job {{ "}}" }}"
+              description: "Scrape target {{ "{{" }} $labels.instance {{ "}}" }} is unreachable."
 
           # ── Kafka lag ───────────────────────────────────────────────────
           - alert: ViperineHighConsumerLag
@@ -51,8 +52,8 @@ data:
               severity: warning
               pipeline: viperine
             annotations:
-              summary: "Viperine consumer {{ $labels.consumer_id }} has high lag on {{ $labels.topic }}"
-              description: "Lag is {{ $value }} messages (threshold: 1000)."
+              summary: "Viperine consumer {{ "{{" }} $labels.consumer_id {{ "}}" }} has high lag on {{ "{{" }} $labels.topic {{ "}}" }}"
+              description: "Lag is {{ "{{" }} $value {{ "}}" }} messages (threshold: 1000)."
 
           # ── Errors ──────────────────────────────────────────────────────
           - alert: ViperineHighErrorRatio
@@ -66,8 +67,8 @@ data:
               severity: warning
               pipeline: viperine
             annotations:
-              summary: "Viperine consumer {{ $labels.consumer_id }} error ratio > 5%"
-              description: "{{ $value | humanizePercentage }} of messages are failing."
+              summary: "Viperine consumer {{ "{{" }} $labels.consumer_id {{ "}}" }} error ratio > 5%"
+              description: "{{ "{{" }} $value | humanizePercentage {{ "}}" }} of messages are failing."
 
           # ── Dead-letter queue ───────────────────────────────────────────
           - alert: ViperineDLQGrowing
@@ -78,7 +79,7 @@ data:
               pipeline: viperine
             annotations:
               summary: "Viperine dead-letter queue is receiving messages"
-              description: "{{ $value | humanize }} DLQ messages/s over the last 15 minutes."
+              description: "{{ "{{" }} $value | humanize {{ "}}" }} DLQ messages/s over the last 15 minutes."
 
           # ── Duplicate document IDs ──────────────────────────────────────
           - alert: ViperineRogueDocIdProducer
@@ -90,7 +91,7 @@ data:
             annotations:
               summary: "doc_<hash> document IDs appearing in summary-completed topic"
               description: >
-                {{ $value }} new doc_<hash> records in the last 10 minutes.
+                {{ "{{" }} $value {{ "}}" }} new doc_<hash> records in the last 10 minutes.
                 A foreign producer (possibly the kaliya consumer's bundled kafka_summarizer.py)
                 is writing to the summary-completed topic. See VIPERINE_OBSERVABILITY_PLAN.md §B1.
 
@@ -102,7 +103,7 @@ data:
               pipeline: viperine
             annotations:
               summary: "Spike in document_id duplicates at the summary indexer"
-              description: "{{ $value }} duplicate document_id collisions in 10 minutes."
+              description: "{{ "{{" }} $value {{ "}}" }} duplicate document_id collisions in 10 minutes."
 
           # ── LLM cost ────────────────────────────────────────────────────
           - alert: ViperineLLMCostSpike
@@ -113,4 +114,4 @@ data:
               pipeline: viperine
             annotations:
               summary: "Viperine summarizer LLM cost exceeds $1/hour"
-              description: "Current hourly rate is ${{ $value | humanize }}."
+              description: "Current hourly rate is ${{ "{{" }} $value | humanize {{ "}}" }}."

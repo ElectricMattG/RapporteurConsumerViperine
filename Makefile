@@ -255,6 +255,21 @@ HELM_CHART    ?= ./helm/rapporteur-consumer-group
 RELEASE_NAME  ?= viperine
 DOCKER_BUILD_ENV ?= DOCKER_BUILDKIT=0
 
+# Kafka broker (exec target: pod/container in the kafka namespace)
+KAFKA_POD       ?= kafka-0
+KAFKA_NS        ?= kafka
+KAFKA_BOOTSTRAP ?= kafka-headless.kafka.svc.cluster.local:9092
+
+# All topics owned by this pipeline (dot-namespaced, Kafka-safe)
+VIPERINE_TOPICS := \
+	viperine.web-scrape-requests \
+	viperine.content-extracted \
+	viperine.summarise-document \
+	viperine.summary-completed \
+	viperine.session-complete \
+	viperine.dead-letter-queue \
+	viperine.frontend-message
+
 
 .PHONY: k8s_prereqs
 k8s_prereqs: ## One-time bootstrap: hostPath dir, namespace, copy gcp-credentials from rag-service
@@ -268,6 +283,51 @@ k8s_prereqs: ## One-time bootstrap: hostPath dir, namespace, copy gcp-credential
 			| sed "s/namespace: rag-service/namespace: $(K8S_NS)/" \
 			| kubectl apply -f -
 	@echo "$(GREEN)$(BOLD)Prereqs ready in namespace $(K8S_NS).$(RESET)"
+
+
+.PHONY: kafka_create_topics
+kafka_create_topics: ## Create all viperine. namespaced Kafka topics (idempotent --if-not-exists)
+	@echo "$(YELLOW)$(BOLD)Creating Viperine Kafka topics on $(KAFKA_BOOTSTRAP)...$(RESET)"
+	@for topic in $(VIPERINE_TOPICS); do \
+		kubectl -n $(KAFKA_NS) exec $(KAFKA_POD) -- \
+			kafka-topics \
+			--bootstrap-server $(KAFKA_BOOTSTRAP) \
+			--create --if-not-exists \
+			--topic $$topic \
+			--partitions 1 \
+			--replication-factor 1 2>&1 | grep -v "^WARNING" ; \
+		echo "  $(GREEN)✓$(RESET) $$topic" ; \
+	done
+	@echo "$(GREEN)$(BOLD)All topics ready.$(RESET)"
+
+
+.PHONY: kafka_list_topics
+kafka_list_topics: ## List all viperine. topics currently on the broker
+	@kubectl -n $(KAFKA_NS) exec $(KAFKA_POD) -- \
+		kafka-topics \
+		--bootstrap-server $(KAFKA_BOOTSTRAP) \
+		--list 2>/dev/null | grep "^viperine\."
+
+
+.PHONY: kafka_delete_old_topics
+kafka_delete_old_topics: ## Delete the legacy (non-namespaced) topics once migration is confirmed
+	@echo "$(YELLOW)$(BOLD)Deleting legacy topics — only run after migration is validated!$(RESET)"
+	@for topic in \
+		web-scrape-requests \
+		content-extracted \
+		summarise-document \
+		summary-completed \
+		session-complete \
+		dead-letter-queue \
+		frontend-message; do \
+		kubectl -n $(KAFKA_NS) exec $(KAFKA_POD) -- \
+			kafka-topics \
+			--bootstrap-server $(KAFKA_BOOTSTRAP) \
+			--delete --if-exists \
+			--topic $$topic 2>&1 | grep -v "^WARNING" ; \
+		echo "  $(YELLOW)✗$(RESET) $$topic deleted" ; \
+	done
+	@echo "$(GREEN)$(BOLD)Legacy topics removed.$(RESET)"
 
 
 .PHONY: k8s_build
