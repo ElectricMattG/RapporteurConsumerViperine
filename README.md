@@ -11,35 +11,41 @@ Kafka consumer group for the Rapporteur ingestion pipeline. Scrapes web sources,
 ## Pipeline
 
 ```
-web-scrape-requests
+viperine.web-scrape-requests
         │
         ▼
-kafka_web_scraper  ──▶  content-extracted
+kafka_web_scraper  ──▶  viperine.content-extracted
+                   └──▶  viperine.summarise-document
                                 │
                                 ▼
-                        kafka_summarizer  ──▶  summary-completed
+                        kafka_summarizer  ──▶  viperine.summary-completed
                                                         │
                                                         ▼
                                               kafka_summary_indexer  ──▶  reload-index
-                                                                      └──▶  frontend-message
+                                                                      └──▶  viperine.frontend-message
+                                                                      └──▶  viperine.session-complete
 
 Optional (ENABLE_AGGREGATOR=true):
         kafka_index_aggregator  (reads reload-index, writes merged index)
 
 Independent:
-        kafka_dead_letter_consumer  (reads dead-letter-queue)
+        kafka_dead_letter_consumer  (reads viperine.dead-letter-queue)
 ```
 
 ## Kafka Topics
 
 | Topic | Producer | Consumer |
 |-------|----------|----------|
-| `web-scrape-requests` | external | `kafka_web_scraper` |
-| `content-extracted` | `kafka_web_scraper` | `kafka_summarizer` |
-| `summary-completed` | `kafka_summarizer` | `kafka_summary_indexer` |
+| `viperine.web-scrape-requests` | RAG service | `kafka_web_scraper` |
+| `viperine.content-extracted` | `kafka_web_scraper` | `kafka_summarizer` |
+| `viperine.summarise-document` | `kafka_web_scraper` | `kafka_summarizer` |
+| `viperine.summary-completed` | `kafka_summarizer` | `kafka_summary_indexer` |
+| `viperine.session-complete` | `kafka_summary_indexer` | RAG service |
+| `viperine.frontend-message` | `kafka_summary_indexer` | frontend service |
+| `viperine.dead-letter-queue` | all consumers | `kafka_dead_letter_consumer` |
 | `reload-index` | `kafka_summary_indexer` | RAG service / `kafka_index_aggregator` |
-| `frontend-message` | `kafka_summary_indexer` | frontend service |
-| `dead-letter-queue` | all consumers | `kafka_dead_letter_consumer` |
+
+> **Note:** All `viperine.*` topics are namespaced to isolate this pipeline from other consumers (kaliya/lamia) sharing the same Kafka cluster.
 
 ## Quick Start
 
@@ -93,8 +99,10 @@ src/
 |--------|---------|
 | `make kafka_start` | Start Kafka + Zookeeper + UI |
 | `make kafka_stop` | Stop Kafka |
-| `make kafka_topics` | Create all topics |
-| `make kafka_setup` | Start + create topics |
+| `make kafka_create_topics` | Create all `viperine.*` topics (idempotent) |
+| `make kafka_list_topics` | List topics on the broker |
+| `make kafka_delete_old_topics` | Delete legacy un-namespaced topics after validation |
+| `make kafka_setup` | Start + create topics (local dev) |
 | `make kafka_flush` | Delete/recreate topics + clear cache |
 | `make install` | Install Python dependencies |
 | `make requirements` | Recompile requirements.txt |

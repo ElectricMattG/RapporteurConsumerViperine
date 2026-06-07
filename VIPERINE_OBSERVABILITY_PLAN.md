@@ -16,11 +16,11 @@ Instrument and dashboard the following **5 consumers**:
 
 | Consumer | Module | k8s Deployment | Role / pipeline stage |
 |---|---|---|---|
-| Web Scraper | `kafka_web_scraper.py` | `viperine-web-scraper` | URL → `content-extracted` |
-| Summarizer | `kafka_summarizer.py` | `viperine-summarizer` | `content-extracted` → `summary-completed` |
-| Summary Indexer | `kafka_summary_indexer.py` | `viperine-summary-indexer` | `summary-completed` → index / `session-complete` |
+| Web Scraper | `kafka_web_scraper.py` | `viperine-web-scraper` | `viperine.web-scrape-requests` → `viperine.content-extracted` / `viperine.summarise-document` |
+| Summarizer | `kafka_summarizer.py` | `viperine-summarizer` | `viperine.content-extracted` → `viperine.summary-completed` |
+| Summary Indexer | `kafka_summary_indexer.py` | `viperine-summary-indexer` | `viperine.summary-completed` → index / `viperine.session-complete` / `viperine.frontend-message` |
 | Index Aggregator | `kafka_index_aggregator.py` | *(not deployed in k8s)* | session aggregation → Azure backup |
-| Dead-Letter | `kafka_dead_letter_consumer.py` | `viperine-dead-letter-consumer` | `dead-letter-queue` → retry / discard |
+| Dead-Letter | `kafka_dead_letter_consumer.py` | `viperine-dead-letter-consumer` | `viperine.dead-letter-queue` → retry / discard |
 
 ---
 
