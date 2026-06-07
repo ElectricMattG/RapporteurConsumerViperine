@@ -13,6 +13,7 @@ Message Format:
         "session_id": "unique-session-id"
     }
 
+
 Usage:
     from kafka_web_scraper import KafkaWebScraperConsumer
 
