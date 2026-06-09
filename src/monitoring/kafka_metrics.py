@@ -108,6 +108,20 @@ class KafkaMetricsWrapper:
             buckets=[1, 5, 10, 30, 60, 300, 600, 1800, 3600]
         )
 
+        # ── Produce tracking ─────────────────────────────────────────────────
+        self.messages_published = Counter(
+            f'{namespace}_messages_published_total',
+            'Messages published to Kafka topics',
+            ['consumer_id', 'topic', 'result']
+        )
+
+        self.publish_duration = Histogram(
+            f'{namespace}_publish_duration_seconds',
+            'Time spent producing messages (produce + flush)',
+            ['consumer_id', 'topic'],
+            buckets=[0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0, 10.0]
+        )
+
     def record_poll(self, topic: str, duration: float, message_count: int):
         """
         Record metrics for a Kafka poll operation.
@@ -241,3 +255,25 @@ class KafkaMetricsWrapper:
             yield
         finally:
             self.decrement_messages_in_flight(topic)
+
+    def record_publish(self, topic: str, result: str, duration: float):
+        """
+        Record a Kafka produce operation outcome.
+
+        Args:
+            topic: Destination topic
+            result: 'success' or 'error'
+            duration: Time spent on produce+flush in seconds
+        """
+        # instrumentation - messages_published_total
+        self.messages_published.labels(
+            consumer_id=self.consumer_id,
+            topic=topic,
+            result=result
+        ).inc()
+
+        # instrumentation - publish_duration_seconds
+        self.publish_duration.labels(
+            consumer_id=self.consumer_id,
+            topic=topic
+        ).observe(duration)

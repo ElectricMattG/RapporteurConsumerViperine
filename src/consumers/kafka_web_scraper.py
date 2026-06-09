@@ -55,6 +55,7 @@ try:
     from src.monitoring import (CacheMetricsCollector, KafkaMetricsWrapper,
                                 MetricsServer, PrometheusMetrics,
                                 SystemMetricsCollector)
+    from src.monitoring.error_categories import ErrorCategory
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError as e:
@@ -1945,6 +1946,8 @@ class KafkaWebScraperConsumer(Base):
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
 
             # Publish to BOTH topics to ensure always-on summarization
+            _pub_start = time.time()
+
             # 1. Summarization topic - AI will generate high-quality summary
             self.producer.produce(
                 topic=self.summarise_document_topic,
@@ -1963,10 +1966,19 @@ class KafkaWebScraperConsumer(Base):
 
             # Flush to ensure delivery
             self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='success', duration=_pub_duration)
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
             self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics: request_id={request_id}")
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='error', duration=0)
             self._logger.error(f"❌ Error publishing to Kafka: {e}")
             import traceback
             traceback.print_exc()
@@ -2018,6 +2030,7 @@ class KafkaWebScraperConsumer(Base):
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
 
             # Publish to output topic
+            _pub_start = time.time()
             self.producer.produce(
                 topic=self.output_topic,
                 key=request_id.encode('utf-8'),
@@ -2027,11 +2040,41 @@ class KafkaWebScraperConsumer(Base):
 
             # Flush to ensure delivery
             self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
             self._logger.info(f"📤 Published failed URL for summary attempt: request_id={request_id}")
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='error', duration=0)
             self._logger.error(f"❌ Error publishing failed URL: {e}")
+
+    @staticmethod
+    def _classify_scraper_error(error_str: str) -> str:
+        """Classify a freeform web scraper error string into a canonical ErrorCategory."""
+        if not error_str:
+            return ErrorCategory.UNKNOWN
+        err_lower = error_str.lower()
+        if '403' in err_lower or 'forbidden' in err_lower or '401' in err_lower:
+            return ErrorCategory.SCRAPING_403
+        if 'timeout' in err_lower or 'timed out' in err_lower:
+            return ErrorCategory.SCRAPING_TIMEOUT
+        if 'dns' in err_lower or 'name resolution' in err_lower or 'getaddrinfo' in err_lower:
+            return ErrorCategory.SCRAPING_DNS
+        if 'ssl' in err_lower or 'certificate' in err_lower:
+            return ErrorCategory.SCRAPING_SSL
+        if 'connection' in err_lower or 'refused' in err_lower or 'reset' in err_lower:
+            return ErrorCategory.SCRAPING_CONNECTION
+        if 'blocked' in err_lower or '429' in err_lower or 'rate limit' in err_lower:
+            return ErrorCategory.SCRAPING_BLOCKED
+        if 'json' in err_lower or 'decode' in err_lower:
+            return ErrorCategory.JSON_DECODE
+        return ErrorCategory.UNKNOWN
 
     def _delivery_callback(self, err, msg):
         """Callback for Kafka producer delivery reports"""
@@ -2106,10 +2149,10 @@ class KafkaWebScraperConsumer(Base):
                     if msg.error().code() == KafkaError._PARTITION_EOF:
                         self._logger.debug(f"Reached end of partition {msg.partition()}")
                     else:
-                        # Track connection errors
+                        # instrumentation - connection_errors_total
                         if self.telemetry_enabled:
                             self.metrics.increment_connection_errors(
-                                error_type=msg.error().name()
+                                error_type=ErrorCategory.KAFKA_CONSUME_ERROR
                             )
                         raise KafkaException(msg.error())
                     continue
@@ -2159,9 +2202,10 @@ class KafkaWebScraperConsumer(Base):
                     except json.JSONDecodeError as e:
                         self._logger.error(f"❌ Invalid JSON in message: {e}")
                         if self.telemetry_enabled:
+                            # instrumentation - deserialization_errors_total
                             self.metrics.increment_deserialization_errors(
                                 topic=self.input_topic,
-                                error_type='json_decode_error'
+                                error_type=ErrorCategory.JSON_DECODE
                             )
                         continue
 
@@ -2187,7 +2231,8 @@ class KafkaWebScraperConsumer(Base):
                             self.metrics.record_duration(self.input_topic, duration, status)
 
                             if not result['success']:
-                                error_type = result.get('error', 'unknown')
+                                # instrumentation - processing_failures_total
+                                error_type = self._classify_scraper_error(result.get('error', ''))
                                 self.metrics.increment_failures(self.input_topic, error_type)
 
                         if result['success']:

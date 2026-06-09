@@ -111,6 +111,12 @@ class PrometheusMetrics:
             ['consumer_id', 'topic', 'operation']
         )
 
+        self.model_error_outputs = Counter(
+            f'{namespace}_model_error_outputs_total',
+            'LLM returned HTTP 200 but content is an error/refusal message',
+            ['consumer_id', 'model']
+        )
+
         # Set initial state
         self.consumer_state.labels(consumer_id=consumer_id).set(0)
 

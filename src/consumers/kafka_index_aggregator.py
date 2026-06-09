@@ -58,6 +58,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
                                 PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.error_categories import ErrorCategory
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError:
@@ -438,7 +439,8 @@ class KafkaIndexAggregatorConsumer(Base):
         except Exception as e:
             self._logger.error(f"❌ Consumer error: {e}")
             if self.telemetry_enabled:
-                self.metrics.increment_failures(self.input_topic, 'consumer_error')
+                # instrumentation - processing_failures_total
+                self.metrics.increment_failures(self.input_topic, ErrorCategory.KAFKA_CONSUME_ERROR)
             import traceback
             traceback.print_exc()
         finally:
@@ -646,11 +648,13 @@ class KafkaIndexAggregatorConsumer(Base):
         except json.JSONDecodeError as e:
             self._logger.error(f"❌ Invalid JSON in message: {e}")
             if self.telemetry_enabled:
-                self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
+                # instrumentation - deserialization_errors_total
+                self.metrics.increment_deserialization_errors(self.input_topic, ErrorCategory.JSON_DECODE)
         except Exception as e:
             self._logger.error(f"Error processing message: {e}")
             if self.telemetry_enabled:
-                self.metrics.increment_failures(self.input_topic, 'processing_error')
+                # instrumentation - processing_failures_total
+                self.metrics.increment_failures(self.input_topic, ErrorCategory.UNKNOWN)
             import traceback
             traceback.print_exc()
 
@@ -895,13 +899,23 @@ class KafkaIndexAggregatorConsumer(Base):
                     'session_complete': True,
                     'completed_at': datetime.now().isoformat()
                 }
+                _pub_start = time.time()
                 self.producer.produce(
                     topic=self.session_complete_topic,
                     value=json.dumps(complete_message).encode('utf-8')
                 )
                 self.producer.flush()
+                _pub_duration = time.time() - _pub_start
+
+                # instrumentation - messages_published_total
+                if self.telemetry_enabled:
+                    self.kafka_metrics.record_publish(topic=self.session_complete_topic, result='success', duration=_pub_duration)
+
                 self._logger.info(f"📢 Published session-complete signal to {self.session_complete_topic}")
             except Exception as e:
+                # instrumentation - messages_published_total
+                if self.telemetry_enabled:
+                    self.kafka_metrics.record_publish(topic=self.session_complete_topic, result='error', duration=0)
                 self._logger.warning(f"⚠️  Failed to publish session-complete: {e}")
 
             self._logger.info(f"✅ Session aggregation complete: {session_id}")

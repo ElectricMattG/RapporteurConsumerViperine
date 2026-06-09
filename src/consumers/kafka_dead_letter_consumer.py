@@ -46,6 +46,7 @@ from confluent_kafka import Consumer, KafkaError
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
                                 PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.error_categories import ErrorCategory
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError:
@@ -450,12 +451,14 @@ class KafkaDeadLetterConsumer(Base):
                 except json.JSONDecodeError as e:
                     self._logger.error(f"❌ Invalid JSON in message: {e}")
                     if self.telemetry_enabled:
-                        self.metrics.increment_deserialization_errors(self.input_topic, 'json_decode_error')
+                        # instrumentation - deserialization_errors_total
+                        self.metrics.increment_deserialization_errors(self.input_topic, ErrorCategory.JSON_DECODE)
                         self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
                     if self.telemetry_enabled:
-                        self.metrics.increment_failures(self.input_topic, 'processing_error')
+                        # instrumentation - processing_failures_total
+                        self.metrics.increment_failures(self.input_topic, ErrorCategory.UNKNOWN)
                         self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
 
         except KeyboardInterrupt:

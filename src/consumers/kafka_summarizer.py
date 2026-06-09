@@ -43,6 +43,8 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
                                 PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.error_categories import (TAXONOMY_TO_ERROR_CATEGORY,
+                                                 ErrorCategory)
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError:
@@ -64,11 +66,11 @@ try:
         CitationResearchClient
     from ..config_handler import Base
     from ._doc_id import make_document_id
-    from ._failure_taxonomy import classify_error
+    from ._failure_taxonomy import classify_error, validate_summary_content
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     from _doc_id import make_document_id
-    from _failure_taxonomy import classify_error
+    from _failure_taxonomy import classify_error, validate_summary_content
 
     from components.summarise.llm_citation_researcher import \
         CitationResearchClient
@@ -388,6 +390,18 @@ class KafkaSummarizerConsumer(Base):
                     use_web_grounding=extraction_failed
                 )
 
+                # Validate that the LLM didn't return an error-as-content
+                summary_text_raw = summary_result.get('markdown_summary', '')
+                if not validate_summary_content(summary_text_raw):
+                    # instrumentation - model_error_outputs_total
+                    if self.telemetry_enabled:
+                        consumer_id_label = f"summarizer_{os.getpid()}"
+                        llm_provider = self._app_config.get('summarizer.llm_provider') or 'openai'
+                        self.metrics.model_error_outputs.labels(
+                            consumer_id=consumer_id_label, model=llm_provider
+                        ).inc()
+                    raise ValueError(f"LLM returned error-as-content: {summary_text_raw[:100]}")
+
                 self._logger.info(f"   ✅ Summary generated successfully (attempt {_attempt})")
                 self._logger.debug(f"   📊 Summary length: {len(summary_result.get('markdown_summary', ''))} characters")
 
@@ -461,7 +475,10 @@ class KafkaSummarizerConsumer(Base):
                         consumer_id=consumer_id_label,
                         status='failure'
                     ).observe(summarization_duration)
-                    error_type = type(e).__name__
+                    # instrumentation - llm_api_errors_total
+                    error_type = TAXONOMY_TO_ERROR_CATEGORY.get(
+                        _classification.category, ErrorCategory.UNKNOWN
+                    )
                     self.llm_api_errors.labels(
                         consumer_id=consumer_id_label,
                         error_type=error_type
@@ -629,6 +646,7 @@ class KafkaSummarizerConsumer(Base):
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
 
             # Publish to content-extracted topic (same topic web scraper uses)
+            _pub_start = time.time()
             self.producer.produce(
                 topic=self.output_topic,
                 key=request_id.encode('utf-8'),
@@ -638,12 +656,20 @@ class KafkaSummarizerConsumer(Base):
 
             # Flush to ensure delivery
             self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
             self._logger.info(f"   📤 Published summary to '{self.output_topic}' for chunking")
             self._logger.info(f"   📊 Summary length: {len(summary_text)} characters")
             self._logger.info(f"   🏷️  Data lineage: gemini_web_grounding_summary")
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing summary for chunking: {e}")
             import traceback
             self._logger.error(traceback.format_exc())
@@ -712,6 +738,7 @@ class KafkaSummarizerConsumer(Base):
             }
 
             # Publish to summary-completed topic
+            _pub_start = time.time()
             self.producer.produce(
                 topic=self.summary_completed_topic,
                 key=session_id.encode('utf-8'),
@@ -720,6 +747,11 @@ class KafkaSummarizerConsumer(Base):
             )
 
             self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.summary_completed_topic, result='success', duration=_pub_duration)
 
             self._logger.info(
                 f"   📤 Published to '{self.summary_completed_topic}' "
@@ -727,6 +759,9 @@ class KafkaSummarizerConsumer(Base):
             )
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.summary_completed_topic, result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing summary-completed: {e}")
             import traceback
             self._logger.error(traceback.format_exc())
@@ -772,6 +807,7 @@ class KafkaSummarizerConsumer(Base):
                 'first_attempt_at': first_attempt_at or now,
                 'last_attempt_at': now,
             }
+            _pub_start = time.time()
             self.producer.produce(
                 topic=self.dead_letter_topic,
                 key=session_id.encode('utf-8'),
@@ -779,12 +815,21 @@ class KafkaSummarizerConsumer(Base):
                 callback=self._delivery_callback,
             )
             self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.dead_letter_topic, result='success', duration=_pub_duration)
+
             self._logger.info(
                 f"   📨 Published DLQ record: stage={stage} category={record['category']}"
             )
             if self.telemetry_enabled:
                 self.metrics.increment_dead_letter(self.dead_letter_topic, record['category'])
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.dead_letter_topic, result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing to DLQ: {e}")
 
     def start(self):
@@ -919,7 +964,8 @@ class KafkaSummarizerConsumer(Base):
                         if isinstance(result, Exception):
                             self._logger.error(f"❌ Task exception: {result}")
                             if self.telemetry_enabled:
-                                self.metrics.increment_failures(self.input_topic, 'task_exception')
+                                # instrumentation - processing_failures_total
+                                self.metrics.increment_failures(self.input_topic, ErrorCategory.UNKNOWN)
                         elif result.get('success'):
                             success_count += 1
                             self._logger.info(f"✅ Successfully processed summary for request {result['request_id']}")
@@ -931,7 +977,8 @@ class KafkaSummarizerConsumer(Base):
                         else:
                             self._logger.warning(f"⚠️ Summary processing completed with errors: {result.get('error')}")
                             if self.telemetry_enabled:
-                                self.metrics.increment_failures(self.input_topic, 'processing_error')
+                                # instrumentation - processing_failures_total
+                                self.metrics.increment_failures(self.input_topic, ErrorCategory.SUMMARIZATION_TRANSIENT)
                                 if processing_start:
                                     duration = time.time() - processing_start
                                     self.metrics.record_duration(self.input_topic, duration, 'failure')

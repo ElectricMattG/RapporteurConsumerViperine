@@ -59,6 +59,37 @@ _BAD_INPUT_PAT = re.compile(
     r'empty text|decode.*error|encoding.*error|invalid.*json', re.IGNORECASE
 )
 
+# ── LLM error-as-content detection ───────────────────────────────────────────
+# The model sometimes returns HTTP 200 with finish_reason STOP, but the body
+# is an error/refusal message rather than a valid summary. These pass through
+# as "successful" unless explicitly detected.
+_MODEL_ERROR_OUTPUT_PAT = re.compile(
+    r'^\s*#\s*Error\b|'
+    r'Failed to generate summary|'
+    r'I(?:\'m| am) (?:unable|not able) to (?:generate|create|provide|summarize|summarise)|'
+    r'I cannot (?:access|summarize|summarise|generate)|'
+    r'(?:As an AI|I don.t have access)',
+    re.IGNORECASE | re.MULTILINE
+)
+
+
+def validate_summary_content(text: str) -> bool:
+    """
+    Return False if the 'summary' is actually an LLM error/refusal output.
+
+    Should be called BEFORE indexing to prevent garbage from being stored.
+
+    Args:
+        text: The markdown summary text returned by the LLM.
+
+    Returns:
+        True if content appears to be a valid summary.
+        False if content matches known LLM error/refusal patterns.
+    """
+    if not text or len(text.strip()) < 20:
+        return False
+    return not _MODEL_ERROR_OUTPUT_PAT.search(text)
+
 
 def classify_error(exc: Exception) -> FailureClassification:
     """

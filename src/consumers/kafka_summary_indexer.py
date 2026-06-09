@@ -70,6 +70,7 @@ from confluent_kafka import Consumer, KafkaError, Producer
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
                                 PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.error_categories import ErrorCategory
     from src.monitoring.logging_config import configure_logging
     TELEMETRY_AVAILABLE = True
 except ImportError:
@@ -445,12 +446,18 @@ class KafkaSummaryIndexerConsumer(Base):
         }
 
         try:
+            _pub_start = time.time()
             self.producer.produce(
                 self.output_topic,
                 key=session_id.encode('utf-8'),
                 value=json.dumps(message).encode('utf-8')
             )
             self.producer.flush()
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
             self._logger.info(f"   📤 Published session-complete to {self.output_topic}")
 
@@ -461,6 +468,9 @@ class KafkaSummaryIndexerConsumer(Base):
                 self.summaries_per_session.labels(consumer_id=consumer_id_label).observe(total_summaries)
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.output_topic, result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing session-complete: {e}")
 
     def _publish_reload_index_message(self, new_count: int, total_count: int):
@@ -477,14 +487,24 @@ class KafkaSummaryIndexerConsumer(Base):
         }
 
         try:
+            _pub_start = time.time()
             self.producer.produce(
                 'reload-index',
                 key='rag-service'.encode('utf-8'),
                 value=json.dumps(message).encode('utf-8')
             )
             self.producer.flush()
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic='reload-index', result='success', duration=_pub_duration)
+
             self._logger.info(f"   📤 Published reload-index message: +{new_count} summaries")
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic='reload-index', result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing reload-index: {e}")
 
     def _aggregate_to_combined_index(self, session_id: str):
@@ -655,16 +675,25 @@ class KafkaSummaryIndexerConsumer(Base):
         }
 
         try:
+            _pub_start = time.time()
             self.producer.produce(
                 self.frontend_topic,
                 key=session_id.encode('utf-8'),
                 value=json.dumps(message).encode('utf-8')
             )
             self.producer.flush()
+            _pub_duration = time.time() - _pub_start
+
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.frontend_topic, result='success', duration=_pub_duration)
 
             self._logger.info(f"   📢 Published frontend message: {new_count} new summaries, {total_summaries} total")
 
         except Exception as e:
+            # instrumentation - messages_published_total
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.frontend_topic, result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing frontend message: {e}")
 
     async def _process_message(self, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
