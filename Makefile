@@ -353,8 +353,30 @@ k8s_install: ## Helm install/upgrade $(RELEASE_NAME) into namespace $(K8S_NS)
 	@echo "$(GREEN)$(BOLD)Release $(RELEASE_NAME) installed.$(RESET)"
 
 
+.PHONY: k8s_rollout
+k8s_rollout: ## Nvidia-safe rollout: scale→0, purge stuck pods, helm upgrade (workaround for k3s/containerd nvidia-runtime)
+	@echo "$(YELLOW)$(BOLD)[1/3] Scaling down all $(RELEASE_NAME) deployments to 0...$(RESET)"
+	@kubectl -n $(K8S_NS) scale deploy -l consumer-group=$(RELEASE_NAME) --replicas=0
+	@echo "Waiting 15s for graceful shutdown..."
+	@sleep 15
+	@STUCK=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) -o name 2>/dev/null | wc -l | tr -d ' '); \
+	if [ "$$STUCK" -gt 0 ]; then \
+		echo "$(YELLOW)⚠  $$STUCK pod(s) still terminating — force-deleting (nvidia-container-runtime workaround)...$(RESET)"; \
+		kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) -o name \
+			| xargs -r kubectl -n $(K8S_NS) delete --force --grace-period=0; \
+		sleep 3; \
+	else \
+		echo "$(GREEN)✓ All pods terminated cleanly.$(RESET)"; \
+	fi
+	@echo "$(YELLOW)$(BOLD)[2/3] Upgrading helm release $(RELEASE_NAME)...$(RESET)"
+	@helm upgrade --install $(RELEASE_NAME) $(HELM_CHART) \
+		--namespace $(K8S_NS) --create-namespace \
+		--set image.tag=$(K8S_VERSION)
+	@echo "$(GREEN)$(BOLD)[3/3] Helm upgrade complete — pods starting fresh.$(RESET)"
+
+
 .PHONY: k8s_deploy
-k8s_deploy: k8s_build k8s_push k8s_install k8s_status ## Full release pipeline: build → push → install → status
+k8s_deploy: k8s_build k8s_push k8s_rollout k8s_status ## Full release pipeline: build → push → safe-rollout → status
 
 
 .PHONY: k8s_status
@@ -404,3 +426,38 @@ k8s_uninstall: ## Uninstall the helm release (leaves namespace and secrets intac
 	@helm uninstall $(RELEASE_NAME) -n $(K8S_NS) || true
 	@echo "$(GREEN)Done. Namespace $(K8S_NS) and secrets preserved.$(RESET)"
 	@echo "To delete the namespace: kubectl delete ns $(K8S_NS)"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Monitoring targets
+# ──────────────────────────────────────────────────────────────────────────────
+PROMETHEUS_URL ?= http://192.168.1.3:30090
+GRAFANA_URL    ?= http://192.168.1.3:30030
+
+.PHONY: monitoring_deploy
+monitoring_deploy: ## Deploy monitoring config to cluster (idempotent, reload-only)
+	@bash scripts/deploy_cluster_monitoring.sh
+
+.PHONY: monitoring_status
+monitoring_status: ## Check Prometheus target status for Viperine consumers
+	@echo "$(YELLOW)$(BOLD)Querying Prometheus targets...$(RESET)"
+	@curl -s $(PROMETHEUS_URL)/api/v1/targets | python3 -c "\
+	import json, sys; \
+	data = json.load(sys.stdin); \
+	targets = data.get('data', {}).get('activeTargets', []); \
+	viperine = [t for t in targets if 'viperine' in t.get('labels', {}).get('job', '')]; \
+	print(f'Viperine targets: {len(viperine)}'); \
+	[print(f\"  {'✓' if t['health']=='up' else '✗'} {t['labels'].get('job','?'):30s} {t['health']}\") for t in viperine] \
+	"
+
+.PHONY: monitoring_reload
+monitoring_reload: ## Reload Prometheus config (safe — never restart)
+	@curl -s -X POST $(PROMETHEUS_URL)/-/reload && echo "$(GREEN)✓ Prometheus reloaded$(RESET)"
+
+.PHONY: monitoring_open
+monitoring_open: ## Print monitoring URLs
+	@echo "Grafana:    $(GRAFANA_URL)"
+	@echo "Prometheus: $(PROMETHEUS_URL)"
+	@echo "Dashboard:  $(GRAFANA_URL)/d/viperine-pipeline/viperine-pipeline-overview"
+	@echo "Targets:    $(PROMETHEUS_URL)/targets"
+	@echo "Alerts:     $(PROMETHEUS_URL)/alerts"
