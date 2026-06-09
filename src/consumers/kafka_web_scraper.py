@@ -2096,6 +2096,15 @@ class KafkaWebScraperConsumer(Base):
                 if hasattr(self, 'cache_metrics'):
                     self.cache_metrics.start()
                 self.metrics.set_state(1)  # running
+                # instrumentation - startup_timestamp_seconds
+                self.metrics.record_startup()
+                # instrumentation - consumer_info
+                self.metrics.set_info({
+                    'consumer_name': 'web_scraper',
+                    'consumer_group': self.kafka_config.get('group.id', 'web-scraper-consumer'),
+                    'input_topic': self.input_topic,
+                    'output_topic': self.output_topic,
+                })
                 self._logger.info("✅ Telemetry services started")
 
             self._create_consumer()
@@ -2212,6 +2221,8 @@ class KafkaWebScraperConsumer(Base):
                     # Track message consumption
                     if self.telemetry_enabled:
                         self.metrics.increment_messages_consumed(self.input_topic)
+                        # instrumentation - last_message_processed_timestamp
+                        self.metrics.record_message_processed(self.input_topic)
 
                     # Track messages in flight (increment before processing)
                     if self.telemetry_enabled:

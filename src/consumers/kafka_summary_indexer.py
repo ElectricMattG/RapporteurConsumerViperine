@@ -980,6 +980,25 @@ class KafkaSummaryIndexerConsumer(Base):
         except Exception as e:
             self._logger.error(f"❌ Error in idle session sweeper: {e}", exc_info=True)
 
+    def _update_sessions_gauge(self):
+        """Count non-completed session state files and update the gauge."""
+        try:
+            if not self.cache_dir.exists():
+                self.metrics.set_sessions_in_progress(0)
+                return
+            count = 0
+            for state_file in self.cache_dir.glob("*/*_state.json"):
+                try:
+                    with open(state_file, 'r', encoding='utf-8') as f:
+                        state = json.load(f)
+                    if not state.get('completed', False):
+                        count += 1
+                except Exception:
+                    continue
+            self.metrics.set_sessions_in_progress(count)
+        except Exception:
+            pass
+
     async def consume_messages(self):
         """Main consumer loop"""
         try:
@@ -1026,6 +1045,15 @@ class KafkaSummaryIndexerConsumer(Base):
             # Set consumer state to running
             if self.telemetry_enabled:
                 self.metrics.set_state(1)
+                # instrumentation - startup_timestamp_seconds
+                self.metrics.record_startup()
+                # instrumentation - consumer_info
+                self.metrics.set_info({
+                    'consumer_name': 'summary_indexer',
+                    'consumer_group': self.kafka_config.get('group.id', 'summary-indexer-consumer'),
+                    'input_topic': self.input_topic,
+                    'output_topic': self.output_topic,
+                })
 
             # Sweeper: fire every SWEEPER_INTERVAL polls (≈ seconds given poll timeout=1s)
             _SWEEPER_INTERVAL = 30  # check every ~30 seconds
@@ -1039,6 +1067,9 @@ class KafkaSummaryIndexerConsumer(Base):
                 if _poll_count >= _SWEEPER_INTERVAL:
                     _poll_count = 0
                     self._check_idle_sessions()
+                    # instrumentation - sessions_in_progress
+                    if self.telemetry_enabled:
+                        self._update_sessions_gauge()
 
                 if msg is None:
                     continue
@@ -1057,6 +1088,8 @@ class KafkaSummaryIndexerConsumer(Base):
                     # Track Kafka metrics
                     if self.telemetry_enabled:
                         self.kafka_metrics.increment_messages_in_flight(self.input_topic)
+                        # instrumentation - last_message_processed_timestamp
+                        self.metrics.record_message_processed(self.input_topic)
 
                     # Process message
                     result = await self._process_message(message_data)

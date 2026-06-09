@@ -117,6 +117,25 @@ class PrometheusMetrics:
             ['consumer_id', 'model']
         )
 
+        # ── Lifecycle metrics (Phase 2) ──────────────────────────────────────
+        self.startup_timestamp = Gauge(
+            f'{namespace}_startup_timestamp_seconds',
+            'Unix timestamp when consumer started',
+            ['consumer_id']
+        )
+
+        self.last_message_processed_timestamp = Gauge(
+            f'{namespace}_last_message_processed_timestamp',
+            'Unix timestamp of last successfully processed message',
+            ['consumer_id', 'topic']
+        )
+
+        self.sessions_in_progress = Gauge(
+            f'{namespace}_sessions_in_progress',
+            'Number of sessions currently being tracked',
+            ['consumer_id']
+        )
+
         # Set initial state
         self.consumer_state.labels(consumer_id=consumer_id).set(0)
 
@@ -187,6 +206,20 @@ class PrometheusMetrics:
     def set_info(self, info: Dict[str, str]):
         """Set consumer information metadata."""
         self.consumer_info.info(info)
+
+    def record_startup(self):
+        """Record consumer startup timestamp (call once at boot)."""
+        self.startup_timestamp.labels(consumer_id=self.consumer_id).set(time.time())
+
+    def record_message_processed(self, topic: str):
+        """Update last-message-processed timestamp for liveness monitoring."""
+        self.last_message_processed_timestamp.labels(
+            consumer_id=self.consumer_id, topic=topic
+        ).set(time.time())
+
+    def set_sessions_in_progress(self, count: int):
+        """Set the number of sessions currently being tracked."""
+        self.sessions_in_progress.labels(consumer_id=self.consumer_id).set(count)
 
     @contextmanager
     def time_operation(self, topic: str, status: str = 'success'):

@@ -360,6 +360,14 @@ class KafkaDeadLetterConsumer(Base):
                 self.system_metrics.start()
                 self.metrics_server.start()
                 self.metrics.set_state(1)  # Set state to running
+                # instrumentation - startup_timestamp_seconds
+                self.metrics.record_startup()
+                # instrumentation - consumer_info
+                self.metrics.set_info({
+                    'consumer_name': 'dead_letter',
+                    'consumer_group': 'viperine-dead-letter-v2',
+                    'input_topic': self.input_topic,
+                })
                 self._logger.info("✅ Telemetry services started")
             except Exception as e:
                 self._logger.error(f"⚠️ Failed to start telemetry services: {e}")
@@ -433,6 +441,8 @@ class KafkaDeadLetterConsumer(Base):
                     # Increment messages consumed and in flight
                     if self.telemetry_enabled:
                         self.metrics.increment_messages_consumed(self.input_topic)
+                        # instrumentation - last_message_processed_timestamp
+                        self.metrics.record_message_processed(self.input_topic)
                         self.kafka_metrics.increment_messages_in_flight(self.input_topic)
 
                     # Track processing start time
