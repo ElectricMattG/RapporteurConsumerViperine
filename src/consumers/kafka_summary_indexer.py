@@ -1102,10 +1102,14 @@ class KafkaSummaryIndexerConsumer(Base):
                     self._logger.error(f"❌ Invalid JSON in message: {e}")
                     if self.telemetry_enabled:
                         self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        # instrumentation - processing_failures_total
+                        self.metrics.increment_failures(self.input_topic, ErrorCategory.DESERIALIZATION_ERROR)
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}", exc_info=True)
                     if self.telemetry_enabled:
                         self.kafka_metrics.decrement_messages_in_flight(self.input_topic)
+                        # instrumentation - processing_failures_total
+                        self.metrics.increment_failures(self.input_topic, ErrorCategory.PROCESSING_ERROR)
 
         except Exception as e:
             self._logger.error(f"❌ Consumer error: {e}", exc_info=True)
