@@ -31,15 +31,13 @@ class KafkaMetricsWrapper:
         self.consumer_lag_messages = Gauge(
             f'{namespace}_lag_messages',
             'Number of messages behind latest offset',
-            ['consumer_id', 'topic', 'partition'],
-            namespace=namespace
+            ['consumer_id', 'topic', 'partition']
         )
 
         self.consumer_lag_seconds = Gauge(
             f'{namespace}_lag_seconds',
             'Time lag based on message timestamps',
-            ['consumer_id', 'topic', 'partition'],
-            namespace=namespace
+            ['consumer_id', 'topic', 'partition']
         )
 
         # Poll performance
@@ -47,7 +45,6 @@ class KafkaMetricsWrapper:
             f'{namespace}_poll_duration_seconds',
             'Time spent polling Kafka for messages',
             ['consumer_id', 'topic'],
-            namespace=namespace,
             buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0, 5.0]
         )
 
@@ -55,7 +52,6 @@ class KafkaMetricsWrapper:
             f'{namespace}_batch_size',
             'Number of messages per poll batch',
             ['consumer_id', 'topic'],
-            namespace=namespace,
             buckets=[1, 5, 10, 25, 50, 100, 250, 500, 1000]
         )
 
@@ -63,8 +59,7 @@ class KafkaMetricsWrapper:
         self.rebalances_total = Counter(
             f'{namespace}_rebalances_total',
             'Total number of partition rebalances',
-            ['consumer_id'],
-            namespace=namespace
+            ['consumer_id']
         )
 
         # Offset commit tracking
@@ -72,31 +67,27 @@ class KafkaMetricsWrapper:
             f'{namespace}_offset_commit_duration_seconds',
             'Time spent committing offsets',
             ['consumer_id', 'topic'],
-            namespace=namespace,
             buckets=[0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1.0, 2.0]
         )
 
         self.offset_commit_failures = Counter(
             f'{namespace}_offset_commit_failures_total',
             'Total offset commit failures',
-            ['consumer_id', 'topic', 'error_type'],
-            namespace=namespace
+            ['consumer_id', 'topic', 'error_type']
         )
 
         # Messages in flight
         self.messages_in_flight = Gauge(
             f'{namespace}_messages_in_flight',
             'Messages currently being processed',
-            ['consumer_id', 'topic'],
-            namespace=namespace
+            ['consumer_id', 'topic']
         )
 
         # Last successful poll timestamp
         self.last_successful_poll = Gauge(
             f'{namespace}_last_successful_poll_timestamp',
             'Unix timestamp of last successful poll',
-            ['consumer_id'],
-            namespace=namespace
+            ['consumer_id']
         )
 
         # Message age
@@ -104,7 +95,6 @@ class KafkaMetricsWrapper:
             f'{namespace}_message_age_seconds',
             'Time from message production to consumption',
             ['consumer_id', 'topic'],
-            namespace=namespace,
             buckets=[1, 5, 10, 30, 60, 300, 600, 1800, 3600]
         )
 

@@ -34,7 +34,7 @@ groups:
           runbook_url: "monitoring/runbooks/processing_failure_rate_high.md"
 
       - alert: ConsumerLagHigh
-        expr: kafka_consumer_kafka_consumer_lag_messages{pipeline="viperine"} > 50
+        expr: kafka_consumer_lag_messages{pipeline="viperine"} > 50
         for: 5m
         labels:
           severity: critical

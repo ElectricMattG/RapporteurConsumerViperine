@@ -27,6 +27,8 @@ from typing import Any, Dict, Optional
 
 from prometheus_client import Counter, Gauge, Histogram, Info
 
+from src.monitoring.error_categories import ErrorCategory
+
 logger = logging.getLogger(__name__)
 
 
@@ -211,11 +213,42 @@ class PrometheusMetrics:
         """Record consumer startup timestamp (call once at boot)."""
         self.startup_timestamp.labels(consumer_id=self.consumer_id).set(time.time())
 
-    def record_message_processed(self, topic: str):
-        """Update last-message-processed timestamp for liveness monitoring."""
+    def record_message_processed(self, topic: str, duration: Optional[float] = None, status: str = 'success'):
+        """Update last-message-processed timestamp and optionally record processing metrics.
+
+        When duration is provided, also increments messages_consumed and observes
+        the processing_duration histogram, consolidating three call-sites into one.
+        Backward-compatible: calling without duration only updates the timestamp.
+        """
         self.last_message_processed_timestamp.labels(
             consumer_id=self.consumer_id, topic=topic
         ).set(time.time())
+        if duration is not None:
+            self.increment_messages_consumed(topic)
+            self.processing_duration.labels(
+                consumer_id=self.consumer_id, topic=topic, status=status
+            ).observe(duration)
+
+    def record_failure(self, topic: str, error_category: str):
+        """Increment processing failures after validating category against ErrorCategory.
+
+        Raises ValueError for freeform strings that aren't registered categories,
+        preventing invalid label values from reaching Prometheus.
+        """
+        ErrorCategory.validate(error_category)
+        self.processing_failures.labels(
+            consumer_id=self.consumer_id,
+            topic=topic,
+            error_type=error_category
+        ).inc()
+
+    def record_dead_letter(self, topic: str, reason: str):
+        """Increment the dead letter queue counter."""
+        self.dead_letter_messages.labels(
+            consumer_id=self.consumer_id,
+            topic=topic,
+            reason=reason
+        ).inc()
 
     def set_sessions_in_progress(self, count: int):
         """Set the number of sessions currently being tracked."""
