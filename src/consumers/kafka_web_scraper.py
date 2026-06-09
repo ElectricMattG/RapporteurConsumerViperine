@@ -152,7 +152,7 @@ class KafkaWebScraperConsumer(Base):
 
             # Initialize Prometheus metrics
             self.metrics = PrometheusMetrics(consumer_id=consumer_id)
-            self.system_metrics = SystemMetricsCollector(consumer_id=consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id=consumer_id, cache_mount_path=str(self.cache_dir))
             self.kafka_metrics = KafkaMetricsWrapper(consumer_id=consumer_id)
             self.metrics_server = MetricsServer(
                 port=8001,

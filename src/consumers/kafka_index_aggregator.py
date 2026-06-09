@@ -110,7 +110,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
             # Initialize metrics collectors
             self.metrics = PrometheusMetrics(consumer_id)
-            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id, cache_mount_path='./cache')
             self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
 
             # Index aggregator-specific metrics

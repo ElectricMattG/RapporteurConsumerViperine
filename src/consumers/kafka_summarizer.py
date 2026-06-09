@@ -107,7 +107,7 @@ class KafkaSummarizerConsumer(Base):
 
             # Initialize metrics collectors
             self.metrics = PrometheusMetrics(consumer_id)
-            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id, cache_mount_path=str(self.cache_dir))
             self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
 
             # Create metrics server with health checks

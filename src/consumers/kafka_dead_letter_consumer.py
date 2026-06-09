@@ -88,7 +88,7 @@ class KafkaDeadLetterConsumer(Base):
 
             # Initialize metrics collectors
             self.metrics = PrometheusMetrics(consumer_id)
-            self.system_metrics = SystemMetricsCollector(consumer_id)
+            self.system_metrics = SystemMetricsCollector(consumer_id, cache_mount_path='./cache/failures')
             self.kafka_metrics = KafkaMetricsWrapper(consumer_id)
 
             # Dead letter queue-specific metrics

@@ -23,6 +23,7 @@ Usage:
 """
 
 import logging
+import shutil
 import threading
 import time
 from typing import Optional
@@ -40,7 +41,7 @@ class SystemMetricsCollector:
     Runs in a background thread to periodically update Prometheus gauges.
     """
 
-    def __init__(self, consumer_id: str, collection_interval: int = 60, namespace: str = "kafka_consumer"):
+    def __init__(self, consumer_id: str, collection_interval: int = 60, namespace: str = "kafka_consumer", cache_mount_path: str = '/app/cache'):
         """
         Initialize system metrics collector.
 
@@ -48,10 +49,12 @@ class SystemMetricsCollector:
             consumer_id: Unique identifier for this consumer instance
             collection_interval: Seconds between metric collections (default: 60)
             namespace: Metric namespace prefix
+            cache_mount_path: Path to monitor for disk usage (default: /app/cache)
         """
         self.consumer_id = consumer_id
         self.collection_interval = collection_interval
         self.namespace = namespace
+        self.cache_mount_path = cache_mount_path
         self._running = False
         self._thread: Optional[threading.Thread] = None
 
@@ -96,6 +99,31 @@ class SystemMetricsCollector:
             ['consumer_id']
         )
 
+        # ── Resource metrics (Phase 3) ───────────────────────────────────────
+        self.disk_usage_bytes = Gauge(
+            f'{namespace}_disk_usage_bytes',
+            'Disk space used in bytes on cache mount',
+            ['consumer_id', 'mount_point']
+        )
+
+        self.disk_available_bytes = Gauge(
+            f'{namespace}_disk_available_bytes',
+            'Disk space available in bytes on cache mount',
+            ['consumer_id', 'mount_point']
+        )
+
+        self.open_file_descriptors = Gauge(
+            f'{namespace}_open_file_descriptors',
+            'Number of open file descriptors for this process',
+            ['consumer_id']
+        )
+
+        self.thread_count = Gauge(
+            f'{namespace}_thread_count',
+            'Number of threads in this process',
+            ['consumer_id']
+        )
+
         logger.info(f"Initialized system metrics collector for consumer: {consumer_id}")
 
     def collect_metrics(self):
@@ -119,6 +147,29 @@ class SystemMetricsCollector:
 
             self.system_cpu_percent.labels(consumer_id=self.consumer_id).set(system_cpu)
             self.system_memory_percent.labels(consumer_id=self.consumer_id).set(system_mem)
+
+            # instrumentation - disk_usage_bytes
+            # instrumentation - disk_available_bytes
+            try:
+                disk = shutil.disk_usage(self.cache_mount_path)
+                self.disk_usage_bytes.labels(
+                    consumer_id=self.consumer_id, mount_point=self.cache_mount_path
+                ).set(disk.used)
+                self.disk_available_bytes.labels(
+                    consumer_id=self.consumer_id, mount_point=self.cache_mount_path
+                ).set(disk.free)
+            except (OSError, FileNotFoundError):
+                pass  # mount not available (e.g. local dev without PVC)
+
+            # instrumentation - open_file_descriptors
+            self.open_file_descriptors.labels(
+                consumer_id=self.consumer_id
+            ).set(self.process.num_fds())
+
+            # instrumentation - thread_count
+            self.thread_count.labels(
+                consumer_id=self.consumer_id
+            ).set(self.process.num_threads())
 
             logger.debug(
                 f"System metrics collected - Process CPU: {process_cpu:.2f}%, "
