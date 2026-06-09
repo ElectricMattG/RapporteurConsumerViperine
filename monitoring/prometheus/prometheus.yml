@@ -1,0 +1,62 @@
+# Viperine Consumers — Local Development Prometheus Configuration
+#
+# Usage (docker-compose or local binary):
+#   prometheus --config.file=monitoring/prometheus/prometheus.yml
+#
+# For cluster deployment, use scripts/deploy_cluster_monitoring.sh instead.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    cluster: local-k3s
+    environment: development
+
+rule_files:
+  - alerts.yml
+
+scrape_configs:
+  - job_name: 'viperine_web_scraper'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8001']
+        labels:
+          consumer: 'web_scraper'
+          pipeline: 'viperine'
+
+  - job_name: 'viperine_summarizer'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8010']
+        labels:
+          consumer: 'summarizer'
+          pipeline: 'viperine'
+
+  - job_name: 'viperine_summary_indexer'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8006']
+        labels:
+          consumer: 'summary_indexer'
+          pipeline: 'viperine'
+
+  - job_name: 'viperine_index_aggregator'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8008']
+        labels:
+          consumer: 'index_aggregator'
+          pipeline: 'viperine'
+
+  - job_name: 'viperine_dead_letter'
+    metrics_path: '/metrics'
+    scrape_interval: 10s
+    static_configs:
+      - targets: ['localhost:8009']
+        labels:
+          consumer: 'dead_letter'
+          pipeline: 'viperine'

@@ -1,0 +1,191 @@
+# Viperine Consumer Alert Rules
+# Deploy: merge into prometheus-config ConfigMap or mount as rule_file
+# Reload: POST /-/reload to Prometheus (NEVER restart — RWO PVC lock)
+
+groups:
+  - name: viperine_critical
+    interval: 30s
+    rules:
+      - alert: ConsumerDown
+        expr: kafka_consumer_state{pipeline="viperine"} != 1
+        for: 2m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "Viperine consumer {{ $labels.consumer_id }} is down"
+          description: "Consumer state is {{ $value }} (expected 1=running)"
+          runbook_url: "monitoring/runbooks/consumer_down.md"
+
+      - alert: ProcessingFailureRateHigh
+        expr: |
+          (
+            sum by (consumer_id) (rate(kafka_consumer_processing_failures_total{pipeline="viperine"}[5m]))
+            /
+            clamp_min(sum by (consumer_id) (rate(kafka_consumer_messages_consumed_total{pipeline="viperine"}[5m])), 1e-10)
+          ) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "High failure rate for {{ $labels.consumer_id }}"
+          description: "Processing failure rate is {{ $value | humanizePercentage }}"
+          runbook_url: "monitoring/runbooks/processing_failure_rate_high.md"
+
+      - alert: ConsumerLagHigh
+        expr: kafka_consumer_kafka_consumer_lag_messages{pipeline="viperine"} > 50
+        for: 5m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "Consumer lag high ({{ $labels.consumer_id }}, partition {{ $labels.partition }})"
+          description: "Lag is {{ $value }} messages"
+          runbook_url: "monitoring/runbooks/consumer_lag_high.md"
+
+      - alert: LLMCostBurnRateHigh
+        expr: sum(increase(kafka_consumer_llm_estimated_cost_usd_total[1h])) > 5
+        for: 0m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "LLM cost burn rate exceeds $5/h"
+          description: "Projected spend: ${{ $value | humanize }}/h"
+          runbook_url: "monitoring/runbooks/llm_cost_burn_rate_high.md"
+
+      - alert: LLMErrorRateHigh
+        expr: |
+          (
+            sum(rate(kafka_consumer_llm_api_errors_total[5m]))
+            /
+            clamp_min(sum(rate(kafka_consumer_llm_api_calls_total[5m])), 1e-10)
+          ) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "LLM API error rate > 10%"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+          runbook_url: "monitoring/runbooks/llm_error_rate_high.md"
+
+      - alert: ProduceFailuresSustained
+        expr: sum(rate(kafka_consumer_messages_published_total{result="error", pipeline="viperine"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "Kafka produce failures sustained"
+          description: "Error produce rate: {{ $value | humanize }} msg/s"
+          runbook_url: "monitoring/runbooks/produce_failures_sustained.md"
+
+      - alert: ConsumerRestartLooping
+        expr: changes(kafka_consumer_startup_timestamp_seconds{pipeline="viperine"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "Consumer {{ $labels.consumer_id }} restart-looping"
+          description: "Restarted {{ $value }} times in the last hour"
+          runbook_url: "monitoring/runbooks/consumer_restart_looping.md"
+
+      - alert: DiskUsageCritical
+        expr: |
+          (
+            kafka_consumer_disk_usage_bytes
+            / (kafka_consumer_disk_usage_bytes + kafka_consumer_disk_available_bytes)
+          ) > 0.95
+        for: 2m
+        labels:
+          severity: critical
+          pipeline: viperine
+        annotations:
+          summary: "Disk usage > 95% on {{ $labels.mount_point }}"
+          description: "Consumer {{ $labels.consumer_id }} disk at {{ $value | humanizePercentage }}"
+          runbook_url: "monitoring/runbooks/disk_usage_critical.md"
+
+  - name: viperine_warning
+    interval: 60s
+    rules:
+      - alert: DLQRateHigh
+        expr: sum(rate(kafka_consumer_dlq_messages_processed_total[10m])) > 0.016
+        for: 10m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "Dead-letter queue receiving > 1 msg/min sustained"
+          description: "DLQ rate: {{ $value | humanize }} msg/s"
+          runbook_url: "monitoring/runbooks/dlq_rate_high.md"
+
+      - alert: EmbeddingLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le) (rate(kafka_consumer_summary_embedding_duration_seconds_bucket[5m]))
+          ) > 10
+        for: 5m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "Summary embedding p95 latency > 10s"
+          description: "p95 latency: {{ $value | humanize }}s"
+          runbook_url: "monitoring/runbooks/embedding_latency_high.md"
+
+      - alert: SessionStuck
+        expr: |
+          kafka_consumer_sessions_in_progress > 0
+          and
+          (time() - kafka_consumer_last_message_processed_timestamp) > 600
+        for: 5m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "Sessions in progress but no messages processed for 10m"
+          description: "{{ $labels.consumer_id }} has {{ $value }} stuck sessions"
+          runbook_url: "monitoring/runbooks/session_stuck.md"
+
+      - alert: DiskUsageWarning
+        expr: |
+          (
+            kafka_consumer_disk_usage_bytes
+            / (kafka_consumer_disk_usage_bytes + kafka_consumer_disk_available_bytes)
+          ) > 0.8
+        for: 5m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "Disk usage > 80% on {{ $labels.mount_point }}"
+          description: "Consumer {{ $labels.consumer_id }} disk at {{ $value | humanizePercentage }}"
+          runbook_url: "monitoring/runbooks/disk_usage_warning.md"
+
+      - alert: ConsumerStale
+        expr: (time() - kafka_consumer_last_message_processed_timestamp) > 1800
+        for: 5m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "Consumer {{ $labels.consumer_id }} hasn't processed a message in 30m"
+          description: "Last message {{ $value | humanizeDuration }} ago"
+          runbook_url: "monitoring/runbooks/consumer_stale.md"
+
+      - alert: LLMLatencyHigh
+        expr: |
+          histogram_quantile(0.95,
+            sum by (le, consumer_id) (rate(kafka_consumer_llm_latency_seconds_bucket[5m]))
+          ) > 60
+        for: 10m
+        labels:
+          severity: warning
+          pipeline: viperine
+        annotations:
+          summary: "LLM p95 latency > 60s"
+          description: "p95 latency for {{ $labels.consumer_id }}: {{ $value | humanize }}s"
+          runbook_url: "monitoring/runbooks/llm_latency_high.md"
