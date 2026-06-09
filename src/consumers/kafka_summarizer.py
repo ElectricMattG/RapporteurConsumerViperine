@@ -43,6 +43,7 @@ from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
                                 PrometheusMetrics, SystemMetricsCollector)
+    from src.monitoring.cost import estimate_cost
     from src.monitoring.error_categories import (TAXONOMY_TO_ERROR_CATEGORY,
                                                  ErrorCategory)
     from src.monitoring.logging_config import configure_logging
@@ -439,10 +440,8 @@ class KafkaSummarizerConsumer(Base):
                     if total_tokens > 0:
                         self.llm_tokens_used.labels(consumer_id=consumer_id_label, provider=llm_provider).inc(total_tokens)
 
-                    # Estimated cost: rough Gemini Flash pricing (update via config if needed)
-                    cost_per_1k_in = float(self._app_config.get('summarizer.cost_per_1k_input_tokens') or 0.000075)
-                    cost_per_1k_out = float(self._app_config.get('summarizer.cost_per_1k_output_tokens') or 0.0003)
-                    estimated_cost = (input_tokens / 1000 * cost_per_1k_in) + (output_tokens / 1000 * cost_per_1k_out)
+                    # Estimated cost via pricing table
+                    estimated_cost = estimate_cost(llm_provider, input_tokens, output_tokens)
                     if estimated_cost > 0:
                         self.llm_estimated_cost_usd.labels(consumer_id=consumer_id_label, model=llm_provider).inc(estimated_cost)
 

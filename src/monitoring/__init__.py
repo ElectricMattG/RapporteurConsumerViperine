@@ -27,7 +27,9 @@ Usage:
     server.start()
 """
 
+from .azure_metrics import AzureMetricsCollector
 from .cache_metrics import CacheMetricsCollector
+from .cost import estimate_cost
 from .exporters.metrics_server import MetricsServer
 from .kafka_metrics import KafkaMetricsWrapper
 from .logging_config import configure_logging, generate_trace_id
@@ -35,11 +37,13 @@ from .prometheus_metrics import PrometheusMetrics
 from .system_metrics import SystemMetricsCollector
 
 __all__ = [
+    'AzureMetricsCollector',
     'CacheMetricsCollector',
     'PrometheusMetrics',
     'SystemMetricsCollector',
     'KafkaMetricsWrapper',
     'MetricsServer',
     'configure_logging',
+    'estimate_cost',
     'generate_trace_id',
 ]
