@@ -5,6 +5,9 @@ global:
     cluster: local-k3s
     environment: development
 
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
 scrape_configs:
   # Prometheus self-monitoring
   - job_name: 'prometheus'

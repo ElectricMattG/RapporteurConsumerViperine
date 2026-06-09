@@ -1,0 +1,62 @@
+# Canonical Viperine Consumer Scrape Jobs
+# ──────────────────────────────────────────────────────────────────────────────
+# Merged into the cluster prometheus-config ConfigMap by deploy_cluster_monitoring.sh.
+# Target DNS: <service>.<namespace>.svc.cluster.local:<metricsPort>
+#
+# Label contract:
+#   consumer: short consumer name (matches Helm role)
+#   pipeline: "viperine" (isolates from kaliya/lamia/bboa)
+#   service:  "kafka_consumer" (shared Grafana datasource filter)
+#
+# Port source of truth: helm/rapporteur-consumer-group/values.yaml → consumers.<role>.metricsPort
+# ──────────────────────────────────────────────────────────────────────────────
+
+- job_name: 'viperine_web_scraper'
+  metrics_path: '/metrics'
+  scrape_interval: 10s
+  static_configs:
+    - targets: ['viperine-web-scraper.consumers.svc.cluster.local:8001']
+      labels:
+        consumer: 'web_scraper'
+        pipeline: 'viperine'
+        service: 'kafka_consumer'
+
+- job_name: 'viperine_summarizer'
+  metrics_path: '/metrics'
+  scrape_interval: 10s
+  static_configs:
+    - targets: ['viperine-summarizer.consumers.svc.cluster.local:8010']
+      labels:
+        consumer: 'summarizer'
+        pipeline: 'viperine'
+        service: 'kafka_consumer'
+
+- job_name: 'viperine_summary_indexer'
+  metrics_path: '/metrics'
+  scrape_interval: 10s
+  static_configs:
+    - targets: ['viperine-summary-indexer.consumers.svc.cluster.local:8006']
+      labels:
+        consumer: 'summary_indexer'
+        pipeline: 'viperine'
+        service: 'kafka_consumer'
+
+- job_name: 'viperine_index_aggregator'
+  metrics_path: '/metrics'
+  scrape_interval: 10s
+  static_configs:
+    - targets: ['viperine-index-aggregator.consumers.svc.cluster.local:8008']
+      labels:
+        consumer: 'index_aggregator'
+        pipeline: 'viperine'
+        service: 'kafka_consumer'
+
+- job_name: 'viperine_dead_letter'
+  metrics_path: '/metrics'
+  scrape_interval: 10s
+  static_configs:
+    - targets: ['viperine-dead-letter-consumer.consumers.svc.cluster.local:8009']
+      labels:
+        consumer: 'dead_letter'
+        pipeline: 'viperine'
+        service: 'kafka_consumer'
