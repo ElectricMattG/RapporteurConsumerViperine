@@ -5,8 +5,6 @@ Kafka consumer group for the Rapporteur ingestion pipeline. Scrapes web sources,
 > **Sibling repos**
 > - RAG service: `RapportuerRAG`
 > - Frontend: `RapportuerFrontEnd`
->
-> **Helm / monitoring removed in this repo** — recoverable from git SHA `412ba42`
 
 ## Pipeline
 
@@ -84,13 +82,35 @@ Consumers expose Prometheus `/metrics` on ports 8001, 8010, etc.
 
 ```
 src/
-├── clients/       # LLM and embedding API clients
-├── components/    # Web searcher, URL resolver, summarise pipeline
-├── consumers/     # Kafka consumers (scraper, summarizer, indexer, aggregator, DLQ)
-├── config.py      # pyconfs config
-├── config_handler.py  # Base class for all consumers
-├── monitoring/    # Prometheus metrics exporters (in-process)
-└── utils/         # index_adapter, async_file_io
+├── clients/          # LLM (Gemini/OpenAI) and embedding API clients
+├── components/       # Web searcher, URL resolver, summarise pipeline
+├── consumers/        # Kafka consumers (scraper, summarizer, indexer, aggregator, DLQ)
+├── monitoring/       # Prometheus metrics exporters (in-process)
+│   ├── prometheus_metrics.py        # Base counters + lifecycle helpers
+│   ├── kafka_metrics.py             # Lag, poll, produce tracking
+│   ├── system_metrics.py            # psutil background thread
+│   ├── cost.py                      # LLM cost estimation (pricing table)
+│   ├── error_categories.py          # Validated ErrorCategory enum
+│   └── exporters/metrics_server.py  # /metrics /health /ready HTTP server
+├── config.py         # pyconfs config defaults
+├── config_handler.py # Base class for all consumers
+└── utils/            # index_adapter, async_file_io
+```
+
+```
+grafana/
+└── dashboards/
+    └── viperine-pipeline-overview.json  # 11-section, 63-panel Grafana dashboard
+
+monitoring/
+├── prometheus/
+│   ├── prometheus.yml  # Prometheus scrape config
+│   └── alerts.yml      # 14 alert rules (8 critical, 6 warning)
+├── runbooks/           # Per-alert remediation guides
+└── MONITORING.md       # Full observability reference
+
+helm/
+└── rapporteur-consumer-group/  # Helm chart for k3s deployment (release: viperine)
 ```
 
 ## Make Targets
@@ -111,6 +131,43 @@ src/
 | `make docker_tag` | Tag image for ACR |
 | `make docker_push` | Push image to ACR |
 | `make gcp_gemini` | Set up GCP auth for Gemini |
+| **k8s deployment** | |
+| `make k8s_deploy` | Full release pipeline: build → push → nvidia-safe rollout → status |
+| `make k8s_rollout` | Nvidia-safe rollout only (pre-built image) |
+| `make k8s_build` | Build + tag image for local registry (192.168.1.3:5000) |
+| `make k8s_push` | Push image to local registry |
+| `make k8s_status` | Show pod and service status for the consumer group |
+| `make k8s_logs` | Tail logs from all consumer pods |
+| `make k8s_restart` | Rolling restart of all deployments |
+| `make k8s_shell` | Open a shell in a consumer pod |
+| `make k8s_prereqs` | One-time bootstrap (namespace, hostPath, GCP credentials) |
+| `make k8s_uninstall` | Remove the Helm release |
+| **monitoring** | |
+| `make monitoring_deploy` | Patch Prometheus + Grafana ConfigMaps and hot-reload (idempotent) |
+| `make monitoring_status` | Check Prometheus scrape target health |
+| `make monitoring_reload` | Hot-reload Prometheus config (safe — never restarts the pod) |
+| `make monitoring_open` | Print Prometheus and Grafana URLs |
+
+## Observability
+
+All consumers expose `/metrics`, `/health`, and `/ready` on their assigned ports. Prometheus scrapes them every 10 s; Grafana renders the dashboard.
+
+| Component | URL |
+|-----------|-----|
+| Prometheus | http://192.168.1.3:30090 |
+| Grafana | http://192.168.1.3:30030 |
+| Dashboard | http://192.168.1.3:30030/d/viperine-pipeline-overview |
+
+Deploy or refresh the monitoring stack:
+
+```bash
+make monitoring_deploy   # idempotent — patches ConfigMaps + hot-reloads Prometheus
+make monitoring_status   # verify all 4 scrape targets are UP
+```
+
+See [monitoring/MONITORING.md](monitoring/MONITORING.md) for the full metrics catalogue, alert rules, and runbooks.
+
+---
 
 ## License
 

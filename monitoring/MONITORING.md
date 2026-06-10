@@ -95,13 +95,14 @@ graph LR
 |------|---------|
 | `monitoring/prometheus/prometheus.yml` | Prometheus global config + scrape jobs (cluster copy) |
 | `monitoring/prometheus/alerts.yml` | All 14 alert rules (8 critical, 6 warning) |
-| `k8s/monitoring/viperine-scrape-jobs.yaml` | Canonical scrape job definitions (merged into prometheus-config) |
-| `scripts/deploy_cluster_monitoring.sh` | Idempotent deploy script — patches ConfigMaps + reloads |
 | `monitoring/runbooks/` | Per-alert remediation playbooks |
-| `grafana/dashboards/` | Dashboard JSON files (provisioned into Grafana) |
+| `grafana/dashboards/viperine-pipeline-overview.json` | Dashboard JSON (11 sections, 63 panels) — provisioned via ConfigMap |
+| `DASHBOARD_DESIGN.md` | Source-of-truth design spec for the dashboard (grid, sections, metrics) |
+| `scripts/deploy_cluster_monitoring.sh` | Idempotent deploy script — patches ConfigMaps + reloads |
 | `src/monitoring/prometheus_metrics.py` | `PrometheusMetrics` — base counters, lifecycle helpers |
 | `src/monitoring/kafka_metrics.py` | `KafkaMetricsWrapper` — lag, poll, produce tracking |
 | `src/monitoring/system_metrics.py` | `SystemMetricsCollector` — psutil background thread |
+| `src/monitoring/cost.py` | `estimate_cost()` + `PRICING_TABLE` — LLM USD cost from token counts |
 | `src/monitoring/error_categories.py` | `ErrorCategory` enum — validated label values |
 | `src/monitoring/exporters/metrics_server.py` | `MetricsServer` — HTTP server for /metrics /health /ready |
 
@@ -185,10 +186,16 @@ All metrics share the `kafka_consumer_` prefix and include at minimum a `consume
 |--------|------|--------|
 | `kafka_consumer_documents_summarized_total` | Counter | `consumer_id`, `model` |
 | `kafka_consumer_summarization_duration_seconds` | Histogram | `consumer_id`, `model` |
-| `kafka_consumer_llm_api_calls_total` | Counter | `consumer_id`, `model` |
+| `kafka_consumer_llm_api_calls_total` | Counter | `consumer_id`, `provider` |
 | `kafka_consumer_llm_api_errors_total` | Counter | `consumer_id`, `model`, `error_type` |
 | `kafka_consumer_llm_latency_seconds` | Histogram | `consumer_id`, `model` |
 | `kafka_consumer_summary_length_chars` | Histogram | `consumer_id` |
+| `kafka_consumer_llm_input_tokens_total` | Counter | `consumer_id`, `model` | Input token count per call |
+| `kafka_consumer_llm_output_tokens_total` | Counter | `consumer_id`, `model` | Output token count per call |
+| `kafka_consumer_llm_tokens_used_total` | Counter | `consumer_id`, `provider` | Combined tokens (fallback when split unavailable) |
+| `kafka_consumer_llm_estimated_cost_usd_total` | Counter | `consumer_id`, `model` | Estimated USD spend via pricing table |
+| `kafka_consumer_model_error_outputs_total` | Counter | `consumer_id`, `model` | Calls where LLM returned error-as-content |
+| `kafka_consumer_cost_unknown_model_total` | Counter | `model` | Incremented when model string is not in the pricing table (alerts on untracked models) |
 
 **summary-indexer**
 
@@ -243,19 +250,32 @@ All rules are in `monitoring/prometheus/alerts.yml` and grouped by severity. Run
 
 ## Dashboard
 
-Grafana: `http://192.168.1.3:30030/d/viperine-pipeline/viperine-pipeline-overview`
+Grafana: `http://192.168.1.3:30030/d/viperine-pipeline-overview`
 
-| Row | Panels | Notes |
-|-----|--------|-------|
-| Pipeline Health | State gauges (1 per consumer), uptime | Red if state ≠ 1 |
-| Throughput | `messages_consumed_total` rate, `messages_published_total` rate | "No data" is expected when the pipeline is idle |
-| Processing Latency | p50 / p95 / p99 of `message_processing_duration_seconds` | Per consumer |
-| Kafka Lag | `lag_messages` per partition | Should be 0 at rest |
-| LLM (summarizer) | API call rate, error rate, p95 latency, cost estimate | "No data" when no sessions are active |
-| Embedding (summary-indexer) | p50 / p95 of `summary_embedding_duration_seconds` | "No data" when idle |
-| Resources | RSS memory, CPU %, open FDs, thread count | Collected every 60 s |
-| Disk | Usage %, used GB, free GB per mount | Shared NVMe (~2 TB) |
-| Dead Letter | DLQ rate, messages by origin, failures by stage | "No data" is the healthy state |
+The dashboard (`grafana/dashboards/viperine-pipeline-overview.json`) was fully redesigned to 11 sections and 63 panels. Design spec: [DASHBOARD_DESIGN.md](../DASHBOARD_DESIGN.md).
+
+| Section | Default | Panels | Notes |
+|---------|---------|--------|-------|
+| Fleet Health | expanded | 6 KPI stats | Consumers Up, Total Lag, Messages Consumed, Failures, DLQ count, Last Poll freshness |
+| Consumer Status | expanded | per-consumer state tiles + uptime + state-timeline strip | Colour-coded green/amber/red |
+| Throughput & Lag | expanded | consume/publish rate, lag by consumer, p50–p99 processing latency, in-flight, lag by partition | Primary lag view is per-consumer; partition is drill-down |
+| Kafka Client Health | collapsed | 4 | Poll duration p95, rebalances, message age p50/p95, time since last poll |
+| LLM & Cost | collapsed | 6 | Calls/s, latency p50–p99, errors by type, token usage in/out, cost (USD total), cost burn rate $/h |
+| Cache | collapsed | 4 | Hit rate gauge, size, files, evictions |
+| Indices | collapsed | 13 | Active index folder, records, last reload time, delta, ingestion rate, by-corpus breakdown, doc-ID scheme, duplicates, session counts |
+| Errors & Failures | collapsed | 3 | Produce failures, connection/deser/timeout errors |
+| Dead Letter Queue | collapsed | 5 | DLQ rate, by stage, by origin |
+| System Resources | collapsed | 6 | CPU, RSS, disk %, FDs, threads, disk available |
+| Azure & Aggregation | collapsed | 7 | Upload/download rates, duration, blobs, bytes, failures, sessions aggregated |
+
+**Expected "No data" panels** (not query bugs):
+
+| Cause | Example panels |
+|-------|---------------|
+| Activity-gated | Lag, token usage, LLM cost, cache, DLQ — populate once the pipeline processes traffic |
+| RAG service not scraped | Indices section state tiles (Active Index, Records in Index, etc.) — emitted by RAG API, not consumers |
+| Azure disabled | All `Azure & Aggregation` panels — require `AZURE_STORAGE_CONNECTION_STRING` |
+| Aggregator disabled | Sessions Aggregated — `index_aggregator` consumer is off by default |
 
 ---
 
@@ -265,12 +285,15 @@ Grafana: `http://192.168.1.3:30030/d/viperine-pipeline/viperine-pipeline-overvie
 |---------|-------------|-----|
 | Target shows `DOWN` in Prometheus | Pod not running or MetricsServer not started | `kubectl -n consumers get pods`, check logs |
 | `ConsumerLagHigh` fires | Downstream consumer can't keep up or is crashing | Check processing errors, increase replicas if applicable |
-| `kafka_consumer_kafka_consumer_*` metric names | Using old image before Phase 6 double-prefix fix | Rebuild and redeploy: `make k8s_deploy` |
+| `kafka_consumer_kafka_consumer_*` names in TSDB | Stale TSDB series from image before Phase 6 fix — historical only | Run instant query; if new pods return 0 for old names, they will age out within retention. Rebuild with `make k8s_deploy` if still emitting. |
+| `kafka_consumer_cost_unknown_model_total` incrementing | `estimate_cost()` called with provider string (`"gemini"`) instead of model name | Fixed in REVISION 14 — ensure `self.llm_client.model_name` is used, not `llm_provider` |
+| LLM cost/token panels show "No data" | Counters only emit after a successful summarization call | Wait for pipeline activity; verify series appear after next summary |
 | Alerts not loading (`rule_files` error) | `viperine-alerts` ConfigMap missing or wrong key | `make monitoring_deploy` then verify with `make monitoring_status` |
 | Prometheus won't reload | `/etc/prometheus` volume mounted read-only, or RWO PVC locked | `kubectl -n monitoring describe pod` — check mount errors; **never restart Prometheus** |
+| Grafana shows wrong dashboard / provisioning stale | ConfigMap updated but pod hasn't propagated yet | Wait 30 s, then `POST http://192.168.1.3:30030/api/admin/provisioning/dashboards/reload` |
 | `DiskUsageCritical` on all consumers | All share the same NVMe volume — one consumer filled it | `du -sh /mnt/workspace_2/viperine-cache/*` to find culprit |
 | `ConsumerStale` fires but lag is 0 | No upstream messages (pipeline idle), not a fault | Silence the alert or adjust `for` duration |
-| "No data" on LLM / DLQ panels | Pipeline not actively processing sessions | Expected — these panels activate during live runs |
+| "No data" on LLM / DLQ / Index panels | Activity-gated, RAG-service, or Azure-disabled panels (see Dashboard section) | Expected — see "Expected No data panels" table above |
 
 ---
 
