@@ -70,13 +70,16 @@ export GCP_LOCATION=us-central1
 export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa-key.json
 ```
 
-### 3. Start consumers
+### 3. Deploy to k8s
 
 ```bash
-./restart_pipeline.sh
+make k8s_deploy     # build → push → nvidia-safe rollout → status
+make k8s_logs       # tail logs from all consumer pods
 ```
 
 Consumers expose Prometheus `/metrics` on ports 8001, 8010, etc.
+
+> `restart_pipeline.sh` has been deprecated (local-process / pre-k8s workflow) and moved to `archive/deprecated_restart_pipeline.sh`.
 
 ## Project Structure
 
