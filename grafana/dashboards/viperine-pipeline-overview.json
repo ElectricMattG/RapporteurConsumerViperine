@@ -1,14 +1,14 @@
 {
   "uid": "viperine-pipeline-overview",
   "title": "Viperine Pipeline Overview",
-  "description": "Comprehensive observability for Viperine Kafka consumers: web-scraper, summarizer, summary-indexer, index-aggregator, dead-letter",
+  "description": "Viperine Kafka consumer pipeline observability \u2014 11-section layout per DASHBOARD_DESIGN.md: fleet health, consumer status, throughput/lag, kafka client, LLM/cost, cache, indices, errors, DLQ, system resources, azure.",
   "tags": [
     "viperine",
     "kafka",
     "consumers"
   ],
   "schemaVersion": 27,
-  "version": 1,
+  "version": 4,
   "refresh": "30s",
   "time": {
     "from": "now-1h",
@@ -16,10 +16,42 @@
   },
   "timepicker": {},
   "timezone": "browser",
+  "templating": {
+    "list": []
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [],
+  "editable": true,
+  "graphTooltip": 1,
+  "style": "dark",
+  "__inputs": [],
+  "__requires": [],
   "panels": [
     {
+      "id": 1,
+      "type": "row",
+      "title": "Fleet Health",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 2,
       "type": "stat",
       "title": "Consumers Up",
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(kafka_consumer_state{pipeline=\"viperine\"} == 1)",
@@ -37,8 +69,12 @@
                 "value": null
               },
               {
+                "color": "yellow",
+                "value": 3
+              },
+              {
                 "color": "green",
-                "value": 1
+                "value": 4
               }
             ]
           },
@@ -51,23 +87,83 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
         "colorMode": "background",
         "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 0,
-        "y": 0
-      },
-      "id": 1
+      }
     },
     {
+      "id": 3,
+      "type": "stat",
+      "title": "Total Consumer Lag",
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(kafka_consumer_lag_messages{pipeline=\"viperine\"})",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "yellow",
+                "value": 1000
+              },
+              {
+                "color": "red",
+                "value": 10000
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 4,
       "type": "stat",
       "title": "Messages Consumed",
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(kafka_consumer_messages_consumed_total{pipeline=\"viperine\"})",
@@ -76,30 +172,38 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "short"
+          "unit": "short",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
         }
       },
       "options": {
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
         "colorMode": "none",
         "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 4,
-        "y": 0
-      },
-      "id": 2
+      }
     },
     {
+      "id": 5,
       "type": "stat",
       "title": "Processing Failures",
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 6,
+        "h": 4
+      },
       "targets": [
         {
           "expr": "sum(kafka_consumer_processing_failures_total{pipeline=\"viperine\"})",
@@ -135,26 +239,30 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
         "colorMode": "background",
         "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 8,
-        "y": 0
-      },
-      "id": 3
+      }
     },
     {
+      "id": 6,
       "type": "stat",
       "title": "DLQ Messages",
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 12,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "sum(kafka_consumer_dlq_messages_processed_total)",
+          "expr": "sum(kafka_consumer_dlq_messages_processed_total{pipeline=\"viperine\"})",
           "refId": "A"
         }
       ],
@@ -171,58 +279,10 @@
               {
                 "color": "yellow",
                 "value": 1
-              }
-            ]
-          },
-          "color": {
-            "mode": "thresholds"
-          }
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "background",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 12,
-        "y": 0
-      },
-      "id": 4
-    },
-    {
-      "type": "stat",
-      "title": "Total Consumer Lag",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_kafka_consumer_lag_messages{pipeline=\"viperine\"})",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "yellow",
-                "value": 100
               },
               {
                 "color": "red",
-                "value": 1000
+                "value": 10
               }
             ]
           },
@@ -235,236 +295,30 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
         "colorMode": "background",
         "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 0
-      },
-      "id": 5
+      }
     },
     {
-      "type": "stat",
-      "title": "Summaries Indexed",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_summaries_indexed_total)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 0
-      },
-      "id": 6
-    },
-    {
-      "type": "row",
-      "title": "Throughput & Latency",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 4
-      },
-      "id": 7
-    },
-    {
-      "type": "timeseries",
-      "title": "Consume Rate /s by Consumer",
-      "targets": [
-        {
-          "expr": "sum by (consumer) (rate(kafka_consumer_messages_consumed_total{pipeline=\"viperine\"}[5m]))",
-          "legendFormat": "{{consumer}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 5
-      },
-      "id": 8
-    },
-    {
-      "type": "timeseries",
-      "title": "Processing Duration (p50/p95/p99)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum by (consumer,le)(rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p50 {{consumer}}",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (consumer,le)(rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p95 {{consumer}}",
-          "refId": "B"
-        },
-        {
-          "expr": "histogram_quantile(0.99, sum by (consumer,le)(rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p99 {{consumer}}",
-          "refId": "C"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 5
-      },
-      "id": 9
-    },
-    {
-      "type": "timeseries",
-      "title": "Messages In Flight",
-      "targets": [
-        {
-          "expr": "kafka_consumer_kafka_consumer_messages_in_flight{pipeline=\"viperine\"}",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 13
-      },
-      "id": 10
-    },
-    {
-      "type": "timeseries",
-      "title": "Poll Duration p95",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (consumer_id,le)(rate(kafka_consumer_kafka_consumer_poll_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 13
-      },
-      "id": 11
-    },
-    {
-      "type": "row",
-      "title": "Client / Kafka Health",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 21
-      },
-      "id": 12
-    },
-    {
-      "type": "timeseries",
-      "title": "Consumer Lag by Partition",
-      "targets": [
-        {
-          "expr": "kafka_consumer_kafka_consumer_lag_messages{pipeline=\"viperine\"}",
-          "legendFormat": "{{consumer_id}} p{{partition}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 22
-      },
-      "id": 13
-    },
-    {
-      "type": "timeseries",
-      "title": "Message Age (p50/p95)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.50, sum by (consumer_id,le)(rate(kafka_consumer_kafka_consumer_message_age_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p50 {{consumer_id}}",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (consumer_id,le)(rate(kafka_consumer_kafka_consumer_message_age_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p95 {{consumer_id}}",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 22
-      },
-      "id": 14
-    },
-    {
+      "id": 7,
       "type": "stat",
       "title": "Last Poll Freshness",
+      "gridPos": {
+        "x": 12,
+        "y": 5,
+        "w": 12,
+        "h": 4
+      },
       "targets": [
         {
-          "expr": "max by (consumer_id) (time() - kafka_consumer_last_successful_poll_timestamp{pipeline=\"viperine\"})",
-          "legendFormat": "{{consumer_id}}",
+          "expr": "max(time() - kafka_consumer_last_successful_poll_timestamp{pipeline=\"viperine\"})",
           "refId": "A"
         }
       ],
@@ -480,11 +334,11 @@
               },
               {
                 "color": "yellow",
-                "value": 60
+                "value": 30
               },
               {
                 "color": "red",
-                "value": 300
+                "value": 120
               }
             ]
           },
@@ -497,137 +351,50 @@
         "reduceOptions": {
           "calcs": [
             "lastNotNull"
-          ]
+          ],
+          "fields": "",
+          "values": false
         },
         "colorMode": "background",
-        "textMode": "value_and_name",
+        "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
         "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 0,
-        "y": 30
-      },
-      "id": 15
+      }
     },
     {
-      "type": "timeseries",
-      "title": "Consumer Rebalances",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_kafka_consumer_rebalances_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 12,
-        "x": 12,
-        "y": 30
-      },
-      "id": 16
-    },
-    {
+      "id": 8,
       "type": "row",
-      "title": "Failures & Errors",
+      "title": "Consumer Status",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
+        "x": 0,
+        "y": 9,
         "w": 24,
-        "x": 0,
-        "y": 34
+        "h": 1
       },
-      "id": 17
+      "panels": []
     },
     {
-      "type": "timeseries",
-      "title": "Processing Failures by Error Type",
-      "targets": [
-        {
-          "expr": "sum by (error_type)(rate(kafka_consumer_processing_failures_total{pipeline=\"viperine\"}[5m]))",
-          "legendFormat": "{{error_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
+      "id": 9,
+      "type": "stat",
+      "title": "Consumer State",
       "gridPos": {
-        "h": 8,
+        "x": 0,
+        "y": 10,
         "w": 12,
-        "x": 0,
-        "y": 35
+        "h": 6
       },
-      "id": 18
-    },
-    {
-      "type": "timeseries",
-      "title": "Connection / Deserialization / Timeout Errors",
       "targets": [
         {
-          "expr": "rate(kafka_consumer_connection_errors_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "connection {{consumer_id}}",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(kafka_consumer_deserialization_errors_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "deser {{consumer_id}}",
-          "refId": "B"
-        },
-        {
-          "expr": "rate(kafka_consumer_timeout_errors_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "timeout {{consumer_id}}",
-          "refId": "C"
+          "expr": "kafka_consumer_state{pipeline=\"viperine\"}",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 35
-      },
-      "id": 19
-    },
-    {
-      "type": "row",
-      "title": "Cache",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 43
-      },
-      "id": 20
-    },
-    {
-      "type": "gauge",
-      "title": "Cache Hit Rate",
-      "targets": [
-        {
-          "expr": "sum(rate(kafka_consumer_cache_hit_total{pipeline=\"viperine\"}[5m])) / (sum(rate(kafka_consumer_cache_hit_total{pipeline=\"viperine\"}[5m])) + sum(rate(kafka_consumer_cache_miss_total{pipeline=\"viperine\"}[5m])))",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percentunit",
-          "min": 0,
-          "max": 1,
+          "unit": "short",
           "thresholds": {
             "mode": "absolute",
             "steps": [
@@ -636,12 +403,136 @@
                 "value": null
               },
               {
-                "color": "yellow",
-                "value": 0.5
+                "color": "green",
+                "value": 1
+              }
+            ]
+          },
+          "color": {
+            "mode": "thresholds"
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ]
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Consumer Uptime",
+      "gridPos": {
+        "x": 12,
+        "y": 10,
+        "w": 12,
+        "h": 6
+      },
+      "targets": [
+        {
+          "expr": "(time() - kafka_consumer_startup_timestamp_seconds{pipeline=\"viperine\"})",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "color": {
+            "mode": "fixed",
+            "fixedColor": "text"
+          }
+        }
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "none",
+        "textMode": "auto",
+        "graphMode": "none",
+        "justifyMode": "auto",
+        "orientation": "auto"
+      }
+    },
+    {
+      "id": 11,
+      "type": "state-timeline",
+      "title": "State Timeline",
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 24,
+        "h": 6
+      },
+      "targets": [
+        {
+          "expr": "kafka_consumer_state{pipeline=\"viperine\"}",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          },
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "DOWN",
+                  "color": "red"
+                },
+                "1": {
+                  "text": "UP",
+                  "color": "green"
+                }
+              }
+            }
+          ],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
               },
               {
                 "color": "green",
-                "value": 0.8
+                "value": 1
               }
             ]
           },
@@ -650,739 +541,2371 @@
           }
         }
       },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 0,
-        "y": 44
-      },
-      "id": 21
-    },
-    {
-      "type": "stat",
-      "title": "Cache Size",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_cache_size_bytes{pipeline=\"viperine\"})",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes"
-        }
-      },
       "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
+        "showValue": "never",
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
         },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 6,
-        "y": 44
-      },
-      "id": 22
+        "mergeValues": true
+      }
     },
     {
-      "type": "stat",
-      "title": "Cache Files",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_cache_files_total{pipeline=\"viperine\"})",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 12,
-        "y": 44
-      },
-      "id": 23
-    },
-    {
-      "type": "timeseries",
-      "title": "Cache Evictions",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_cache_eviction_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "{{consumer_id}} {{cache}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 6,
-        "w": 6,
-        "x": 18,
-        "y": 44
-      },
-      "id": 24
-    },
-    {
+      "id": 12,
       "type": "row",
-      "title": "Tokens & LLM Cost (Summarizer)",
+      "title": "Throughput & Lag",
       "collapsed": false,
       "gridPos": {
-        "h": 1,
+        "x": 0,
+        "y": 22,
         "w": 24,
-        "x": 0,
-        "y": 50
+        "h": 1
       },
-      "id": 25
+      "panels": []
     },
     {
+      "id": 13,
       "type": "timeseries",
-      "title": "LLM Calls /s",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_llm_api_calls_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "{{consumer_id}} {{provider}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
+      "title": "Consume Rate /s by Consumer",
       "gridPos": {
-        "h": 8,
+        "x": 0,
+        "y": 23,
         "w": 8,
-        "x": 0,
-        "y": 51
+        "h": 8
       },
-      "id": 26
-    },
-    {
-      "type": "timeseries",
-      "title": "LLM Latency (p50/p95)",
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (model,le)(rate(kafka_consumer_llm_latency_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p50 {{model}}",
-          "refId": "A"
-        },
-        {
-          "expr": "histogram_quantile(0.95, sum by (model,le)(rate(kafka_consumer_llm_latency_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p95 {{model}}",
-          "refId": "B"
+          "expr": "sum by (consumer) (rate(kafka_consumer_messages_consumed_total{pipeline=\"viperine\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
         }
       ],
       "fieldConfig": {
         "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 51
-      },
-      "id": 27
-    },
-    {
-      "type": "timeseries",
-      "title": "Input / Output Tokens /s",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_llm_input_tokens_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "input {{model}}",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(kafka_consumer_llm_output_tokens_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "output {{model}}",
-          "refId": "B"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 51
-      },
-      "id": 28
-    },
-    {
-      "type": "stat",
-      "title": "Estimated LLM Cost (USD total)",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_llm_estimated_cost_usd_total{pipeline=\"viperine\"})",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 8,
-        "x": 0,
-        "y": 59
-      },
-      "id": 29
-    },
-    {
-      "type": "timeseries",
-      "title": "LLM Cost Rate (24h rolling)",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_llm_estimated_cost_usd_total{pipeline=\"viperine\"}[24h]) * 3600",
-          "legendFormat": "$/hr {{model}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "currencyUSD"
-        }
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 16,
-        "x": 8,
-        "y": 59
-      },
-      "id": 30
-    },
-    {
-      "type": "row",
-      "title": "Index Summaries (Summary Indexer)",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 63
-      },
-      "id": 31
-    },
-    {
-      "type": "timeseries",
-      "title": "Summaries Indexed /s",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_summaries_indexed_total{pipeline=\"viperine\"}[5m])",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 64
-      },
-      "id": 32
-    },
-    {
-      "type": "timeseries",
-      "title": "Embedding Duration (p95)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (consumer_id,le)(rate(kafka_consumer_summary_embedding_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
-          "legendFormat": "p95 {{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 64
-      },
-      "id": 33
-    },
-    {
-      "type": "piechart",
-      "title": "Document ID Scheme Split",
-      "description": "doc_ scheme = rogue producer; req_ = Viperine; uuid = legacy",
-      "targets": [
-        {
-          "expr": "sum by (scheme)(kafka_consumer_summary_id_scheme_total{pipeline=\"viperine\"})",
-          "legendFormat": "{{scheme}}",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 64
-      },
-      "id": 34
-    },
-    {
-      "type": "timeseries",
-      "title": "Duplicates Detected /s by Match",
-      "targets": [
-        {
-          "expr": "sum by (match)(rate(kafka_consumer_summary_duplicates_detected_total{pipeline=\"viperine\"}[5m]))",
-          "legendFormat": "{{match}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 72
-      },
-      "id": 35
-    },
-    {
-      "type": "stat",
-      "title": "Sessions Completed",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_summary_sessions_completed_total{pipeline=\"viperine\"})",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 72
-      },
-      "id": 36
-    },
-    {
-      "type": "row",
-      "title": "Dead-Letter Queue",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 80
-      },
-      "id": 37
-    },
-    {
-      "type": "timeseries",
-      "title": "DLQ Rate (processed/reprocessed/discarded)",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_dlq_messages_processed_total[5m])",
-          "legendFormat": "processed",
-          "refId": "A"
-        },
-        {
-          "expr": "rate(kafka_consumer_dlq_messages_reprocessed_total[5m])",
-          "legendFormat": "reprocessed",
-          "refId": "B"
-        },
-        {
-          "expr": "rate(kafka_consumer_dlq_messages_discarded_total[5m])",
-          "legendFormat": "discarded",
-          "refId": "C"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 81
-      },
-      "id": 38
-    },
-    {
-      "type": "bargauge",
-      "title": "Failures by Stage (current)",
-      "targets": [
-        {
-          "expr": "kafka_consumer_dlq_failures_by_stage",
-          "legendFormat": "{{stage}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "short"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "orientation": "horizontal",
-        "displayMode": "lcd",
-        "valueMode": "color"
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 12,
-        "y": 81
-      },
-      "id": 39
-    },
-    {
-      "type": "piechart",
-      "title": "DLQ by Origin Topic",
-      "targets": [
-        {
-          "expr": "sum by (origin_topic)(kafka_consumer_dlq_messages_by_origin_total)",
-          "legendFormat": "{{origin_topic}}",
-          "refId": "A"
-        }
-      ],
-      "gridPos": {
-        "h": 8,
-        "w": 6,
-        "x": 18,
-        "y": 81
-      },
-      "id": 40
-    },
-    {
-      "type": "timeseries",
-      "title": "DLQ Processing Duration (p95)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le)(rate(kafka_consumer_dlq_processing_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 0,
-        "y": 89
-      },
-      "id": 41
-    },
-    {
-      "type": "timeseries",
-      "title": "DLQ Message Age in Queue (p95)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le)(rate(kafka_consumer_dlq_age_seconds_bucket[5m])))",
-          "legendFormat": "p95",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 12,
-        "x": 12,
-        "y": 89
-      },
-      "id": 42
-    },
-    {
-      "type": "row",
-      "title": "Aggregator & Azure",
-      "collapsed": false,
-      "gridPos": {
-        "h": 1,
-        "w": 24,
-        "x": 0,
-        "y": 97
-      },
-      "id": 43
-    },
-    {
-      "type": "timeseries",
-      "title": "Sessions Aggregated /s",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_sessions_aggregated_total[5m])",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 98
-      },
-      "id": 44
-    },
-    {
-      "type": "timeseries",
-      "title": "Azure Upload Duration (p95)",
-      "targets": [
-        {
-          "expr": "histogram_quantile(0.95, sum by (le)(rate(kafka_consumer_azure_upload_duration_seconds_bucket[5m])))",
-          "legendFormat": "p95",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "s"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 98
-      },
-      "id": 45
-    },
-    {
-      "type": "stat",
-      "title": "Azure Storage Bytes",
-      "targets": [
-        {
-          "expr": "sum(kafka_consumer_azure_storage_bytes)",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes"
-        }
-      },
-      "options": {
-        "reduceOptions": {
-          "calcs": [
-            "lastNotNull"
-          ]
-        },
-        "colorMode": "none",
-        "textMode": "auto",
-        "orientation": "auto"
-      },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 16,
-        "y": 98
-      },
-      "id": 46
-    },
-    {
-      "type": "timeseries",
-      "title": "Azure Upload Failures /s",
-      "targets": [
-        {
-          "expr": "rate(kafka_consumer_azure_upload_failures_total[5m])",
-          "legendFormat": "{{index_type}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "reqps",
-          "thresholds": {
-            "mode": "absolute",
-            "steps": [
-              {
-                "color": "green",
-                "value": null
-              },
-              {
-                "color": "red",
-                "value": 0.001
-              }
-            ]
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
           }
         }
       },
-      "gridPos": {
-        "h": 4,
-        "w": 4,
-        "x": 20,
-        "y": 98
-      },
-      "id": 47
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
     },
     {
+      "id": 14,
+      "type": "timeseries",
+      "title": "Publish Rate /s by Consumer",
+      "gridPos": {
+        "x": 8,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (consumer) (rate(kafka_consumer_messages_published_total{pipeline=\"viperine\", result=\"success\"}[5m]))",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "ops",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 15,
+      "type": "timeseries",
+      "title": "Consumer Lag by Consumer",
+      "gridPos": {
+        "x": 16,
+        "y": 23,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (consumer) (kafka_consumer_lag_messages{pipeline=\"viperine\"})",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 16,
+      "type": "timeseries",
+      "title": "Processing Duration (p50/p95/p99)",
+      "gridPos": {
+        "x": 0,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "histogram_quantile(0.5, sum by (le, consumer) (rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+          "refId": "A",
+          "legendFormat": "{{consumer}} p50"
+        },
+        {
+          "expr": "histogram_quantile(0.95, sum by (le, consumer) (rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+          "refId": "B",
+          "legendFormat": "{{consumer}} p95"
+        },
+        {
+          "expr": "histogram_quantile(0.99, sum by (le, consumer) (rate(kafka_consumer_message_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+          "refId": "C",
+          "legendFormat": "{{consumer}} p99"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 17,
+      "type": "timeseries",
+      "title": "Messages In Flight",
+      "gridPos": {
+        "x": 8,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "kafka_consumer_messages_in_flight{pipeline=\"viperine\"}",
+          "refId": "A",
+          "legendFormat": "{{consumer}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 18,
+      "type": "timeseries",
+      "title": "Lag by Partition (drill-down)",
+      "gridPos": {
+        "x": 16,
+        "y": 31,
+        "w": 8,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "kafka_consumer_lag_messages{pipeline=\"viperine\"}",
+          "refId": "A",
+          "legendFormat": "{{consumer}} p{{partition}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 19,
+      "type": "row",
+      "title": "Kafka Client Health",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 39,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 20,
+          "type": "timeseries",
+          "title": "Poll Duration p95",
+          "gridPos": {
+            "x": 0,
+            "y": 40,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (consumer, le) (rate(kafka_consumer_poll_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 21,
+          "type": "timeseries",
+          "title": "Consumer Rebalances",
+          "gridPos": {
+            "x": 8,
+            "y": 40,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (consumer) (rate(kafka_consumer_rebalances_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 22,
+          "type": "timeseries",
+          "title": "Message Age (p50/p95)",
+          "gridPos": {
+            "x": 16,
+            "y": 40,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le, consumer) (rate(kafka_consumer_message_age_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "{{consumer}} p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, consumer) (rate(kafka_consumer_message_age_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "B",
+              "legendFormat": "{{consumer}} p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 23,
+          "type": "timeseries",
+          "title": "Time Since Last Successful Poll",
+          "gridPos": {
+            "x": 0,
+            "y": 48,
+            "w": 24,
+            "h": 6
+          },
+          "targets": [
+            {
+              "expr": "time() - kafka_consumer_last_successful_poll_timestamp{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 24,
+      "type": "row",
+      "title": "LLM & Cost",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 54,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 25,
+          "type": "timeseries",
+          "title": "LLM Calls /s",
+          "gridPos": {
+            "x": 0,
+            "y": 55,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_llm_api_calls_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "calls/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 26,
+          "type": "timeseries",
+          "title": "LLM Latency (p50/p95/p99)",
+          "gridPos": {
+            "x": 8,
+            "y": 55,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(kafka_consumer_llm_latency_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_llm_latency_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "B",
+              "legendFormat": "p95"
+            },
+            {
+              "expr": "histogram_quantile(0.99, sum by (le) (rate(kafka_consumer_llm_latency_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "C",
+              "legendFormat": "p99"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 27,
+          "type": "timeseries",
+          "title": "LLM Errors by Type",
+          "gridPos": {
+            "x": 16,
+            "y": 55,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (error_type) (rate(kafka_consumer_llm_api_errors_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{error_type}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 28,
+          "type": "timeseries",
+          "title": "Token Usage /s (in/out)",
+          "gridPos": {
+            "x": 0,
+            "y": 63,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_llm_input_tokens_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "input"
+            },
+            {
+              "expr": "sum(rate(kafka_consumer_llm_output_tokens_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "B",
+              "legendFormat": "output"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 29,
+          "type": "stat",
+          "title": "Estimated LLM Cost (USD total)",
+          "gridPos": {
+            "x": 8,
+            "y": 63,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_llm_estimated_cost_usd_total{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 1
+                  },
+                  {
+                    "color": "red",
+                    "value": 5
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 30,
+          "type": "timeseries",
+          "title": "Cost Burn Rate ($/h)",
+          "gridPos": {
+            "x": 16,
+            "y": 63,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(increase(kafka_consumer_llm_estimated_cost_usd_total{pipeline=\"viperine\"}[1h]))",
+              "refId": "A",
+              "legendFormat": "$/h"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "currencyUSD",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 31,
+      "type": "row",
+      "title": "Cache",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 71,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 32,
+          "type": "gauge",
+          "title": "Cache Hit Rate",
+          "gridPos": {
+            "x": 0,
+            "y": 72,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_cache_hit_total{pipeline=\"viperine\"}[5m])) / (sum(rate(kafka_consumer_cache_hit_total{pipeline=\"viperine\"}[5m])) + sum(rate(kafka_consumer_cache_miss_total{pipeline=\"viperine\"}[5m])))",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percentunit",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "red",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 0.5
+                  },
+                  {
+                    "color": "green",
+                    "value": 0.8
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              },
+              "min": 0,
+              "max": 1
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "showThresholdLabels": false,
+            "showThresholdMarkers": true
+          }
+        },
+        {
+          "id": 33,
+          "type": "stat",
+          "title": "Cache Size",
+          "gridPos": {
+            "x": 6,
+            "y": 72,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_cache_size_bytes{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 34,
+          "type": "stat",
+          "title": "Cache Files",
+          "gridPos": {
+            "x": 12,
+            "y": 72,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_cache_files_total{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 35,
+          "type": "timeseries",
+          "title": "Cache Evictions /s",
+          "gridPos": {
+            "x": 18,
+            "y": 72,
+            "w": 6,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "rate(kafka_consumer_cache_eviction_total{pipeline=\"viperine\"}[5m])",
+              "refId": "A",
+              "legendFormat": "evictions/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 36,
+      "type": "row",
+      "title": "Indices",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 79,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 37,
+          "type": "stat",
+          "title": "Active Index Folder",
+          "gridPos": {
+            "x": 0,
+            "y": 80,
+            "w": 6,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "rag_active_index_info",
+              "refId": "A",
+              "legendFormat": "{{folder}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 38,
+          "type": "stat",
+          "title": "Records in Index",
+          "gridPos": {
+            "x": 6,
+            "y": 80,
+            "w": 6,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(rag_index_records_total)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 39,
+          "type": "stat",
+          "title": "Time Since Last Index",
+          "gridPos": {
+            "x": 12,
+            "y": 80,
+            "w": 6,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "time() - rag_index_last_reload_timestamp",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "thresholds": {
+                "mode": "absolute",
+                "steps": [
+                  {
+                    "color": "green",
+                    "value": null
+                  },
+                  {
+                    "color": "yellow",
+                    "value": 3600
+                  },
+                  {
+                    "color": "red",
+                    "value": 21600
+                  }
+                ]
+              },
+              "color": {
+                "mode": "thresholds"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "background",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 40,
+          "type": "stat",
+          "title": "Last Reload Delta",
+          "gridPos": {
+            "x": 18,
+            "y": 80,
+            "w": 6,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(rag_index_reload_records_delta)",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 41,
+          "type": "timeseries",
+          "title": "Index Ingestion Rate (records/h)",
+          "gridPos": {
+            "x": 0,
+            "y": 84,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (corpus) (rate(rag_index_records_added_total[1h])) * 3600",
+              "refId": "A",
+              "legendFormat": "{{corpus}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 42,
+          "type": "timeseries",
+          "title": "Summaries Indexed /s",
+          "gridPos": {
+            "x": 8,
+            "y": 84,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "rate(kafka_consumer_summaries_indexed_total{pipeline=\"viperine\"}[5m])",
+              "refId": "A",
+              "legendFormat": "indexed/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 43,
+          "type": "timeseries",
+          "title": "Embedding Duration (p50/p95)",
+          "gridPos": {
+            "x": 16,
+            "y": 84,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.5, sum by (le) (rate(kafka_consumer_summary_embedding_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "p50"
+            },
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_summary_embedding_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "B",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 44,
+          "type": "bargauge",
+          "title": "Records by Corpus",
+          "gridPos": {
+            "x": 0,
+            "y": 92,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "rag_index_records_total",
+              "refId": "A",
+              "legendFormat": "{{corpus}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "showUnfilled": true
+          }
+        },
+        {
+          "id": 45,
+          "type": "piechart",
+          "title": "Document ID Scheme Split",
+          "gridPos": {
+            "x": 8,
+            "y": 92,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum by (scheme) (kafka_consumer_summary_id_scheme_total{pipeline=\"viperine\"})",
+              "refId": "A",
+              "legendFormat": "{{scheme}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "pieType": "donut",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          }
+        },
+        {
+          "id": 46,
+          "type": "timeseries",
+          "title": "Duplicates Detected /s",
+          "gridPos": {
+            "x": 16,
+            "y": 92,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum by (match) (rate(kafka_consumer_summary_duplicates_detected_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{match}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 47,
+          "type": "stat",
+          "title": "Summaries Indexed (total)",
+          "gridPos": {
+            "x": 0,
+            "y": 99,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_summaries_indexed_total{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 48,
+          "type": "stat",
+          "title": "Sessions Completed (total)",
+          "gridPos": {
+            "x": 8,
+            "y": 99,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_summary_sessions_completed_total{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 49,
+          "type": "stat",
+          "title": "Sessions In Progress",
+          "gridPos": {
+            "x": 16,
+            "y": 99,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(kafka_consumer_sessions_in_progress{pipeline=\"viperine\"})",
+              "refId": "A"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        }
+      ]
+    },
+    {
+      "id": 50,
+      "type": "row",
+      "title": "Errors & Failures",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 103,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 51,
+          "type": "timeseries",
+          "title": "Processing Failures by Error Type",
+          "gridPos": {
+            "x": 0,
+            "y": 104,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (error_type) (rate(kafka_consumer_processing_failures_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{error_type}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 52,
+          "type": "timeseries",
+          "title": "Produce Failures /s",
+          "gridPos": {
+            "x": 8,
+            "y": 104,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_messages_published_total{pipeline=\"viperine\", result=\"error\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "produce errors/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 53,
+          "type": "timeseries",
+          "title": "Connection / Deserialization / Timeout",
+          "gridPos": {
+            "x": 16,
+            "y": 104,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_connection_errors_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "connection"
+            },
+            {
+              "expr": "sum(rate(kafka_consumer_deserialization_errors_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "B",
+              "legendFormat": "deserialization"
+            },
+            {
+              "expr": "sum(rate(kafka_consumer_timeout_errors_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "C",
+              "legendFormat": "timeout"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 54,
+      "type": "row",
+      "title": "Dead Letter Queue",
+      "collapsed": true,
+      "gridPos": {
+        "x": 0,
+        "y": 112,
+        "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 55,
+          "type": "timeseries",
+          "title": "DLQ Rate (processed)",
+          "gridPos": {
+            "x": 0,
+            "y": 113,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_dlq_messages_processed_total{pipeline=\"viperine\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "processed/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 56,
+          "type": "bargauge",
+          "title": "Failures by Stage",
+          "gridPos": {
+            "x": 8,
+            "y": 113,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_dlq_failures_by_stage{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{stage}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "options": {
+            "displayMode": "gradient",
+            "orientation": "horizontal",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            },
+            "showUnfilled": true
+          }
+        },
+        {
+          "id": 57,
+          "type": "piechart",
+          "title": "DLQ by Origin",
+          "gridPos": {
+            "x": 16,
+            "y": 113,
+            "w": 8,
+            "h": 7
+          },
+          "targets": [
+            {
+              "expr": "sum by (origin_consumer) (kafka_consumer_dlq_messages_by_origin_total{pipeline=\"viperine\"})",
+              "refId": "A",
+              "legendFormat": "{{origin_consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short"
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "right",
+              "showLegend": true
+            },
+            "pieType": "donut",
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ]
+            }
+          }
+        },
+        {
+          "id": 58,
+          "type": "timeseries",
+          "title": "DLQ Processing Duration p95",
+          "gridPos": {
+            "x": 0,
+            "y": 120,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_dlq_processing_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 59,
+          "type": "timeseries",
+          "title": "DLQ Message Age p95",
+          "gridPos": {
+            "x": 12,
+            "y": 120,
+            "w": 12,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le) (rate(kafka_consumer_dlq_age_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 60,
       "type": "row",
       "title": "System Resources",
-      "collapsed": false,
+      "collapsed": true,
       "gridPos": {
-        "h": 1,
+        "x": 0,
+        "y": 128,
         "w": 24,
+        "h": 1
+      },
+      "panels": [
+        {
+          "id": 61,
+          "type": "timeseries",
+          "title": "Process CPU %",
+          "gridPos": {
+            "x": 0,
+            "y": 129,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_process_cpu_percent{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 62,
+          "type": "timeseries",
+          "title": "Process Memory RSS",
+          "gridPos": {
+            "x": 8,
+            "y": 129,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_process_memory_rss_bytes{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 63,
+          "type": "timeseries",
+          "title": "Disk Usage %",
+          "gridPos": {
+            "x": 16,
+            "y": 129,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_disk_usage_bytes{pipeline=\"viperine\"} / (kafka_consumer_disk_usage_bytes{pipeline=\"viperine\"} + kafka_consumer_disk_available_bytes{pipeline=\"viperine\"}) * 100",
+              "refId": "A",
+              "legendFormat": "{{consumer}} {{mount_point}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "percent",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 64,
+          "type": "timeseries",
+          "title": "Open File Descriptors",
+          "gridPos": {
+            "x": 0,
+            "y": 137,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_open_file_descriptors{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 65,
+          "type": "timeseries",
+          "title": "Thread Count",
+          "gridPos": {
+            "x": 8,
+            "y": 137,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_thread_count{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 66,
+          "type": "timeseries",
+          "title": "Disk Available",
+          "gridPos": {
+            "x": 16,
+            "y": 137,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "kafka_consumer_disk_available_bytes{pipeline=\"viperine\"}",
+              "refId": "A",
+              "legendFormat": "{{consumer}} {{mount_point}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": 67,
+      "type": "row",
+      "title": "Azure & Aggregation",
+      "collapsed": true,
+      "gridPos": {
         "x": 0,
-        "y": 106
+        "y": 145,
+        "w": 24,
+        "h": 1
       },
-      "id": 48
-    },
-    {
-      "type": "timeseries",
-      "title": "Process CPU %",
-      "targets": [
+      "panels": [
         {
-          "expr": "kafka_consumer_process_cpu_percent{pipeline=\"viperine\"}",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 0,
-        "y": 107
-      },
-      "id": 49
-    },
-    {
-      "type": "timeseries",
-      "title": "Process Memory %",
-      "targets": [
+          "id": 68,
+          "type": "timeseries",
+          "title": "Azure Upload Rate /s",
+          "gridPos": {
+            "x": 0,
+            "y": 146,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (container) (rate(kafka_consumer_azure_upload_total{pipeline=\"viperine\", result=\"success\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{container}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
         {
-          "expr": "kafka_consumer_process_memory_percent{pipeline=\"viperine\"}",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
-        }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "percent"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 8,
-        "y": 107
-      },
-      "id": 50
-    },
-    {
-      "type": "timeseries",
-      "title": "Process RSS",
-      "targets": [
+          "id": 69,
+          "type": "timeseries",
+          "title": "Azure Download Rate /s",
+          "gridPos": {
+            "x": 8,
+            "y": 146,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "sum by (container) (rate(kafka_consumer_azure_download_total{pipeline=\"viperine\", result=\"success\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "{{container}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
         {
-          "expr": "kafka_consumer_process_memory_rss_bytes{pipeline=\"viperine\"}",
-          "legendFormat": "{{consumer_id}}",
-          "refId": "A"
+          "id": 70,
+          "type": "timeseries",
+          "title": "Azure Upload Duration p95",
+          "gridPos": {
+            "x": 16,
+            "y": 146,
+            "w": 8,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "histogram_quantile(0.95, sum by (le, container) (rate(kafka_consumer_azure_upload_duration_seconds_bucket{pipeline=\"viperine\"}[5m])))",
+              "refId": "A",
+              "legendFormat": "{{container}} p95"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "s",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 71,
+          "type": "stat",
+          "title": "Azure Blobs Total",
+          "gridPos": {
+            "x": 0,
+            "y": 154,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum by (container) (kafka_consumer_azure_blobs_total{pipeline=\"viperine\"})",
+              "refId": "A",
+              "legendFormat": "{{container}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "short",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 72,
+          "type": "stat",
+          "title": "Azure Storage Bytes",
+          "gridPos": {
+            "x": 8,
+            "y": 154,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum by (container) (kafka_consumer_azure_container_storage_bytes{pipeline=\"viperine\"})",
+              "refId": "A",
+              "legendFormat": "{{container}}"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "bytes",
+              "color": {
+                "mode": "fixed",
+                "fixedColor": "text"
+              }
+            }
+          },
+          "options": {
+            "reduceOptions": {
+              "calcs": [
+                "lastNotNull"
+              ],
+              "fields": "",
+              "values": false
+            },
+            "colorMode": "none",
+            "textMode": "auto",
+            "graphMode": "none",
+            "justifyMode": "auto",
+            "orientation": "auto"
+          }
+        },
+        {
+          "id": 73,
+          "type": "timeseries",
+          "title": "Azure Upload Failures /s",
+          "gridPos": {
+            "x": 16,
+            "y": 154,
+            "w": 8,
+            "h": 4
+          },
+          "targets": [
+            {
+              "expr": "sum(rate(kafka_consumer_azure_upload_total{pipeline=\"viperine\", result=\"error\"}[5m]))",
+              "refId": "A",
+              "legendFormat": "errors/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
+        },
+        {
+          "id": 74,
+          "type": "timeseries",
+          "title": "Sessions Aggregated /s",
+          "gridPos": {
+            "x": 0,
+            "y": 158,
+            "w": 24,
+            "h": 8
+          },
+          "targets": [
+            {
+              "expr": "rate(kafka_consumer_sessions_aggregated_total{pipeline=\"viperine\"}[5m])",
+              "refId": "A",
+              "legendFormat": "sessions/s"
+            }
+          ],
+          "fieldConfig": {
+            "defaults": {
+              "unit": "ops",
+              "custom": {
+                "drawStyle": "line",
+                "lineWidth": 1,
+                "fillOpacity": 10,
+                "showPoints": "never"
+              }
+            }
+          },
+          "options": {
+            "legend": {
+              "displayMode": "list",
+              "placement": "bottom",
+              "showLegend": true
+            },
+            "tooltip": {
+              "mode": "multi",
+              "sort": "desc"
+            }
+          }
         }
-      ],
-      "fieldConfig": {
-        "defaults": {
-          "unit": "decbytes"
-        }
-      },
-      "gridPos": {
-        "h": 8,
-        "w": 8,
-        "x": 16,
-        "y": 107
-      },
-      "id": 51
+      ]
     }
-  ],
-  "templating": {
-    "list": []
-  },
-  "annotations": {
-    "list": []
-  },
-  "links": [],
-  "editable": true,
-  "graphTooltip": 1,
-  "style": "dark",
-  "__inputs": [],
-  "__requires": []
+  ]
 }
