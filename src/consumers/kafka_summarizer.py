@@ -383,6 +383,16 @@ class KafkaSummarizerConsumer(Base):
                 # Small delay to avoid rate limiting (stagger async calls)
                 await asyncio.sleep(0.2)
 
+                # Snapshot cumulative token usage so we can compute the per-call
+                # delta after the LLM call (the result dict carries no usage).
+                _inner_client = getattr(self.llm_client, 'client', None)
+                _usage_before = {}
+                if self.telemetry_enabled and _inner_client is not None and hasattr(_inner_client, 'get_usage'):
+                    try:
+                        _usage_before = dict(_inner_client.get_usage())
+                    except Exception:
+                        _usage_before = {}
+
                 # Generate structured summary
                 summary_result = await self.llm_client.generate_summary(
                     citation=citation,
@@ -428,22 +438,34 @@ class KafkaSummarizerConsumer(Base):
                         model=llm_provider
                     ).observe(summarization_duration)
 
-                    # Token tracking — split input/output if available, fall back to combined
+                    # Token tracking — prefer usage in the result, else read the
+                    # per-call delta from the underlying LLM client.
                     usage = summary_result.get('usage') or {}
                     input_tokens = usage.get('input_tokens') or usage.get('prompt_tokens', 0)
                     output_tokens = usage.get('output_tokens') or usage.get('completion_tokens', 0)
+                    if not input_tokens and not output_tokens and _inner_client is not None and hasattr(_inner_client, 'get_usage'):
+                        try:
+                            _usage_after = _inner_client.get_usage()
+                            input_tokens = max(0, _usage_after.get('input_tokens', 0) - _usage_before.get('input_tokens', 0))
+                            output_tokens = max(0, _usage_after.get('output_tokens', 0) - _usage_before.get('output_tokens', 0))
+                        except Exception:
+                            pass
                     total_tokens = summary_result.get('tokens_used', 0) or (input_tokens + output_tokens)
+
+                    # Concrete model name (provider != model; pricing keys on model)
+                    llm_model = getattr(self.llm_client, 'model_name', None) or llm_provider
+
                     if input_tokens > 0:
-                        self.llm_input_tokens.labels(consumer_id=consumer_id_label, model=llm_provider).inc(input_tokens)
+                        self.llm_input_tokens.labels(consumer_id=consumer_id_label, model=llm_model).inc(input_tokens)
                     if output_tokens > 0:
-                        self.llm_output_tokens.labels(consumer_id=consumer_id_label, model=llm_provider).inc(output_tokens)
+                        self.llm_output_tokens.labels(consumer_id=consumer_id_label, model=llm_model).inc(output_tokens)
                     if total_tokens > 0:
                         self.llm_tokens_used.labels(consumer_id=consumer_id_label, provider=llm_provider).inc(total_tokens)
 
-                    # Estimated cost via pricing table
-                    estimated_cost = estimate_cost(llm_provider, input_tokens, output_tokens)
+                    # Estimated cost via pricing table (uses concrete model name)
+                    estimated_cost = estimate_cost(llm_model, input_tokens, output_tokens)
                     if estimated_cost > 0:
-                        self.llm_estimated_cost_usd.labels(consumer_id=consumer_id_label, model=llm_provider).inc(estimated_cost)
+                        self.llm_estimated_cost_usd.labels(consumer_id=consumer_id_label, model=llm_model).inc(estimated_cost)
 
                 # Save summary to cache
                 summary_file = request_dir / "summary.jsonl"
