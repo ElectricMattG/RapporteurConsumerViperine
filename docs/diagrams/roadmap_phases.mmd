@@ -1,0 +1,26 @@
+flowchart LR
+    subgraph P1["Phase 1 — Quick Wins"]
+        direction TB
+        A1["Smart model routing"]
+        A2["Automated DLQ replay"]
+        A3["Per-session cost budgets"]
+    end
+    subgraph P2["Phase 2 — Throughput"]
+        direction TB
+        B1["True async consumer loop"]
+        B2["Playwright browser pool"]
+        B3["Streaming partial summaries"]
+    end
+    subgraph P3["Phase 3 — Intelligence"]
+        direction TB
+        C1["Semantic deduplication"]
+        C2["OpenTelemetry distributed traces"]
+        C3["Kafka Schema Registry"]
+    end
+    subgraph P4["Phase 4 — Enterprise"]
+        direction TB
+        D1["Multi-language support"]
+        D2["Multi-tenant session isolation"]
+        D3["Horizontal auto-scaling (KEDA)"]
+    end
+    P1 --> P2 --> P3 --> P4
