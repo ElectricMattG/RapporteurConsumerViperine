@@ -1,4 +1,11 @@
 flowchart LR
+    subgraph P5["Phase 5 — Extensibility Framework (foundational)"]
+        direction TB
+        E1["Reusable BaseConsumer"]
+        E2["Declarative pipeline topology"]
+        E3["Consumer scaffolding generator"]
+        E4["Candidate consumer catalogue"]
+    end
     subgraph P1["Phase 1 — Quick Wins"]
         direction TB
         A1["Smart model routing"]
@@ -23,4 +30,17 @@ flowchart LR
         D2["Multi-tenant session isolation"]
         D3["Horizontal auto-scaling (KEDA)"]
     end
+    P5 -. enables .-> P1
     P1 --> P2 --> P3 --> P4
+    P5 -. enables .-> P4
+    subgraph P6["Phase 6 — Security Hardening (capstone)"]
+        direction TB
+        F1["Prompt-injection defence"]
+        F2["SSRF protection"]
+        F3["Secret lifecycle + rotation"]
+        F4["Zero-trust network + mTLS"]
+        F5["Supply-chain security"]
+        F6["Tamper-evident audit logging"]
+    end
+    P4 --> P6
+    P5 -. enables .-> P6
