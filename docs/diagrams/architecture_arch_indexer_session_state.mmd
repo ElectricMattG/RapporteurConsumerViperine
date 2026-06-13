@@ -1,0 +1,7 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+stateDiagram-v2
+    [*] --> RECEIVING : first summary-completed for session_id
+    RECEIVING --> RECEIVING : message processed\nreceived_count++
+    RECEIVING --> COMPLETE : received_count >= total_requests
+    RECEIVING --> COMPLETE : idle sweeper fires\n(SESSION_IDLE_TIMEOUT=120s, env-configurable)
+    COMPLETE --> [*] : publish session-complete\naggregate to combined index\npublish reload-index + frontend-message

@@ -1,0 +1,15 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant OP as Operator
+    participant K as Kafka
+    participant SI_BG as SummaryIndexer\nfolder-switch thread
+    participant SI_MAIN as SummaryIndexer\nmain poll thread
+
+    OP->>K: index-folder-switch\n{"folder": "x_indices_eo"}
+    K->>SI_BG: background thread poll
+
+    SI_BG->>SI_BG: Validate folder name starts with "x_indices_"
+    SI_BG->>SI_BG: Resolve new combined_index_file path
+    SI_BG->>SI_BG: self.combined_index_file = new_path  # atomic assignment
+
+    Note over SI_MAIN: Next _aggregate_session_into_combined() call<br/>reads self.combined_index_file → new path

@@ -1,0 +1,15 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant IA as KafkaIndexAggregatorConsumer
+    participant AZ as Azure Blob Storage
+
+    IA->>AZ: Download indices/research_chunks_with_embeddings_combined.jsonl
+    AZ-->>IA: existing combined JSONL (or 404 → empty)
+
+    IA->>IA: Merge session chunks with existing\nDedup by document_id + chunk_id
+    IA->>IA: transform_qa_index_to_chunks() if QA schema
+
+    IA->>AZ: Upload indices/research_chunks_with_embeddings_combined.jsonl
+    IA->>AZ: Upload indices/research_qa_pairs_with_embeddings_combined.jsonl
+    IA->>AZ: Archive session files to research-archive/ container
+    IA->>IA: Clean local cache if cleanup_after_upload=True

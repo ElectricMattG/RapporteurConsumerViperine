@@ -1,0 +1,34 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph TD
+    subgraph "Consumer Pods (consumers namespace)"
+        WS["KafkaWebScraperConsumer :8001"]
+        SU["KafkaSummarizerConsumer :8010"]
+        SI["KafkaSummaryIndexerConsumer :8006"]
+        IA["KafkaIndexAggregatorConsumer :8008"]
+        DL["KafkaDeadLetterConsumer :8009"]
+        EP_WS["GET :8001/metrics"]
+        EP_SU["GET :8010/metrics"]
+        EP_SI["GET :8006/metrics"]
+        EP_IA["GET :8008/metrics"]
+        EP_DL["GET :8009/metrics"]
+    end
+
+    subgraph "monitoring namespace"
+        PROM["Prometheus :30090\n(scrape every 10s)"]
+        ALERTS["Alert rules\nviperine-alerts.yml"]
+        GRAFANA["Grafana :30030\nviperine-pipeline-overview\n(11 sections, 63 panels)"]
+    end
+
+    WS --> EP_WS
+    SU --> EP_SU
+    SI --> EP_SI
+    IA --> EP_IA
+    DL --> EP_DL
+
+    PROM -- "scrape" --> EP_WS
+    PROM -- "scrape" --> EP_SU
+    PROM -- "scrape" --> EP_SI
+    PROM -- "scrape" --> EP_IA
+    PROM -- "scrape" --> EP_DL
+    ALERTS --> PROM
+    PROM -- "data source" --> GRAFANA

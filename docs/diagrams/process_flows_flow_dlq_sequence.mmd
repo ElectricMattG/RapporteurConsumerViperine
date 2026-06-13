@@ -1,0 +1,22 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant ANY as Any Consumer
+    participant K as Kafka
+    participant DL as KafkaDeadLetterConsumer
+    participant FS as Filesystem
+
+    ANY->>K: viperine.dead-letter-queue\n{original_message, failed_stage, error, timestamp,\nrequest_id, session_id, origin_topic}
+    K->>DL: poll() → message
+
+    DL->>DL: json.loads(message.value)
+    DL->>DL: dlq_messages_processed.inc(failed_stage)
+    DL->>DL: dlq_messages_by_origin.inc(origin_topic)
+    DL->>DL: Compute message age (now - failure timestamp)
+    DL->>DL: dlq_age_seconds.observe(age)
+    DL->>DL: dlq_failures_by_stage.labels(stage).inc()
+
+    DL->>FS: Read cache/failures/failures.json
+    DL->>FS: failures.append(record)
+    DL->>FS: Write cache/failures/failures.json
+
+    DL->>FS: Write cache/failures/{failed_stage}/{request_id}.json

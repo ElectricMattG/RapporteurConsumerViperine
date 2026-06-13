@@ -1,0 +1,11 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph LR
+    subgraph "OS Process (pid 1 in container)"
+        MAIN["Main Thread\n(Kafka poll loop + asyncio.run())"]
+        SM["SystemMetricsCollector Thread\n(psutil every 60 s)"]
+        CM["CacheMetricsCollector Thread\n(disk scan every 60 s)"]
+        HTTP["MetricsServer Thread\n(HTTPServer — /metrics /health /ready)"]
+    end
+
+    MAIN -- "asyncio.run(_process_message)" --> MSG["Per-message async work\n(LLM, embed, file I/O)"]
+    MAIN -- "SIGINT/SIGTERM" --> STOP["self.running = False"]

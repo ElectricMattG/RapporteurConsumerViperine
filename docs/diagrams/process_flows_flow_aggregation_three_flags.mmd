@@ -1,0 +1,13 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart LR
+    SC["session_summaries_complete[session_id] = True\n(from viperine.session-complete)"]
+    CC["session_chunks_complete[session_id] = True\n(from qa-generation topic)"]
+    QC["session_qa_complete[session_id] = True\n(from qa-embedding topic)"]
+    AND{All three True?}
+    AGG["_aggregate_session(session_id)"]
+
+    SC --> AND
+    CC --> AND
+    QC --> AND
+    AND -- yes --> AGG
+    AND -- no --> WAIT["Wait for remaining signals"]

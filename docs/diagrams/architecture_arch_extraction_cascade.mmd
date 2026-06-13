@@ -1,0 +1,28 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+classDiagram
+    class KafkaWebScraperConsumer {
+        +URLResolver url_resolver
+        +DocumentWebSearcher web_searcher
+        +YouTubeTranscriptApi youtube_api
+        +PrometheusMetrics metrics
+        +KafkaMetricsWrapper kafka_metrics
+        +CacheMetricsCollector cache_metrics
+        +MetricsServer metrics_server
+        +bool extract_markdown
+        +DocumentConverter markdown_converter
+        -_load_config()
+        -_resolve_redirects(url) str
+        -_extract_youtube_transcript(url) dict
+        -_extract_with_cloudscraper(url) str
+        -_extract_with_playwright(url) str
+        -_extract_pdf_text(content, url) str
+        -_is_extraction_valid(text) bool
+        -_is_cloudflare_bot_page(text, title) bool
+        -_check_content_quality(text, title) dict
+        -_publish_to_kafka(extraction_result)
+        -_publish_failed_url_for_summary(url, ...)
+        +start()
+    }
+    KafkaWebScraperConsumer --|> Base
+    KafkaWebScraperConsumer --> URLResolver
+    KafkaWebScraperConsumer --> DocumentWebSearcher

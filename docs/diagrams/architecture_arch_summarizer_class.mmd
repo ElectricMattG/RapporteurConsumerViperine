@@ -1,0 +1,29 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart TD
+    MSG["Incoming message\n{uri, title, context, session_id}"]
+    RESOLVE["_resolve_redirects()\nGoogle-redirect bypass + HTTP chain"]
+    YT{YouTube URL?}
+    TRANSCRIPT["YouTubeTranscriptApi\n.fetch_transcript()"]
+    CF{Cloudflare domain?}
+    S1["Strategy 1 — cloudscraper\n(only for Cloudflare-listed domains)"]
+    S2["Strategy 2 — playwright\n+ stealth_async TLS bypass"]
+    S3["Strategy 3 — curl_cffi\nimpersonate=chrome110"]
+    PDF["PDF extraction\nPyPDF2 PdfReader"]
+    VALID{"_is_extraction_valid()\n_is_cloudflare_bot_page()\n_check_content_quality()"}
+    PUBLISH["_publish_to_kafka()\nviperine.summarise-document"]
+    DEGRADE["_publish_failed_url_for_summary()\nextraction_failed=True"]
+    DLQ["viperine.dead-letter-queue"]
+
+    MSG --> RESOLVE --> YT
+    YT -- yes --> TRANSCRIPT --> VALID
+    YT -- no --> CF
+    CF -- yes --> S1 --> VALID
+    CF -- no --> S3 --> VALID
+
+    VALID -- valid --> PUBLISH
+    VALID -- cloudflare bot page --> S2
+    S2 --> VALID
+    VALID -- low quality / failed --> DEGRADE
+
+    VALID -- PDF response --> PDF --> VALID
+    DEGRADE --> DLQ

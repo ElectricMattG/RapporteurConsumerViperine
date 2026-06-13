@@ -1,0 +1,43 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant SU as KafkaSummarizerConsumer
+    participant SI as KafkaSummaryIndexerConsumer
+    participant EM as EmbeddingServiceClient
+    participant FS as Filesystem (shared PVC)
+    participant K as Kafka
+
+    SU->>K: viperine.summary-completed
+    K->>SI: poll() → message
+
+    SI->>SI: Load / create session state\ncache/summaries/{session_id}/{session_id}_state.json
+    SI->>SI: Check document_id in document_ids_processed
+    SI->>SI: Check dedup_key in dedup_keys_processed
+
+    alt Duplicate detected
+        SI->>SI: duplicates_detected.inc(match=document_id|dedup_key)
+        SI-->>K: (message ack, no further action)
+    end
+
+    SI->>SI: Read summary text from summary_file
+
+    SI->>EM: embed([summary_text])
+    Note over EM: httpx.AsyncClient pool<br/>max 20 connections<br/>lazy loop re-init
+    EM-->>SI: [embedding_vector] 384-dim
+
+    SI->>SI: Build index entry\n{document_id, dedup_key, source_url,\nsummary_text, summary_embedding,\ndoc_metadata, embedding_metadata, indexed_at}
+
+    SI->>FS: _append_to_index(session_id, entry)\ncache/summaries/{session_id}/{session_id}_summaries_embedded.jsonl
+
+    SI->>SI: Update session state\ndocument_ids_processed.add(document_id)\ndedup_keys_processed.add(dedup_key)\nreceived_count++
+
+    SI->>FS: Acquire fcntl.LOCK_EX on .lock file
+    SI->>FS: _aggregate_session_into_combined()\nAppend to ACTIVE_INDEX_FOLDER/research_summaries_filtered.jsonl
+    SI->>FS: Release lock
+
+    SI->>K: reload-index\n{action, new_summaries, total_summaries, index_file}
+    SI->>K: viperine.frontend-message\n{type, session_id, new_summaries_count, total_summaries_count}
+
+    alt Session complete (received_count >= total_requests)
+        SI->>K: viperine.session-complete\n{session_id, summary_index_file, total_summaries, index_type}
+        SI->>SI: Mark session complete in state file
+    end

@@ -1,0 +1,70 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+graph TD
+    subgraph External
+        RAG["RapporteurRAG Service"]
+        FE["RapporteurFrontEnd"]
+        EMBED["Embedding Service\nhttps://embeddings.192-168-1-3.nip.io"]
+        GEMINI["Google Vertex AI\nGemini 2.5 Pro"]
+        AZURE["Azure Blob Storage\n(optional — disabled by default)"]
+        REDIS["Redis\n(LLM response cache)"]
+    end
+
+    subgraph Kafka Topics
+        T1["viperine.web-scrape-requests"]
+        T2["viperine.summarise-document"]
+        T3["viperine.summary-completed"]
+        T4["viperine.session-complete"]
+        T5["viperine.frontend-message"]
+        T6["viperine.dead-letter-queue"]
+        T7["reload-index"]
+        T8["index-folder-switch"]
+    end
+
+    subgraph "k3s — consumers namespace"
+        WS["KafkaWebScraperConsumer\n:8001"]
+        SU["KafkaSummarizerConsumer\n:8010"]
+        SI["KafkaSummaryIndexerConsumer\n:8006"]
+        IA["KafkaIndexAggregatorConsumer\n:8008 (disabled)"]
+        DL["KafkaDeadLetterConsumer\n:8009"]
+    end
+
+    subgraph "k3s — monitoring namespace"
+        PROM["Prometheus :30090"]
+        GF["Grafana :30030"]
+    end
+
+    RAG -->|1 msg per URL| T1
+    T1 --> WS
+    WS -->|extracted content| T2
+    WS -->|extraction failure| T6
+
+    T2 --> SU
+    SU -->|GeminiLLMClient\nvia CachedLLMClient| GEMINI
+    SU -->|cache miss/hit| REDIS
+    SU -->|summary-completed| T3
+    SU -->|LLM failure| T6
+
+    T3 --> SI
+    SI -->|EmbeddingServiceClient| EMBED
+    SI -->|writes JSONL + fcntl lock| SharedIndex["Shared Index\n(hostPath PVC)"]
+    SI --> T4
+    SI --> T7
+    SI --> T5
+    SI -->|indexer failure| T6
+    T8 -.->|hot folder switch| SI
+
+    T4 --> IA
+    IA --> AZURE
+
+    T7 --> RAG
+    T5 --> FE
+
+    T6 --> DL
+    DL -->|appends JSON| FailureLog["cache/failures/failures.json"]
+
+    WS -- "/metrics scrape 10s" --> PROM
+    SU -- "/metrics scrape 10s" --> PROM
+    SI -- "/metrics scrape 10s" --> PROM
+    IA -- "/metrics scrape 10s" --> PROM
+    DL -- "/metrics scrape 10s" --> PROM
+    PROM --> GF

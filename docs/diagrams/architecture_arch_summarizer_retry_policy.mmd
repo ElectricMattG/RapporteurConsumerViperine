@@ -1,0 +1,18 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+classDiagram
+    class KafkaSummarizerConsumer {
+        +CitationResearchClient llm_client
+        +PrometheusMetrics metrics
+        +KafkaMetricsWrapper kafka_metrics
+        +MetricsServer metrics_server
+        -_load_config()
+        -_process_message(message_data) dict
+        -_publish_summary_completed(session_id, ...)
+        -_publish_to_dead_letter(message_data, error)
+        +start()
+    }
+    KafkaSummarizerConsumer --|> Base
+    KafkaSummarizerConsumer --> CitationResearchClient : llm_client
+    CitationResearchClient --> CachedLLMClient
+    CachedLLMClient --> GeminiLLMClient : _inner
+    GeminiLLMClient --> GenAIClient

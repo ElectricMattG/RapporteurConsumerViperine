@@ -1,0 +1,21 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+classDiagram
+    class KafkaSummaryIndexerConsumer {
+        +EmbeddingServiceClient embedding_client
+        +PrometheusMetrics metrics
+        +KafkaMetricsWrapper kafka_metrics
+        +MetricsServer metrics_server
+        +dict session_states
+        -_load_config()
+        -_process_message(message_data)
+        -_append_to_index(session_id, entry)
+        -_aggregate_session_into_combined(session_id, session_file)
+        -_publish_session_complete(session_id, ...)
+        -_publish_frontend_message(session_id, ...)
+        -_publish_reload_index(session_id, ...)
+        -_start_idle_sweeper()
+        -_start_folder_switch_listener()
+        +start()
+    }
+    KafkaSummaryIndexerConsumer --|> Base
+    KafkaSummaryIndexerConsumer --> EmbeddingServiceClient

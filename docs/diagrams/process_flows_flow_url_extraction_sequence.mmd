@@ -1,0 +1,48 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant RAG as RAG Service
+    participant WS as KafkaWebScraperConsumer
+    participant UR as URLResolver
+    participant YT as YouTubeTranscriptApi
+    participant CS as cloudscraper
+    participant PW as Playwright (stealth)
+    participant CF as curl_cffi (chrome110)
+    participant K as Kafka
+
+    RAG->>K: viperine.web-scrape-requests\n{uri, title, context[], session_id, request_id, total_requests}
+    K->>WS: poll() → message
+
+    WS->>WS: json.loads(message.value)
+    WS->>UR: _resolve_redirects(uri)
+    Note over UR: Follow redirect chain manually<br/>Special-case google.com/url?q=
+    UR-->>WS: resolved_url
+
+    alt YouTube URL
+        WS->>YT: _extract_youtube_transcript(resolved_url)
+        YT-->>WS: transcript text
+        WS->>WS: _is_extraction_valid(text)
+        WS->>K: viperine.summarise-document {extracted_content}
+    else Cloudflare-listed domain
+        WS->>CS: _extract_with_cloudscraper(resolved_url)
+        CS-->>WS: html / text
+        WS->>WS: _is_cloudflare_bot_page(text, title)
+        alt bot-challenge page detected
+            WS->>PW: _extract_with_playwright(resolved_url)\nstealth_async + async_playwright
+            PW-->>WS: html / text
+        end
+        WS->>WS: _is_extraction_valid() + _check_content_quality()
+        WS->>K: viperine.summarise-document
+    else Standard URL
+        WS->>CF: session.get(resolved_url, impersonate=chrome110)
+        Note over CF: PDF? → PyPDF2 PdfReader extraction
+        CF-->>WS: html / pdf bytes
+        WS->>WS: _is_extraction_valid() + _check_content_quality()
+        WS->>K: viperine.summarise-document
+    end
+
+    alt All strategies fail or low quality
+        WS->>K: viperine.summarise-document\n{extraction_failed: true}
+        WS->>K: viperine.dead-letter-queue\n{failed_stage: web_scraper, error: ...}
+    end
+
+    WS->>WS: _save_extraction()\ncache/{request_id}/extracted_linked_text.jsonl

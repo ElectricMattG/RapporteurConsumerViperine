@@ -1,0 +1,11 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+flowchart TD
+    SWEEP["Idle sweeper fires every 30s"]
+    ITER["Iterate session_states"]
+    CHECK{"last_event_at >\nSESSION_IDLE_TIMEOUT ago?"}
+    COMPLETE["Mark session complete\n_publish_session_complete()\n_aggregate_to_combined_index()"]
+    SKIP["Skip — session still active"]
+
+    SWEEP --> ITER --> CHECK
+    CHECK -- yes --> COMPLETE
+    CHECK -- no --> SKIP

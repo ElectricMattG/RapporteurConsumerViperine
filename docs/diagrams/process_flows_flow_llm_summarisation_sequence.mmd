@@ -1,0 +1,50 @@
+%%{init: {'theme': 'base', 'themeVariables': {'fontSize': '14px'}}}%%
+sequenceDiagram
+    participant WS as KafkaWebScraperConsumer
+    participant SU as KafkaSummarizerConsumer
+    participant CR as CitationResearchClient
+    participant CC as CachedLLMClient
+    participant GC as GeminiLLMClient
+    participant VA as Vertex AI
+    participant RD as Redis
+    participant K as Kafka
+
+    WS->>K: viperine.summarise-document
+    K->>SU: poll() → message
+
+    SU->>SU: Snapshot _inner_client.get_usage() → _usage_before
+    SU->>CR: generate_summary(citation, urls, context, use_web_grounding)
+    CR->>CC: generate_content(prompt)
+    CC->>CC: sha256(model + "|" + prompt) → cache_key
+    CC->>RD: GET cache_key
+
+    alt Cache hit
+        RD-->>CC: cached response string
+        CC-->>CR: response
+    else Cache miss
+        CC->>GC: generate_content(prompt, enable_search=use_web_grounding)
+        GC->>VA: genai.Client.models.generate_content()
+        Note over VA: LLM inference (5s – 120s)
+        VA-->>GC: response + usage_metadata
+        GC->>GC: _total_usage['input_tokens'] += prompt_tokens
+        GC->>GC: _total_usage['output_tokens'] += candidates_tokens
+        GC-->>CC: response text
+        CC->>RD: SET cache_key response EX 432000
+        CC-->>CR: response text
+    end
+
+    CR->>CR: json.loads(response) — with repair fallback
+    CR-->>SU: {metadata, markdown_summary}
+
+    SU->>SU: validate_summary_content(markdown_summary)
+    alt Error-as-content detected
+        SU->>SU: classify_error → model_empty / raise ValueError
+    end
+
+    SU->>GC: _inner_client.get_usage() → _usage_after
+    SU->>SU: input_tokens = _usage_after - _usage_before
+    SU->>SU: estimate_cost(model_name, input_tokens, output_tokens)
+    SU->>SU: Emit token + cost + latency metrics
+
+    SU->>SU: Write cache/{request_id}/summary.jsonl
+    SU->>K: viperine.summary-completed\n{session_id, request_id, document_id, dedup_key,\nsource_url, summary_file, current_count, total_requests, status}
