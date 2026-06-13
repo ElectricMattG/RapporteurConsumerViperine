@@ -177,7 +177,7 @@ x_indices_trump/*
 x_indices_hegseth/*
 
 working_dir/*
-docs/*
+# docs/*
 
 MEDIA*
 EVENT*

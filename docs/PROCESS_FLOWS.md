@@ -24,7 +24,17 @@ Readers from a product background should focus on the narrative openers and the 
 
 ## 1. URL Extraction — WebScraper
 
-This is the entry point of the pipeline. The RAG service has identified a set of URLs that are relevant to a research query. It publishes one Kafka message per URL to `viperine.web-scrape-requests`. The WebScraper's job is to retrieve the content at that URL and pass it to the Summarizer. The analyst never sees this step directly, but its success or failure determines what material the LLM has to work with.
+This is the entry point of the pipeline. The RAG service has identified a set of URLs that are relevant to a research query. It publishes one Kafka message per URL to `viperine.web-scrape-requests`. The `KafkaWebScraperConsumer` picks up each message and begins what amounts to a series of increasingly determined attempts to read the target webpage.
+
+**Why the strategy cascade exists:** Most of the internet is not designed to be read programmatically. Publishers deploy Cloudflare bot detection, CDNs that inspect TLS fingerprints, JavaScript-rendered single-page applications, and paywalls. A naive `requests.get(url)` fails on a large fraction of real-world research sources. The cascade in `KafkaWebScraperConsumer` layers techniques in order of cost and latency:
+
+1. For YouTube URLs, `_extract_youtube_transcript()` uses the official transcript API — no rendering needed, near-zero latency, excellent quality.
+2. For Cloudflare-protected domains, `_extract_with_cloudscraper()` spoofs the TLS handshake at the connection layer. When that is also challenged, `_extract_with_playwright()` launches a real Chromium browser with `stealth_async()` patching its fingerprints at the JavaScript layer.
+3. For standard pages, `curl_cffi` with `impersonate="chrome110"` provides browser-like HTTP headers and TLS behaviour at near the cost of a regular `requests` call.
+
+**What the analyst experiences:** A URL that succeeds here will appear in the research results with a summary grounded in the full text of the source. A URL that fails (all strategies exhausted) will still appear in the results — but the Summarizer will attempt a web-grounding recovery by asking Gemini to fetch the page itself. If that also fails, the URL is marked as failed in the session and appears with minimal metadata only.
+
+**What operations should watch for:** The `kafka_consumer_extraction_strategy_total` counter in Prometheus (labelled by `strategy`) shows the distribution of which extraction method is winning across the workload. A spike in `strategy=playwright` relative to `strategy=curl_cffi` means more sites than usual are requiring headless browser rendering, which significantly increases per-URL processing time and may indicate that Cloudflare has updated its detection signatures. The `kafka_consumer_documents_failed_extraction_total` counter rising without a corresponding rise in documents processed is the leading indicator of a scraper performance regression.
 
 The most common failure modes here are Cloudflare bot-detection (mitigated by the strategy cascade) and URLs that resolve to paywalled or login-gated content (returned as degraded extraction with `extraction_failed=True`). In both cases the scraper does not drop the document — it always publishes a downstream message so the session counter in the Indexer stays consistent.
 
@@ -130,7 +140,15 @@ sequenceDiagram
 
 ## 2. LLM Summarisation — Summarizer
 
-Once the WebScraper has extracted the raw content, the Summarizer turns it into a structured research asset. This is the most latency-intensive step: a single Gemini call for a long article can take 15–60 seconds, and complex documents that trigger Gemini web-grounding can take longer. The retry-and-degrade framework ensures that even a difficult document eventually produces a terminal event so the session can close.
+Once the WebScraper has extracted the raw content, the Summarizer turns it into a structured research asset. This is where raw webpage text becomes a citable, searchable summary that an analyst can read, share, and use as evidence in a research report.
+
+`KafkaSummarizerConsumer` hands each extracted document to `CitationResearchClient.generate_summary()`, which constructs a structured JSON prompt asking Gemini to return a `metadata` block (author, publication date, source URL) and a `markdown_summary` block (the actual research content, formatted with headings, bullet points, and citations). The choice of structured JSON output rather than free-form text is deliberate: it means the metadata and the summary text can be indexed separately, and the RAG service can use the metadata when composing citations in its answers.
+
+**What the analyst experiences:** A successful summarisation produces a readable markdown document attributed to the source. A degraded summary (status=`degraded`) means the LLM was unable to produce useful content after retries — the source will appear in the results but with an empty or minimal summary, which reduces the RAG service's ability to answer questions about it. A failed summary (status=`failed`) means the document is absent from the research index entirely.
+
+**What operations should watch for:** The `kafka_consumer_llm_api_errors_total` counter (labelled by `error_type` using values from the `ErrorCategory` enum) is the primary failure signal. A sustained `error_type=transient` spike usually means Gemini is returning HTTP 429 (rate limit) or 503 (service unavailable) and the exponential backoff is delaying throughput. The `kafka_consumer_llm_estimated_cost_usd_total` counter is the spend signal — an unexpected spike without a corresponding increase in `documents_summarized_total` suggests the retry loop is consuming tokens without producing useful output.
+
+This is the most latency-intensive step: a single Gemini call for a long article can take 15–60 seconds, and complex documents that trigger Gemini web-grounding can take longer. The retry-and-degrade framework ensures that even a difficult document eventually produces a terminal event so the session can close.
 
 **Trigger:** `viperine.summarise-document` message consumed by `KafkaSummarizerConsumer`.
 **Outcome:** A summary JSONL is written to `cache/{request_id}/summary.jsonl` and a message is published to `viperine.summary-completed`.
@@ -235,7 +253,11 @@ sequenceDiagram
 
 With a validated summary in hand, the Indexer's job is to make it searchable. It calls the embedding service to convert the summary text into a 384-dimensional vector, writes the enriched record to the shared research index, and tracks session state to know when all documents in a research session have been processed.
 
-From the analyst's perspective, this is what produces the "new documents available" notification in the browser. Every time the Indexer appends a record to the combined index it signals the RAG service to reload its in-memory index, and notifies the frontend via SSE.
+Embedding works by mapping text into a high-dimensional numerical space where documents with similar meaning are geometrically close. When an analyst asks a question, the RAG service embeds the question using the same all-MiniLM-L6-v2 model, computes cosine similarity against all stored summary vectors, and retrieves the closest matches. Without the embedding stored alongside the summary text, retrieval would fall back to keyword matching — which is dramatically less accurate for research queries that use synonyms, paraphrase concepts, or ask questions that don't match the exact wording of the source documents.
+
+**What the analyst experiences:** This is the step that makes new documents available for answering queries. Every time `KafkaSummaryIndexerConsumer` appends a record to the combined index (`ACTIVE_INDEX_FOLDER/research_summaries_filtered.jsonl`), it immediately publishes a `reload-index` message and a `viperine.frontend-message` notification. The analyst's browser receives the SSE notification and the "new documents available" badge updates in real time. The analyst does not need to wait for the entire research session to complete before reading available results.
+
+**What operations should watch for:** The `kafka_consumer_summary_duplicates_detected_total` counter (labelled by `match` — either `document_id` or `dedup_key`) is an idempotency health indicator. A non-zero value after a clean run is normal and expected during Kafka rebalances or pod restarts. A consistently high value suggests that messages are being redelivered at a higher rate than expected, which may indicate consumer group lag issues or Kafka auto-commit problems. The `kafka_consumer_summary_embedding_duration_seconds` histogram shows the latency of calls to the embedding service; a p95 above 5 seconds suggests the embedding service is under load.
 
 **Trigger:** `viperine.summary-completed` message consumed by `KafkaSummaryIndexerConsumer`.
 **Outcome:** A new record is appended to `ACTIVE_INDEX_FOLDER/research_summaries_filtered.jsonl` and downstream notifications are published.
@@ -337,6 +359,12 @@ sequenceDiagram
 
 ## 4. Session Completion and Notification
 
+A research session is a coordinated batch: a fixed number of URLs submitted together as part of a single analyst query. The `KafkaSummaryIndexerConsumer` tracks the session in memory (in `self.session_states`) and on disk (in `cache/summaries/{session_id}/{session_id}_state.json`). It knows the session is complete when `received_count >= total_requests` — where `total_requests` was set in the original message from the RAG service.
+
+The session-complete signal matters because it is what triggers the full downstream notification chain: the `viperine.session-complete` message tells the IndexAggregator (if enabled) to run its Azure upload. More immediately, the Indexer has already been publishing `reload-index` and `viperine.frontend-message` on every individual document throughout the session, so the analyst has been seeing real-time updates. The session-complete event is the formal close of the session that clears in-memory state and frees resources.
+
+**The idle sweeper problem:** The Summarizer guarantees that it always emits a terminal event for every document it processes. But what if a Summarizer pod crashes mid-session before emitting its terminal events? The session state file on disk is safe, but the Indexer's `received_count` will never reach `total_requests`. The idle sweeper in `KafkaSummaryIndexerConsumer.start()` solves this: a `threading.Thread(daemon=True)` checks every 30 seconds whether any active session's `last_event_at` timestamp is older than `SESSION_IDLE_TIMEOUT` (default 120 seconds, configurable via the `SESSION_IDLE_TIMEOUT` environment variable). Sessions that have gone quiet are closed gracefully, with `partial=true` in the session-complete message to indicate that not all documents were successfully processed.
+
 When a research session reaches its final document (or the idle sweeper fires), the Indexer publishes to `viperine.session-complete`. This triggers the IndexAggregator if enabled. More importantly for immediate user feedback, the `reload-index` and `viperine.frontend-message` signals are also published on every indexed document, not just at session end.
 
 **Session completion conditions:**
@@ -379,6 +407,12 @@ flowchart TD
 ## 5. Dead Letter Queue — Failure Audit
 
 The DLQ consumer is a write-only audit sink. It does not retry, re-route, or alert — it only persists. The philosophy is that retry logic belongs in the publishing consumer (the WebScraper, Summarizer, or Indexer all have their own retry loops before publishing to the DLQ). By the time a message reaches the DLQ, the publishing consumer has already exhausted all recovery options.
+
+For a product manager, the DLQ answers the question "why is this source missing from the research results?" When an analyst reports that a specific URL did not appear in their session, `cache/failures/failures.json` is the first place to look: filtering by `request_id` will show whether a failure was recorded and what stage it occurred at.
+
+For a DevOps manager, the DLQ is a lagging indicator of pipeline health. The `kafka_consumer_dlq_messages_processed_total` counter in Prometheus (labelled by `failed_stage`) should be plotted against message throughput. A ratio of DLQ messages to successfully processed messages above 5% is a signal that something structural is wrong — a provider is consistently failing, a dependency is unreachable, or a new class of document is triggering an unhandled code path. The `kafka_consumer_dlq_age_seconds` histogram shows how long messages sat in the DLQ before being processed; a high age means the DLQ consumer itself is lagging, which reduces the fidelity of failure tracking.
+
+To manually replay a failed message, read the `original_message` field from the DLQ record and re-publish it to the `origin_topic`. The corresponding consumer will process it on the next poll cycle, applying its full retry logic as if the message were fresh.
 
 **Trigger:** Any consumer publishes to `viperine.dead-letter-queue`.
 **Outcome:** Record appended to `cache/failures/failures.json`; `dlq_failures_by_stage` gauge updated.
@@ -441,7 +475,11 @@ The DLQ consumer does not support automatic replay. To manually re-process a fai
 
 ## 6. Index Aggregation — IndexAggregator
 
-The IndexAggregator handles the optional path where per-session chunk and Q&A pair indices are merged into a cloud-backed combined index in Azure Blob Storage. This is disabled by default because the primary research index (`research_summaries_filtered.jsonl`) is already maintained by the SummaryIndexer. The aggregator is relevant only when the upstream Q&A generation pipeline is active.
+The IndexAggregator handles the optional path where per-session chunk and Q&A pair indices are merged into a cloud-backed combined index in Azure Blob Storage. This is disabled by default (`ENABLE_AGGREGATOR=false` in Helm values) because the primary research flow — scrape, summarise, embed, index — is sufficient for the most common query patterns and does not require the Q&A generation pipeline to be active.
+
+When the extended pipeline is running, the aggregator provides two services that the SummaryIndexer does not: it maintains an Azure-backed durable copy of the combined index (the SummaryIndexer only writes to local PVC storage), and it merges a richer representation of each document — chunks and Q&A pairs — rather than just a summary. This richer representation improves the RAG service's ability to answer targeted factual questions, because specific passages and anticipated questions are stored as separately retrievable vectors alongside the full-document summary.
+
+For a DevOps manager enabling the aggregator for the first time: the `ENABLE_AGGREGATOR=true` Helm value causes the aggregator pod to become active and start consuming from `viperine.session-complete`. You will see `kafka_consumer_sessions_aggregated_total` increment after the first session completes. The `kafka_consumer_azure_upload_failures_total` counter (labelled by `index_type`) is the key failure signal — Azure connectivity issues, credential rotation, or blob container permission changes will all surface here. The aggregator also logs the Azure blob size after each upload (`kafka_consumer_azure_storage_bytes` gauge), which makes index growth visible without logging into the Azure portal.
 
 **Trigger:** `viperine.session-complete` message consumed by `KafkaIndexAggregatorConsumer` (when `ENABLE_AGGREGATOR=true`).
 **Outcome:** `research_chunks_with_embeddings_combined.jsonl` and `research_qa_pairs_with_embeddings_combined.jsonl` updated in Azure Blob Storage.
@@ -504,7 +542,11 @@ Q&A pairs use a flat schema that must be normalised to the enriched-chunks forma
 
 ## 7. Hot Folder Switch — Live Index Migration
 
-The `KafkaSummaryIndexerConsumer` supports live migration of the combined index to a different directory without a pod restart. This is used when the active `x_indices_*` folder needs to be rotated (e.g. a fresh index generation run has completed and the new folder is ready to serve).
+The `KafkaSummaryIndexerConsumer` supports live migration of the combined index to a different directory without a pod restart. This capability is used when the active `x_indices_*` folder needs to be rotated — for example, when a full re-indexing run has produced a new version of the research corpus and the system needs to switch to serving the new index without interrupting in-flight research sessions.
+
+From an operations perspective, this is a zero-downtime index rotation. Without this mechanism, switching the active index folder would require redeploying the Indexer pod (which triggers a new Kafka consumer group rebalance and could cause message delivery delays) or writing custom tooling to coordinate the switch. The topic-based approach means an operator can publish a single message to `index-folder-switch` and the running pod handles the rest.
+
+**Safety properties:** The path of `self.combined_index_file` is atomically reassigned at the Python level — Python's GIL guarantees that the attribute write is not torn. The `fcntl.LOCK_EX` advisory lock in `_aggregate_session_into_combined()` always resolves symlinks to the real underlying file before acquiring the lock, so the lock correctly targets the new index file path immediately after a switch, even if the symlink itself has not been updated.
 
 **Trigger:** A message is published to the `index-folder-switch` Kafka topic.
 **Outcome:** `self.combined_index_file` is atomically re-routed to the new directory path.

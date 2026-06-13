@@ -6,6 +6,12 @@
 
 This document is the reference for understanding what the pipeline is telling you at any given moment. Every consumer emits structured metrics about everything it does — every message consumed, every LLM call, every embedding request, every DLQ write, every Kafka lag reading. Those metrics are collected by Prometheus and visualised in Grafana. When something breaks or degrades, the dashboards and troubleshooting guide here are the first place to look.
 
+**Why this level of observability?** The pipeline interacts with external services that are outside the team's control — the Vertex AI platform, third-party websites, the embedding service, Azure Blob Storage. Any of these can degrade or fail independently, and when they do, the failure mode is often subtle: a slow LLM call does not produce an error, it just increases latency; a Cloudflare-blocked page does not crash the scraper, it produces a degraded extraction that results in a lower-quality summary. Without per-stage metrics, these degradations would be invisible until analysts report that research results are poor or incomplete. With per-stage metrics, the Grafana dashboard shows exactly where the pipeline is slowing down, which makes root-cause analysis a matter of reading a few charts rather than trawling through logs.
+
+**For product managers:** Section 5 (LLM Cost) is the primary business health indicator. The `kafka_consumer_llm_estimated_cost_usd_total` counter, broken down by model, shows the relationship between research activity and API spend. Sustained cost growth without proportional growth in `documents_summarized_total` is the clearest signal that something is wrong with the summarization path.
+
+**For DevOps managers:** The recommended triage order when something is wrong is: `consumer_state` (are pods running?) → `lag_messages` (are messages flowing?) → `processing_failures_total` by `error_type` (what is failing and why?) → `dlq_failures_by_stage` (which stage is the source?). Section 7 of this document follows this triage order in its troubleshooting guide.
+
 For operations teams responding to an alert, jump straight to [Section 7 — Troubleshooting Guide](#7-troubleshooting-guide). For engineering teams who want to understand what is being tracked and why, start with [Section 2 — Metric Catalogue](#2-metric-catalogue).
 
 ---
@@ -37,6 +43,8 @@ The observability stack has three layers. The innermost layer is the application
 The middle layer is Prometheus, running in the `monitoring` namespace of the k3s cluster at port 30090. Prometheus scrapes each consumer's `/metrics` endpoint every 10 seconds and evaluates alert rules. The 10-second interval was chosen to provide enough resolution for the Grafana dashboard panels to show short-lived spikes in Kafka lag or LLM latency.
 
 The outer layer is Grafana, running at port 30030. The `viperine-pipeline-overview` dashboard (11 sections, 63 panels) is provisioned automatically from a ConfigMap and does not need to be imported manually.
+
+An important design decision in this stack is that **Prometheus is not the alerting destination** — it is only the evaluation engine. Alert rules are evaluated in Prometheus and routed through Alertmanager for notification. This means that if the Prometheus pod itself becomes unavailable, alerts will not fire. The `make monitoring_status` command is the recommended manual health check that can be run even when Grafana is unreachable.
 
 ```mermaid
 graph TD
@@ -267,7 +275,11 @@ These metrics are the failure audit dashboard. `dlq_failures_by_stage` is the he
 
 ## 3. Grafana Dashboard Reference
 
-The `viperine-pipeline-overview` dashboard is the primary operations view. It is organised into 11 sections. The recommended triage order is: check **Pipeline Health** first (are all pods up?), then **Kafka Throughput** (are messages flowing?), then **LLM / Cost** (is the summarizer working and within budget?), then **Indexer** (is the combined index growing?), and finally **Dead Letter Queue** (which stage is generating the most failures?).
+The `viperine-pipeline-overview` dashboard is the primary operations view. It is organised into 11 sections. When opening the dashboard for the first time during an incident, **use the triage order described below** rather than reading sections top-to-bottom. Section 1 (Pipeline Health) answers "is the infrastructure up?" in 5 seconds. Section 9 (Dead Letter Queue) answers "where are the failures coming from?" in another 5 seconds. The middle sections contain the detail needed to understand why.
+
+All time-series panels default to the last 1 hour with a 30-second refresh. During an active incident, set the time range to "last 15 minutes" and refresh manually — a 30-second lag can make it hard to see whether a remediation action is taking effect.
+
+The recommended triage order is: check **Pipeline Health** first (are all pods up?), then **Kafka Throughput** (are messages flowing?), then **LLM / Cost** (is the summarizer working and within budget?), then **Indexer** (is the combined index growing?), and finally **Dead Letter Queue** (which stage is generating the most failures?).
 
 **Dashboard ID:** `viperine-pipeline-overview`
 **Source file:** `grafana/dashboards/viperine-pipeline-overview.json` (also `monitoring/grafana/dashboards/viperine-pipeline-overview.json`)
@@ -424,7 +436,9 @@ curl -s -X POST -u admin:admin http://192.168.1.3:30030/api/admin/provisioning/d
 
 ## 6. Alert Rules
 
-The following alert rules are defined in `monitoring/prometheus/` and deployed via ConfigMap by `make monitoring_deploy`.
+The following alert rules are defined in `monitoring/prometheus/` and deployed via ConfigMap by `make monitoring_deploy`. Each rule fires into Alertmanager. The `duration` is the time a condition must be continuously true before the alert transitions to `FIRING` — this prevents false positives from transient blips.
+
+For each alert, the table entry describes *what the metric condition means* and the prose below describes *what to do when it fires*.
 
 | Alert name | Condition | Duration | Severity | Meaning |
 |---|---|---|---|---|
@@ -438,6 +452,28 @@ The following alert rules are defined in `monitoring/prometheus/` and deployed v
 | `ViperineSessionsStuck` | `kafka_consumer_sessions_in_progress > 5` | 30 min | warning | More than 5 sessions in progress for > 30 min. May indicate the idle sweeper is not firing. |
 | `ViperineAzureUploadFailures` | `increase(kafka_consumer_azure_upload_failures_total[1h]) > 0` | immediate | warning | Azure upload failed. Cloud index may be stale. |
 | `ViperineHighMemory` | `kafka_consumer_process_memory_rss_bytes > 2e9` | 10 min | warning | A consumer is using > 2 GB RSS. May indicate a memory leak in large-batch processing. |
+
+### Per-alert on-call guidance
+
+**`ViperinePodDown` (critical):** This is the highest-priority alert. A `consumer_state == 0` means the pod is no longer reporting — it has either crashed or the `/metrics` endpoint is unreachable. Run `kubectl get pods -n consumers` to check pod status. If the pod is in `CrashLoopBackOff`, run `make k8s_logs` to retrieve the last crash log. The most common causes are a bad configuration value at startup (check `src/config.py` defaults) or a missing Kubernetes Secret (check that the GCP service-account secret and Azure connection string secret are mounted correctly). If the pod is in `Terminating`, use the nvidia-safe rollout: `make k8s_rollout`.
+
+**`ViperinePodError` (warning):** The consumer is running but has set `consumer_state = 2` (error). This usually means the consumer received its first message and threw an unhandled exception that set `self.running = False` but did not crash the process. The pod is still alive and the `/metrics` endpoint is still responding, but it is not processing messages. Check `processing_failures_total` with `error_type=permanent_internal` — an `AssertionError` or `AttributeError` in consumer startup code is the typical cause. Restarting the pod usually clears it if the underlying config issue has been fixed.
+
+**`ViperineLagGrowing` (warning):** Consumer lag above 500 messages for 10 minutes means the consumer is slower than its producer. This does not directly impact analysts unless the lag grows to the point where messages are hours old when processed. The most common cause for the Summarizer is a Gemini rate limit (check `llm_api_errors_total{error_type="summarization_transient"}`). For the Indexer, it is usually an embedding service slowdown (check `summary_embedding_duration_seconds` p95). The WebScraper rarely lags unless Playwright is being used for a high fraction of pages.
+
+**`ViperineLLMErrorsHigh` (warning):** More than 0.1 LLM errors per second means roughly 1 in 10 LLM calls is failing. Check the `error_type` breakdown: `summarization_transient` means rate-limiting (consider switching to `gemini-2.5-flash` in config to increase quota headroom); `summarization_policy_block` means the content being summarised is triggering Gemini's safety filters (check whether a specific `session_id` or domain is consistently producing this); `summarization_auth` means the GCP service-account credentials have expired or the Vertex AI quota has been exhausted at the project level.
+
+**`ViperineCostUnknownModel` (warning):** The pricing table in `src/monitoring/cost.py` is missing an entry for the model currently in use. This is a data-quality alert — it does not affect pipeline operation but means cost tracking is reporting zero for some calls. The fix is a one-line addition to `PRICING_TABLE`. The `model` label on `kafka_consumer_cost_unknown_model_total` shows exactly which model name to add.
+
+**`ViperineDLQSpike` (warning):** More than 1 DLQ message per second for 5 minutes is a structural failure rate, not random noise. Check `dlq_messages_processed_total` by `failed_stage` to identify the failing component. A `web_scraper` spike often correlates with a CDN or Cloudflare rule change. A `summarizer` spike usually means Gemini is returning errors for an entire category of content. A `summary_indexer` spike almost always means the embedding service is down.
+
+**`ViperineEmbeddingDown` (critical):** The combination of zero new embedding calls AND growing Indexer lag is a strong signal that the embedding service at `https://embeddings.192-168-1-3.nip.io` is unreachable. Run `curl https://embeddings.192-168-1-3.nip.io/health` to confirm. If the service is down, the SummaryIndexer will be processing messages but failing on the embedding call and routing to DLQ. Restart the embedding service pod in the `services` namespace or check the nip.io DNS resolution if the curl returns a connection error.
+
+**`ViperineSessionsStuck` (warning):** If `sessions_in_progress` stays above 5 for 30 minutes, the idle sweeper is either not firing or is unable to close sessions. This can happen if the `SESSION_IDLE_TIMEOUT` environment variable is set to a very large value, or if a bug in the state file serialisation is preventing sessions from being written as complete. Manually inspect `cache/summaries/` to count active session directories and check their state files. A pod restart will clear in-memory session state and the sweeper will recompute from the state files on disk.
+
+**`ViperineAzureUploadFailures` (warning):** Any Azure upload failure is immediately significant because it means the cloud index is stale. Check the `blob_type` label to know whether chunks or Q&A pairs are affected. The most common causes are: expired `AZURE_STORAGE_CONNECTION_STRING` (rotate in the Kubernetes Secret and restart the aggregator pod), Azure service outage (check the Azure status page), or a network route issue between the k3s node and the Azure Storage endpoint.
+
+**`ViperineHighMemory` (warning):** An RSS above 2 GB is unusual for these consumers. The WebScraper is the most memory-intensive because Playwright launches a Chromium subprocess, but even that should not exceed 500 MB under normal load. If the WebScraper is above 2 GB, check whether `ENABLE_PLAYWRIGHT=True` is causing a large number of concurrent headless browser instances. For the Summarizer or Indexer, high memory usually means a large in-memory cache is not being cleared — check `sessions_in_progress` and whether session state dicts are growing unboundedly.
 
 ---
 

@@ -45,6 +45,14 @@ The group is deliberately decomposed into five independent processes. Each consu
 
 Every consumer runs as a separate Kubernetes Deployment in the `consumers` namespace of a k3s single-node cluster. They share a common container image (`192.168.1.3:5000/rapporteur-consumer-viperine:0.0.1`) and a common hostPath volume mount for the local cache and index files.
 
+### Design rationale — why five separate processes?
+
+Splitting the pipeline into five single-responsibility consumers was a deliberate trade-off against the simplicity of a monolithic worker. The payoff is operational independence: you can redeploy the Summarizer to pick up a new Gemini model version while scraping and indexing continue uninterrupted. You can scale the WebScraper horizontally to handle bursts of scrape requests without also scaling the more resource-intensive LLM stage. You can tune the retry policy for transient Gemini failures in isolation without touching the embedding or indexing logic.
+
+From a product perspective this architecture also gives you granular visibility. Prometheus tracks each stage independently, so you always know whether a delay is coming from web servers being slow to respond, the LLM being rate-limited, or the embedding service being under load. Without the stage separation, all of that latency would collapse into a single opaque number.
+
+The cost is that each stage is an extra Kafka hop, and failures that happen between stages need to be tracked explicitly — which is what the Dead Letter Queue consumer is for.
+
 ---
 
 ## 2. High-Level Component Diagram
@@ -204,6 +212,8 @@ RapporteurConsumerViperine/
 
 Each consumer is a single Python process launched by a `run_*.py` entry point. The main thread runs a synchronous Kafka poll loop; async work (LLM calls, embedding requests, file I/O) is executed inside the loop via `asyncio.run()`, which creates a fresh event loop for each message. This means there is no shared asyncio state between messages — each invocation is isolated.
 
+For a DevOps manager, this pattern has one important practical implication: **each message is a self-contained unit of work**. If a Gemini call hangs for 90 seconds, the process does not lose track of other messages — it simply processes them sequentially once the hung call resolves or times out. There is no thread pool saturation, no partially-processed batch to unwind, and no async task queue to drain on restart. This makes the consumers predictable under load and easy to reason about when reading logs. The trade-off is that throughput scales with the number of pod replicas rather than with tuning a thread pool size.
+
 In addition to the main thread, each consumer starts three background daemon threads at startup:
 
 ```mermaid
@@ -230,7 +240,7 @@ graph LR
 
 **The `asyncio.run()` per-message pattern** means each message gets a clean event loop. The `EmbeddingServiceClient` detects a stale loop identity (from the previous message's `asyncio.run()`) and creates a fresh `httpx.AsyncClient` rather than reusing the closed one. This avoids `RuntimeError: Event loop is closed` on the second and subsequent messages.
 
-**Graceful shutdown** is coordinated through `SIGINT`/`SIGTERM` handlers registered at init. On signal receipt, `self.running = False` causes the poll loop to exit cleanly: the producer is flushed, the consumer is closed, and all daemon threads are stopped in order.
+**Graceful shutdown** is coordinated through `SIGINT`/`SIGTERM` handlers registered at init. On signal receipt, `self.running = False` causes the poll loop to exit cleanly: the producer is flushed, the consumer is closed, and all daemon threads are stopped in order. Kubernetes sends `SIGTERM` before force-killing a pod, so a clean shutdown is guaranteed as long as the message being processed completes within the `terminationGracePeriodSeconds` window (default 30 seconds). LLM calls can take longer than this — in practice, the Gemini timeout is set to 600 seconds — but Kubernetes will only send `SIGTERM` between poll cycles, not mid-call, so in-flight summarisation work is always completed before the process exits.
 
 ---
 
@@ -239,6 +249,8 @@ graph LR
 ### 5.1 Configuration Layer
 
 All application settings — Kafka endpoints, topic names, LLM parameters, cache paths, timeouts — are centralised in `src/config.py`. No consumer reads environment variables directly except where noted; instead, `CustConf.get()` is the single access point.
+
+For a DevOps team, the practical benefit of this pattern is that every tunable parameter has exactly one place to change it. When you want to increase the Gemini request timeout, you change `gemini.timeout` in `src/config.py` and rebuild. When you want to point all consumers at a different Kafka broker, you set `KAFKA_BOOTSTRAP_SERVERS` as an environment variable in the Helm values file — `CustConf.get()` checks the environment before falling back to the defaults dict. This means you never need to search multiple files for where a setting is read; the config module is always the answer.
 
 #### `src/config.py`
 
@@ -279,6 +291,10 @@ Every class in the codebase — consumer, client, component — inherits `Base`.
 
 **File:** `src/consumers/kafka_web_scraper.py` (2 308 lines)
 **Port:** 8001 | **Group ID:** `viperine-web-scraper-v2` (config: `kafka.group_id`)
+
+The WebScraper is the pipeline's front door. It is the component that does the actual work of fetching content from the internet, and it is the most likely stage to fail because it is fighting against a wide variety of anti-scraping defences deployed by publishers. Its design philosophy is **resilience through escalation**: rather than failing immediately when a simple HTTP request returns a 403, it escalates through progressively more sophisticated techniques — from a basic session with browser-like headers, to a full stealth headless browser — before accepting defeat.
+
+From a product perspective, the WebScraper determines the coverage and quality of the research corpus. A URL that fails here never reaches the LLM. A URL that succeeds with low-quality content (navigation menus, cookie consent text, login walls) will produce a poor summary downstream. The content validity checks (`_is_extraction_valid`, `_is_cloudflare_bot_page`, `_check_content_quality`) are the quality gate that decides whether degraded content should be passed to the Summarizer for a web-grounding recovery attempt, or discarded entirely.
 
 Converts a URL message into an extracted-text message. Applies a multi-strategy extraction cascade; the first strategy that returns valid content wins. Publishes to `viperine.summarise-document` on success, `viperine.dead-letter-queue` on terminal failure.
 
@@ -371,6 +387,12 @@ On a failed extraction the scraper still publishes to `viperine.summarise-docume
 **File:** `src/consumers/kafka_summarizer.py` (1 068 lines)
 **Port:** 8010 | **Group ID:** `viperine-summarizer-v2` (config: `summarizer.consumer_group_id`)
 
+The Summarizer is the most intellectually significant stage in the pipeline and also the most expensive. It is where raw web content becomes a structured, citable, searchable research asset. For each extracted document it asks Gemini to produce a Markdown-formatted summary that preserves key claims, identifies the author and publication context, and uses a citation format the RAG service can reference when composing answers.
+
+From a product perspective, the quality of this stage determines the quality of every answer the RAG service produces. A good summary captures the essential findings of a source document in a format that is both human-readable and semantically dense enough to embed well. A degraded stub summary (produced when the LLM fails after retries) is a placeholder that tells the RAG service a document exists but provides no useful content — analysts will see the source cited but without supporting detail.
+
+The **always-emit-terminal-event** design decision was made to solve a specific operational problem: without it, a Summarizer crash mid-session would leave the Indexer waiting forever for a `summary-completed` message that would never arrive. The session would hang, the RAG service would never receive a `reload-index` signal, and the analyst's query would return stale results. By guaranteeing that `_publish_summary_completed()` is always called — even on hard failure — the pipeline degrades gracefully rather than deadlocking.
+
 Reads an extracted document, calls the LLM to produce a structured Markdown summary, validates the output, tracks token usage and estimated cost, and publishes a `summary-completed` terminal event. The always-emit-terminal-event invariant ensures the Indexer session never hangs regardless of how the summarization attempt ends.
 
 ```mermaid
@@ -439,6 +461,12 @@ This gives a per-call delta even though the underlying counter is cumulative.
 
 **File:** `src/consumers/kafka_summary_indexer.py` (1 169 lines)
 **Port:** 8006 | **Group ID:** `viperine-summary-indexer-v2` (config: `summary_indexer.consumer_group_id`)
+
+The SummaryIndexer is where a text summary becomes a searchable vector record. It calls the embedding service to convert the summary's prose into a 384-dimensional numerical representation — a point in a high-dimensional space where semantically similar documents cluster together. This vector is what allows the RAG service to find relevant research when an analyst asks a question: it compares the question's embedding to the stored document embeddings and retrieves the closest matches. Without this step, the summaries would exist as text files but would not be discoverable by the retrieval system.
+
+The Indexer also owns the notion of a **research session**: a batch of URLs submitted together as part of a single analyst query. It tracks how many documents from a session have been processed, knows when the batch is complete, and fires the downstream signals that update the RAG service and notify the analyst's browser. This session accounting is what makes the "new documents available" notification appear in the UI at the right time.
+
+For a DevOps team, the most operationally important aspect of this consumer is its idempotency design. Because Kafka guarantees at-least-once delivery (the same message may be delivered more than once if a pod crashes and restarts), the Indexer must be able to receive the same `summary-completed` message twice without writing a duplicate entry to the research index. It achieves this through a persistent state file per session that records every `document_id` and `dedup_key` seen, and silently discards any message whose identifiers are already recorded.
 
 Embeds each summary, appends it to a per-session JSONL file, deduplicates and merges into the combined master index (with `fcntl.LOCK_EX`), and emits downstream notifications when a session completes.
 
@@ -518,6 +546,10 @@ with open(lock_path, 'w') as lock_fh:
 **Port:** 8008 | **Group ID:** `index-aggregator-consumer`
 **Default state:** Disabled (`ENABLE_AGGREGATOR=false` in Helm values)
 
+The IndexAggregator serves the extended pipeline path where documents are not just summarised but also chunked into smaller segments and paired with generated question-and-answer pairs. This richer representation improves RAG retrieval quality for long documents — instead of searching over a single summary vector, the retrieval system can match against individual passage embeddings and specific anticipated questions. The aggregator is disabled by default because the primary research flow (summary-only) is sufficient for most query types and the Q&A generation pipeline is a separate upstream service that must be active for the aggregator to receive any messages.
+
+When enabled, the aggregator is responsible for keeping the Azure Blob Storage copy of the combined index up to date. It downloads the existing cloud index, merges new session data, deduplicates to prevent double-counting when pod restarts cause message redelivery, and uploads the result back. This cloud copy is the durable, long-term record of research conducted across all sessions — the local filesystem copy managed by the SummaryIndexer is ephemeral and would be lost if the PVC were recreated.
+
 Accumulates per-session chunk and Q&A pair data, merges it with the existing combined index already in Azure, deduplicates, and uploads the updated file. Only triggers when all three completion flags are set for a session: `session_chunks_complete`, `session_qa_complete`, and `session_summaries_complete`.
 
 **Consumer-specific metrics:**
@@ -541,6 +573,10 @@ Accumulates per-session chunk and Q&A pair data, merges it with the existing com
 **File:** `src/consumers/kafka_dead_letter_consumer.py` (521 lines)
 **Port:** 8009 | **Group ID:** `viperine-dead-letter-v2` (config: `dead_letter.consumer_group_id`)
 
+The Dead Letter Queue consumer exists to answer the question: *what happened to that URL?* In a distributed pipeline with multiple independent stages, failures can be silent — a document that falls through a crack between the WebScraper and the Summarizer might simply never appear in the research index without any obvious error in the UI. The DLQ consumer makes every failure visible and permanent.
+
+Its design deliberately does not include retry logic. Each upstream consumer already has its own retry loop with exponential backoff; by the time a failure reaches the DLQ, the publishing stage has already decided it cannot recover. Adding a second layer of retries in the DLQ consumer would create confusing double-retry behaviour and could cause the same document to be processed multiple times. The DLQ's sole job is to be a reliable record: if something went wrong, the evidence should be in `cache/failures/failures.json` with the full original message, the failure stage, the error text, and the timestamp. An operator or automated replay tool can then make an informed decision about whether to re-enqueue the original message.
+
 A write-only audit sink. Reads every failure event published by any pipeline stage, persists it to `cache/failures/failures.json` (an append-only JSON array), and tracks per-stage failure counts. Does not retry messages — retry is the responsibility of the publishing consumer.
 
 **Consumer-specific metrics:**
@@ -562,6 +598,8 @@ A write-only audit sink. Reads every failure event published by any pipeline sta
 
 #### `GeminiLLMClient` (`src/clients/llm_gcp_client.py`)
 
+This class is the pipeline's connection to Google's Gemini family of large language models via the Vertex AI platform. Rather than calling the Vertex AI SDK directly from the Summarizer, all model interactions are routed through this wrapper, which adds retry logic, usage tracking, and per-stage model selection on top of the raw SDK call. The wrapper is what makes it possible to change the active Gemini model (e.g. from `gemini-2.5-pro` to `gemini-2.5-flash`) in a single config line without touching any consumer code.
+
 Wraps `google.genai.Client` (Vertex AI SDK) as an async interface.
 
 Key behaviours:
@@ -572,6 +610,8 @@ Key behaviours:
 - **Exponential backoff** — up to `llm.max_retries` (default 3) with `retry_delay` seconds initial delay.
 
 #### `CachedLLMClient` (`src/clients/llm_cache_client.py`)
+
+This class wraps any LLM client and adds transparent caching. Its purpose is both cost reduction and latency improvement: if the same document URL is submitted as part of two separate research queries within five days, the second summarisation call will return the cached result instantly without consuming any Gemini tokens. In practice this cache hit rate is low for first-time research but becomes significant when the same high-authority sources (e.g. foundational papers, major news articles) are repeatedly included in different research sessions. The cache key is a SHA-256 hash of the model name and the full prompt text, so any change to the prompt — including a change to the extracted content — correctly produces a cache miss.
 
 Redis-backed cache decorator over any object with an `async generate_content(prompt)` interface.
 
@@ -585,6 +625,8 @@ cache_key = sha256(model_name + "|" + prompt)[:32]
 - Delegates `model_name`, `get_usage()`, `reset_usage()`, and `cost_tracker` to `_inner` via `@property` so the Summarizer's token delta logic works transparently through the cache layer
 
 #### `EmbeddingServiceClient` (`src/clients/embedding_client.py`)
+
+This client is responsible for converting text into numerical vectors that the retrieval system can compare. The embedding service it calls (`https://embeddings.192-168-1-3.nip.io`) runs an all-MiniLM-L6-v2 model that produces 384-dimensional vectors — compact enough to store efficiently in a JSONL file and fast to compute cosine similarity over at query time. The client manages a pool of up to 20 persistent HTTP connections to the embedding service, which avoids the overhead of establishing a new TLS connection for each of the many summaries that arrive in quick succession during a large research session. Retries with exponential backoff handle transient embedding service outages without propagating errors to the Indexer.
 
 Async `httpx` client with connection pooling (max 20 connections, 10 keepalive) and per-request exponential retry.
 
@@ -613,6 +655,10 @@ Follows redirect chains manually (not via `allow_redirects=True`) to record ever
 
 #### `CitationResearchClient` (`src/components/summarise/llm_citation_researcher.py`)
 
+This is the component that knows *how* to ask the LLM to produce a useful research summary. It is distinct from `GeminiLLMClient` (which knows how to *call* the LLM) and from `KafkaSummarizerConsumer` (which knows how to handle retries and metrics). `CitationResearchClient` owns the prompt construction logic: given a URL, a document title, an author, and extracted text, it builds a structured JSON prompt that instructs the model to return a machine-parseable response with a `metadata` section (source details) and a `markdown_summary` section (the actual research content). This structured output format is what allows downstream components to index the metadata and the content separately.
+
+The class also handles the `extraction_failed` case: when the WebScraper could not retrieve content for a URL, `generate_summary()` is called with `use_web_grounding=True`, which adds the Google Search Retrieval tool to the Gemini request so the model fetches the live page itself. This is slower and less reliable than extracting content locally, but it gives the pipeline a second chance on paywalled or JavaScript-heavy pages that defeated the scraper.
+
 Orchestrates LLM-based document summarization. Supports `openai` and `gemini` providers (selected by `summarizer.llm_provider`).
 
 On the Gemini path: builds `GeminiLLMClient` → wraps with `CachedLLMClient` → sets `self.client`. The `generate_summary()` method constructs a structured JSON prompt requesting `{metadata: {...}, markdown_summary: "..."}`. The response is parsed with a lenient JSON-repair fallback on `JSONDecodeError`. Returns the parsed dict — **the dict does not contain a `usage` key**; token data must be read from the underlying client's `get_usage()`.
@@ -621,7 +667,11 @@ On the Gemini path: builds `GeminiLLMClient` → wraps with `CachedLLMClient` �
 
 ### 5.9 Monitoring Library
 
+The monitoring library is designed around a principle of **validated observability**: metrics are cheap to emit but expensive to get wrong. A counter with a freeform error string as a label can, over time, accumulate hundreds of unique label value combinations — a phenomenon called cardinality explosion that degrades Prometheus query performance and makes dashboards unreadable. Every component in this library takes a deliberate stance against that by requiring all label values to be declared upfront.
+
 #### `PrometheusMetrics` (`src/monitoring/prometheus_metrics.py`)
+
+This is the shared base class that every consumer instantiates at startup. By centralising the common metrics here — rather than having each consumer define its own versions of `messages_consumed_total` or `consumer_state` — the library guarantees that Grafana queries written against one consumer's metrics work identically for all five. A dashboard panel that shows `kafka_consumer_state` across all `consumer_id` values will always reflect all five pods without needing per-consumer customisation.
 
 Base class providing the metrics shared by all consumers: `messages_consumed_total`, `message_processing_duration_seconds`, `processing_failures_total`, `consumer_state`, `consumer_info`, `retry_attempts_total`, `dead_letter_messages_total`, `startup_timestamp_seconds`, `last_message_processed_timestamp`, `sessions_in_progress`, `model_error_outputs_total`.
 
@@ -639,6 +689,10 @@ HTTPServer running in a `daemon=True` thread. `MetricsHandler` serves:
 - `GET /ready` — JSON `{consumer_name, status, code}` — readiness probe; 503 if consumer/producer not yet initialised
 
 #### `estimate_cost` (`src/monitoring/cost.py`)
+
+This function translates raw token counts from the LLM into an estimated dollar cost, making AI spend visible in Grafana without requiring access to the GCP billing console. For a product manager reviewing pipeline costs, the `kafka_consumer_llm_estimated_cost_usd_total` counter (incremented by this function) shows cumulative spend attributable to each model, which is the data needed to justify model selection decisions. For a DevOps manager, an unexpected spike in this counter — without a corresponding increase in documents processed — is a signal that something in the retry or error path is causing excessive LLM calls.
+
+The `PRICING_TABLE` dict at the top of `src/monitoring/cost.py` is a static copy of provider pricing as of June 2026. It does not query any external API. When provider prices change or a new model is adopted, this table must be updated manually — which is the intended workflow: the `kafka_consumer_cost_unknown_model_total` Prometheus counter fires whenever a model name reaches `estimate_cost()` without a matching entry, serving as an automated reminder that the table is stale.
 
 ```python
 PRICING_TABLE: dict[str, PricingEntry]  # 13 models (Gemini, OpenAI, Anthropic)
