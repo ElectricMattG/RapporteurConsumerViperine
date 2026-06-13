@@ -4,6 +4,18 @@
 **Prepared:** June 2026
 **Scope:** Suggested upgrades and extensions to the five-consumer pipeline, ordered by phase. Each item describes the motivation for product managers and the implementation path for developers.
 
+## Recommended Sequencing
+
+Complete the cloud DevOps deployment template **before** tackling roadmap items or security hardening.
+
+The template is low-effort and known-scope, and it is a prerequisite multiplier: several roadmap items — KEDA autoscaling (4.3), External Secrets and Workload Identity (6.3), NetworkPolicies and mTLS (6.4), supply-chain signing and admission control (6.5) — are significantly cleaner to implement on a real cloud target than on the current single-node k3s cluster. Addressing those items now and then re-doing them when the cloud template is ready is wasted work.
+
+The one exception: the two highest-priority security items, **prompt-injection defence (6.1)** and **SSRF protection (6.2)**, are application-layer and environment-independent. If the pipeline is already processing untrusted web content in any environment, these should be slotted in alongside the template work — they do not depend on where the system is deployed.
+
+**Recommended order:** Cloud deploy template → 6.1 and 6.2 in parallel if there is live exposure → infra-coupled roadmap and security items on the new cloud target.
+
+---
+
 The current pipeline is production-stable and handles the core research workflow reliably: scrape → summarise → embed → index → notify. This roadmap addresses the next layer of improvements — where cost can be reduced, where throughput can increase, where the system can grow to support a larger organisation, and where the consumer group can be extended with entirely new processing stages without a full rewrite.
 
 Items in Phase 1 are independent of each other and can be picked up by any developer who is familiar with the codebase. Phases 2–4 build on each other and should be tackled in order within each phase. Phase 5 — the consumer framework — is foundational: it underpins every other phase by making new consumers cheap to add, and a team that expects to grow the pipeline should consider pulling it forward ahead of Phases 2–4.
