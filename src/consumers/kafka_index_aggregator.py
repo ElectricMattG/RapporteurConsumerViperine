@@ -49,7 +49,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from confluent_kafka import Consumer, KafkaError, KafkaException
@@ -221,6 +221,10 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_last_activity: Dict[str, float] = {}
         self.session_total_requests: Dict[str, int] = {}  # Expected total requests per session
         self.session_query_id: Dict[str, str] = {}  # Track query_id per session for index naming
+        # Correlation pass-through — stored until upload so any future notification can replay them.
+        # session_origins keyed on session_id; overwritten on each signal (idempotent).
+        self.session_origins: Dict[str, Optional[str]] = {}         # wire origin field
+        self.session_browser_session_ids: Dict[str, Optional[str]] = {}  # session_id for origin="frontend" only
 
         # Pipeline completion tracking - all three must complete before aggregation
         self.session_chunks_complete: Dict[str, bool] = defaultdict(bool)
@@ -483,11 +487,17 @@ class KafkaIndexAggregatorConsumer(Base):
 
             session_id = message_data.get('session_id', 'unknown')
             request_id = message_data.get('request_id', 'unknown')
+            origin = message_data.get('origin')
             index_type = message_data.get('index_type')  # NEW: 'summaries' or None (for chunks/QA)
             signal = message_data.get('signal')  # Session complete signal from test script
 
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
+
+            # Store correlation fields — keyed on session_id so any aggregation path can read them
+            self.session_origins[session_id] = origin
+            if origin == 'frontend':
+                self.session_browser_session_ids[session_id] = session_id
 
             # Ignore session-complete signals from test scripts (these don't have data, just signals)
             if signal == 'session_complete':
