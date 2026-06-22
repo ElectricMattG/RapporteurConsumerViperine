@@ -148,6 +148,22 @@ class EmbeddingServiceClient(Base):
         if self.api_key:
             headers['X-API-Key'] = self.api_key
 
+        # Propagate correlation IDs from the current async context (Phase 3b).
+        # IDs are bound by bind_correlation_ids() at consumer message-loop entry
+        # (Phase 5).  The sentinel "-" means unbound — omit entirely so the
+        # embedding service never sees "X-Session-Id: -" or "X-Session-Id: None".
+        # No X-Origin header: parity with RAG 0.2.0 which ships only these two.
+        try:
+            from utils.correlation import get_request_id, get_session_id
+            _sid = get_session_id()
+            _rid = get_request_id()
+            if _sid and _sid != "-":
+                headers['X-Session-Id'] = _sid
+            if _rid and _rid != "-":
+                headers['X-Request-Id'] = _rid
+        except ImportError:
+            pass  # correlation module not yet available — safe no-op
+
         for attempt in range(self.max_retries):
             try:
                 response = await client.post(endpoint, json=json_data, headers=headers)
