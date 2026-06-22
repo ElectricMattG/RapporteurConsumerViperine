@@ -223,7 +223,7 @@ class TestIndexerFailureMarkers:
             'total_requests': 3,
         }
         result = await consumer._process_message(msg)
-        state = consumer._load_session_state('sess_test')
+        state = consumer._load_request_state('req_001')
         assert state['received_count'] == 1
         assert 'req_001' in state['failed']
         assert result['failed'] is True
@@ -235,7 +235,9 @@ class TestIndexerFailureMarkers:
 
         # Pre-populate state as if N-1 docs already processed
         state = {
+            'request_id': 'req_002',
             'session_id': 'sess_test2',
+            'origin': None,
             'total_requests': 2,
             'received_count': 1,
             'document_ids_processed': ['req_20260604_120000_1001'],
@@ -246,13 +248,13 @@ class TestIndexerFailureMarkers:
             'last_updated': datetime.now(timezone.utc).isoformat(),
             'completed': False,
         }
-        state_dir = consumer._get_session_dir('sess_test2')
-        state_file = state_dir / 'sess_test2_state.json'
+        state_dir = consumer._get_request_dir('req_002')
+        state_file = state_dir / 'req_002_state.json'
         with open(state_file, 'w') as f:
             json.dump(state, f)
 
-        # Pre-create a session index with 1 entry
-        index_file = state_dir / 'sess_test2_summaries_embedded.jsonl'
+        # Pre-create a request index with 1 entry
+        index_file = state_dir / 'req_002_summaries_embedded.jsonl'
         with open(index_file, 'w') as f:
             entry = {'document_id': 'req_20260604_120000_1001', 'dedup_key': 'b' * 32,
                      'source_url': 'https://example.com/ok', 'summary_text': 'ok',
@@ -298,7 +300,7 @@ class TestIndexerFailureMarkers:
             'current_count': 1,
             'total_requests': 2,
         }
-        msg2 = dict(msg1, request_id='req_001_replay', document_id='req_20260604_120001_1001',
+        msg2 = dict(msg1, request_id='req_001', document_id='req_20260604_120001_1001',
                     current_count=2)
         await consumer._process_message(msg1)
         result2 = await consumer._process_message(msg2)
@@ -332,7 +334,9 @@ class TestIdleSweeper:
         session_dir.mkdir(parents=True, exist_ok=True)
         last_event = datetime.now(timezone.utc) - timedelta(seconds=idle_secs)
         state = {
+            'request_id': session_id,
             'session_id': session_id,
+            'origin': None,
             'total_requests': 5,
             'received_count': 3,
             'document_ids_processed': [],

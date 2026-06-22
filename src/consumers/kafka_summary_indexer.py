@@ -191,8 +191,10 @@ class KafkaSummaryIndexerConsumer(Base):
         # Initialize embedding client
         self.embedding_client = None
 
-        # Session state tracking
-        self.session_states = {}  # {session_id: {count, total, started_at, document_ids}}
+        # Per-request aggregation state — keyed on request_id (per-query UUID).
+        # Multiple requests may share one session_id (chat-tab UUID); session_id
+        # is stored inside each state record for frontend-message replay.
+        self.request_states = {}  # {request_id: {count, total, started_at, document_ids}}
 
         # Setup signal handlers for graceful shutdown
         signal.signal(signal.SIGINT, self._signal_handler)
@@ -353,15 +355,15 @@ class KafkaSummaryIndexerConsumer(Base):
                 except Exception:
                     pass
 
-    def _get_session_dir(self, session_id: str) -> Path:
-        """Get directory for session files"""
-        session_dir = self.cache_dir / session_id
-        session_dir.mkdir(parents=True, exist_ok=True)
-        return session_dir
+    def _get_request_dir(self, request_id: str) -> Path:
+        """Get directory for per-request files (state, session index JSONL)."""
+        request_dir = self.cache_dir / request_id
+        request_dir.mkdir(parents=True, exist_ok=True)
+        return request_dir
 
-    def _load_session_state(self, session_id: str) -> Dict[str, Any]:
-        """Load session state from file"""
-        state_file = self._get_session_dir(session_id) / f"{session_id}_state.json"
+    def _load_request_state(self, request_id: str) -> Dict[str, Any]:
+        """Load per-request state from disk."""
+        state_file = self._get_request_dir(request_id) / f"{request_id}_state.json"
 
         if state_file.exists():
             try:
@@ -371,7 +373,9 @@ class KafkaSummaryIndexerConsumer(Base):
                 self._logger.warning(f"   ⚠️ Error loading state file: {e}")
 
         return {
-            'session_id': session_id,
+            'request_id': request_id,
+            'session_id': None,    # populated on first message; replayed to frontend-message
+            'origin': None,        # populated on first message; replayed to frontend-message
             'total_requests': 0,
             'received_count': 0,
             'document_ids_processed': [],
@@ -383,9 +387,9 @@ class KafkaSummaryIndexerConsumer(Base):
             'completed': False
         }
 
-    def _save_session_state(self, session_id: str, state: Dict[str, Any]):
-        """Save session state to file"""
-        state_file = self._get_session_dir(session_id) / f"{session_id}_state.json"
+    def _save_request_state(self, request_id: str, state: Dict[str, Any]):
+        """Save per-request state to disk."""
+        state_file = self._get_request_dir(request_id) / f"{request_id}_state.json"
         state['last_updated'] = datetime.now().isoformat()
 
         try:
@@ -417,26 +421,38 @@ class KafkaSummaryIndexerConsumer(Base):
 
         return embeddings[0].tolist()
 
-    def _append_to_index(self, session_id: str, entry: Dict[str, Any]):
-        """Append summary entry to session's JSONL index file"""
-        session_dir = self._get_session_dir(session_id)
-        index_file = session_dir / f"{session_id}_summaries_embedded.jsonl"
+    def _append_to_index(self, request_id: str, entry: Dict[str, Any]):
+        """Append summary entry to per-request JSONL index file."""
+        request_dir = self._get_request_dir(request_id)
+        index_file = request_dir / f"{request_id}_summaries_embedded.jsonl"
 
         with open(index_file, 'a', encoding='utf-8') as f:
             json.dump(entry, f, ensure_ascii=False)
             f.write('\n')
 
-    def _publish_session_complete(self, session_id: str, total_summaries: int, failed: List[str] | None = None):
+    def _publish_session_complete(
+        self,
+        session_id: str,
+        total_summaries: int,
+        failed: List[str] | None = None,
+        request_id: str | None = None,
+        origin: str | None = None,
+    ):
         """Publish session-complete message to Index Aggregator"""
         if not self.producer:
             self._create_producer()
 
         failed = failed or []
-        session_dir = self._get_session_dir(session_id)
-        index_file = session_dir / f"{session_id}_summaries_embedded.jsonl"
+        # Directory is keyed on request_id when available (Phase 3); fall back
+        # to session_id for any legacy callers that haven't been updated yet.
+        dir_key = request_id or session_id
+        dir_path = self._get_request_dir(dir_key)
+        index_file = dir_path / f"{dir_key}_summaries_embedded.jsonl"
 
         message = {
             'session_id': session_id,
+            'request_id': request_id,
+            'origin': origin,
             'summary_index_file': str(index_file),
             'total_summaries': total_summaries,
             'index_type': 'summaries',
@@ -507,20 +523,20 @@ class KafkaSummaryIndexerConsumer(Base):
                 self.kafka_metrics.record_publish(topic='reload-index', result='error', duration=0)
             self._logger.error(f"   ❌ Error publishing reload-index: {e}")
 
-    def _aggregate_to_combined_index(self, session_id: str):
+    def _aggregate_to_combined_index(self, request_id: str):
         """
-        Aggregate session index into the combined master index.
+        Aggregate per-request index into the combined master index.
         Handles deduplication by document_id.
         """
         try:
-            session_dir = self._get_session_dir(session_id)
-            session_index_file = session_dir / f"{session_id}_summaries_embedded.jsonl"
+            request_dir = self._get_request_dir(request_id)
+            session_index_file = request_dir / f"{request_id}_summaries_embedded.jsonl"
 
             if not session_index_file.exists():
-                self._logger.warning(f"   ⚠️ Session index file not found: {session_index_file}")
+                self._logger.warning(f"   ⚠️ Request index file not found: {session_index_file}")
                 return
 
-            self._logger.info(f"   📚 Aggregating session index to combined index...")
+            self._logger.info(f"   📚 Aggregating request index to combined index...")
             self._logger.info(f"   Source: {session_index_file}")
             self._logger.info(f"   Target: {self.combined_index_file}")
 
@@ -541,7 +557,7 @@ class KafkaSummaryIndexerConsumer(Base):
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
                 try:
                     self._aggregate_session_into_combined(
-                        session_id, session_index_file
+                        request_id, session_index_file
                     )
                 finally:
                     fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
@@ -550,7 +566,7 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
 
     def _aggregate_session_into_combined(
-        self, session_id: str, session_index_file: Path
+        self, request_id: str, session_index_file: Path
     ):
         """Inner aggregation routine; caller must hold the combined-index lock."""
         try:
@@ -640,11 +656,25 @@ class KafkaSummaryIndexerConsumer(Base):
             # Publish notifications if new summaries were added
             if new_count > 0:
                 try:
+                    # Reload correlation fields from on-disk state so we can replay
+                    # session_id and origin onto the frontend-message even when this
+                    # method is called from the idle sweeper (not _process_message).
+                    _state = self._load_request_state(request_id)
+                    _session_id = _state.get('session_id')
+                    _origin = _state.get('origin')
+
                     # Publish reload-index message for RAG service
                     self._publish_reload_index_message(new_count, len(existing_doc_ids))
 
                     # Publish frontend-message for UI notification (accurate count, limited preview)
-                    self._publish_frontend_message(session_id, new_count, new_additions[:5], len(existing_doc_ids))
+                    self._publish_frontend_message(
+                        request_id=request_id,
+                        session_id=_session_id,
+                        origin=_origin,
+                        new_count=new_count,
+                        new_additions_preview=new_additions[:5],
+                        total_summaries=len(existing_doc_ids),
+                    )
 
                 except Exception as e:
                     self._logger.error(f"   ❌ Error publishing notifications: {e}")
@@ -652,33 +682,55 @@ class KafkaSummaryIndexerConsumer(Base):
         except Exception as e:
             self._logger.error(f"   ❌ Error aggregating to combined index: {e}", exc_info=True)
 
-    def _publish_frontend_message(self, session_id: str, new_count: int, new_additions_preview: List[Dict[str, str]], total_summaries: int):
+    def _publish_frontend_message(
+        self,
+        request_id: str,
+        session_id: str | None,
+        origin: str | None,
+        new_count: int,
+        new_additions_preview: List[Dict[str, str]],
+        total_summaries: int,
+    ):
         """
         Publish a message to the frontend-message topic with aggregation results.
 
+        This is the terminal message the BFF SSE filter inspects to route a
+        research-complete notification to the originating browser tab.  It
+        carries all three correlation fields so the BFF can match on session_id.
+
         Args:
-            session_id: The session ID that was aggregated
+            request_id: Per-query UUID (aggregation key)
+            session_id: Chat-tab UUID from inbound message (BFF SSE routing key)
+            origin: Opaque origin field from inbound message (diagnostic)
             new_count: Actual count of new summaries added
-            new_additions_preview: Limited list of dicts with 'url' and 'title' for preview (up to 5)
-            total_summaries: Total number of summaries in the combined index
+            new_additions_preview: Up to 5 dicts with 'url' and 'title'
+            total_summaries: Total summaries in the combined index
         """
         if not self.producer:
             self._create_producer()
 
         message = {
             'type': 'summary_aggregation',
+            'request_id': request_id,
             'session_id': session_id,
+            'origin': origin,
             'new_summaries_count': new_count,
             'total_summaries_count': total_summaries,
             'new_summaries': new_additions_preview,
             'timestamp': datetime.now().isoformat()
         }
 
+        # Key on session_id so the BFF SSE consumer can use partition affinity
+        # per chat session.  Fall back to request_id for origin="direct" events
+        # where no session bucket is registered.
+        kafka_key = (session_id.encode('utf-8') if session_id
+                     else request_id.encode('utf-8'))
+
         try:
             _pub_start = time.time()
             self.producer.produce(
                 self.frontend_topic,
-                key=session_id.encode('utf-8'),
+                key=kafka_key,
                 value=json.dumps(message).encode('utf-8')
             )
             self.producer.flush()
@@ -707,7 +759,9 @@ class KafkaSummaryIndexerConsumer(Base):
             source_url = message_data.get('source_url')
             summary_file = message_data.get('summary_file')
             current_count = message_data.get('current_count', 1)
-            total_requests = message_data.get('total_requests', 1)
+            total_urls = message_data.get('total_urls', message_data.get('total_requests', 1))
+            origin = message_data.get('origin')
+            url_index = message_data.get('url_index', 0)
             status = message_data.get('status', 'success')  # 'success' | 'degraded' | 'failed'
 
             # Track document_id scheme to surface rogue producers
@@ -724,22 +778,29 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info("="*80)
             self._logger.info(f"📝 Processing Summary Indexing")
             self._logger.info(f"   Session ID: {session_id}")
+            self._logger.info(f"   Request ID: {request_id}")
+            self._logger.info(f"   Origin:     {origin}")
             self._logger.info(f"   Document ID: {document_id}")
             self._logger.info(f"   Status: {status}")
-            self._logger.info(f"   Progress: {current_count}/{total_requests}")
+            self._logger.info(f"   Progress: {url_index + 1}/{total_urls}")
             self._logger.info(f"   Summary file: {summary_file}")
 
-            # Load session state
-            state = self._load_session_state(session_id)
+            # Load per-request state (keyed on request_id, not session_id)
+            state = self._load_request_state(request_id)
 
             # Ensure new state fields exist (backward-compat with persisted states)
             state.setdefault('dedup_keys_processed', [])
             state.setdefault('failed', [])
             state.setdefault('last_event_at', datetime.now(timezone.utc).isoformat())
 
-            # Update total if not set
+            # Persist session_id and origin in state so the idle sweeper can
+            # replay them onto frontend-message without re-receiving the message.
+            state['session_id'] = session_id
+            state['origin'] = origin
+
+            # Update total if not set (total_urls takes priority; legacy total_requests as fallback)
             if state['total_requests'] == 0:
-                state['total_requests'] = total_requests
+                state['total_requests'] = total_urls
 
             # Stamp last_event_at so the idle sweeper knows this session is alive
             state['last_event_at'] = datetime.now(timezone.utc).isoformat()
@@ -753,18 +814,18 @@ class KafkaSummaryIndexerConsumer(Base):
             )
             if _eff_dedup and _eff_dedup in state['dedup_keys_processed']:
                 self._logger.info(f"   ⏭️  URL already indexed (dedup_key={_eff_dedup}), skipping")
-                # Still count toward total so session can complete
+                # Still count toward total so request can complete
                 state['received_count'] += 1
-                self._save_session_state(session_id, state)
+                self._save_request_state(request_id, state)
                 self._logger.info("="*80)
-                return {'session_id': session_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
+                return {'session_id': session_id, 'request_id': request_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
 
             if document_id in state['document_ids_processed']:
                 self._logger.info(f"   ⏭️  Document {document_id} already processed, skipping")
                 state['received_count'] += 1
-                self._save_session_state(session_id, state)
+                self._save_request_state(request_id, state)
                 self._logger.info("="*80)
-                return {'session_id': session_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
+                return {'session_id': session_id, 'request_id': request_id, 'document_id': document_id, 'indexed': False, 'skipped': True}
 
             # ── Handle failed terminal events ─────────────────────────────────
             # The summarizer publishes status='failed' when it exhausts retries.
@@ -781,19 +842,24 @@ class KafkaSummaryIndexerConsumer(Base):
                     state['document_ids_processed'].append(document_id)
                 if _eff_dedup:
                     state['dedup_keys_processed'].append(_eff_dedup)
-                self._save_session_state(session_id, state)
+                self._save_request_state(request_id, state)
 
-                # Check if session is now complete (failure was the last outstanding doc)
+                # Check if request is now complete (failure was the last outstanding doc)
                 if state['received_count'] >= state['total_requests'] and not state.get('completed', False):
-                    self._logger.info(f"   🎉 Session complete (with failures): {state['received_count']}/{state['total_requests']}")
+                    self._logger.info(f"   🎉 Request complete (with failures): {state['received_count']}/{state['total_requests']}")
                     state['completed'] = True
-                    self._save_session_state(session_id, state)
-                    self._publish_session_complete(session_id, state['received_count'], failed=state['failed'])
-                    self._aggregate_to_combined_index(session_id)
+                    self._save_request_state(request_id, state)
+                    self._publish_session_complete(
+                        session_id, state['received_count'],
+                        failed=state['failed'],
+                        request_id=request_id, origin=origin,
+                    )
+                    self._aggregate_to_combined_index(request_id)
 
                 self._logger.info("="*80)
                 return {
                     'session_id': session_id,
+                    'request_id': request_id,
                     'document_id': document_id,
                     'indexed': False,
                     'failed': True,
@@ -845,7 +911,7 @@ class KafkaSummaryIndexerConsumer(Base):
             }
 
             # Append to index file
-            self._append_to_index(session_id, index_entry)
+            self._append_to_index(request_id, index_entry)
             self._logger.info(f"   💾 Appended to index")
 
             # Update state
@@ -853,7 +919,7 @@ class KafkaSummaryIndexerConsumer(Base):
             state['document_ids_processed'].append(document_id)
             if _eff_dedup:
                 state['dedup_keys_processed'].append(_eff_dedup)
-            self._save_session_state(session_id, state)
+            self._save_request_state(request_id, state)
 
             # Track metrics
             if self.telemetry_enabled and embed_start:
@@ -869,27 +935,32 @@ class KafkaSummaryIndexerConsumer(Base):
                     consumer_id=consumer_id_label
                 ).inc()
 
-            # Check if session is complete
+            # Check if request is complete
             if state['received_count'] >= state['total_requests'] and not state.get('completed', False):
-                self._logger.info(f"   🎉 Session complete: {state['received_count']}/{state['total_requests']}")
+                self._logger.info(f"   🎉 Request complete: {state['received_count']}/{state['total_requests']}")
                 state['completed'] = True
-                self._save_session_state(session_id, state)
+                self._save_request_state(request_id, state)
 
                 # Publish session-complete message
-                self._publish_session_complete(session_id, state['received_count'], failed=state.get('failed', []))
+                self._publish_session_complete(
+                    session_id, state['received_count'],
+                    failed=state.get('failed', []),
+                    request_id=request_id, origin=origin,
+                )
 
-                # Aggregate session index to combined master index
-                self._aggregate_to_combined_index(session_id)
+                # Aggregate request index to combined master index
+                self._aggregate_to_combined_index(request_id)
 
             elif state.get('completed', False):
-                self._logger.info(f"   ℹ️  Session already marked complete, skipping signal")
+                self._logger.info(f"   ℹ️  Request already marked complete, skipping signal")
             else:
-                self._logger.info(f"   ⏳ Session progress: {state['received_count']}/{state['total_requests']}")
+                self._logger.info(f"   ⏳ Request progress: {state['received_count']}/{state['total_requests']}")
 
             self._logger.info("="*80)
 
             return {
                 'session_id': session_id,
+                'request_id': request_id,
                 'document_id': document_id,
                 'indexed': True,
                 'session_complete': state['completed']
@@ -950,12 +1021,18 @@ class KafkaSummaryIndexerConsumer(Base):
                 if idle_seconds < SESSION_IDLE_TIMEOUT:
                     continue
 
+                # Re-bind all three correlation fields from stored state so the
+                # sweeper can replay them onto frontend-message / session-complete
+                # without needing to re-process the original inbound message.
+                request_id = state.get('request_id')
                 session_id = state.get('session_id')
-                if not session_id:
+                origin = state.get('origin')
+                if not request_id:
+                    # Legacy state file written before Phase 3 — skip gracefully
                     continue
 
                 self._logger.warning(
-                    f"⏰ Idle sweeper: session {session_id} has been idle "
+                    f"⏰ Idle sweeper: request {request_id} (session={session_id}) has been idle "
                     f"{idle_seconds:.0f}s (>{SESSION_IDLE_TIMEOUT}s); force-aggregating "
                     f"({state.get('received_count', 0)}/{state.get('total_requests', 0)} received)"
                 )
@@ -974,8 +1051,10 @@ class KafkaSummaryIndexerConsumer(Base):
                     session_id,
                     state.get('received_count', 0),
                     failed=state.get('failed', []),
+                    request_id=request_id,
+                    origin=origin,
                 )
-                self._aggregate_to_combined_index(session_id)
+                self._aggregate_to_combined_index(request_id)
 
         except Exception as e:
             self._logger.error(f"❌ Error in idle session sweeper: {e}", exc_info=True)
