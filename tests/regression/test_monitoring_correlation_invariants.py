@@ -112,3 +112,46 @@ class TestPrometheusLabelCardinalityGuard:
         assert not offenders, (
             f"Kafka consumer metrics with origin label: {offenders}"
         )
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TestSummarizerMetricsLabelsUnchanged  (Phase 2)
+# ══════════════════════════════════════════════════════════════════════════════
+
+class TestSummarizerMetricsLabelsUnchanged:
+    """
+    Story-mandated invariant — adding correlation IDs to the summarizer must
+    not regress the label shape on existing LLM metrics.
+
+    These are structural checks: they assert that the well-known label sets on
+    llm_api_calls / llm_api_errors remain exactly the fixed dimensions they
+    were defined with.  Adding session_id / request_id / origin would explode
+    cardinality; this test makes that a CI failure.
+    """
+
+    def _label_names_for(self, prefix: str) -> dict[str, set[str]]:
+        from prometheus_client import REGISTRY
+        result = {}
+        for mf in REGISTRY.collect():
+            if mf.name.startswith(prefix):
+                labels: set[str] = set()
+                for sample in mf.samples:
+                    labels.update(sample.labels.keys())
+                result[mf.name] = labels
+        return result
+
+    def test_llm_api_calls_label_set_unchanged(self):
+        """llm_api_calls_total labels must not include session/request/origin."""
+        for name, labels in self._label_names_for("kafka_consumer_llm_api_calls").items():
+            for forbidden in ("session_id", "request_id", "origin"):
+                assert forbidden not in labels, (
+                    f"{name} carries forbidden label {forbidden!r}"
+                )
+
+    def test_llm_api_errors_label_set_unchanged(self):
+        """llm_api_errors_total labels must not include session/request/origin."""
+        for name, labels in self._label_names_for("kafka_consumer_llm_api_errors").items():
+            for forbidden in ("session_id", "request_id", "origin"):
+                assert forbidden not in labels, (
+                    f"{name} carries forbidden label {forbidden!r}"
+                )
