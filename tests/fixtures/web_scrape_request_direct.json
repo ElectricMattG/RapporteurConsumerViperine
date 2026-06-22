@@ -1,0 +1,12 @@
+{
+  "_comment": "Phase 0.5 fixture — captured from live RAG 0.2.0 (viperine.web-scrape-requests), direct call path. Replace with real capture before finalising Phase 1.",
+  "_capture_status": "PLACEHOLDER — run Phase 0.5 live capture to overwrite with actual RAG output",
+  "uri": "https://example.com/article-direct",
+  "title": "Example Article Direct",
+  "context": [],
+  "session_id": "33333333-3333-4333-8333-333333333333",
+  "request_id": "44444444-4444-4444-8444-444444444444",
+  "origin": "direct",
+  "url_index": 0,
+  "total_urls": 1
+}
