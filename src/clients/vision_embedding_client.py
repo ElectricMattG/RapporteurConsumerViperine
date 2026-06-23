@@ -16,6 +16,8 @@ import httpx
 import numpy as np
 from PIL import Image
 
+from utils.correlation import get_request_id, get_session_id
+
 # Import base configuration and logging
 try:
     from ...config_handler import Base
@@ -293,18 +295,15 @@ class VisionEmbeddingClient(Base):
         if self.api_key:
             headers['X-API-Key'] = self.api_key
 
-        # Propagate correlation IDs from the current async context (Phase 3b).
-        # Parity with RAG 0.2.0 and embedding_client.py — same two headers only.
-        try:
-            from utils.correlation import get_request_id, get_session_id
-            _sid = get_session_id()
-            _rid = get_request_id()
-            if _sid and _sid != "-":
-                headers['X-Session-Id'] = _sid
-            if _rid and _rid != "-":
-                headers['X-Request-Id'] = _rid
-        except ImportError:
-            pass  # correlation module not yet available — safe no-op
+        # Propagate correlation IDs from the current async context.
+        # Sentinel "-" means unbound — omit entirely so the embedding service
+        # never sees "X-Session-Id: -". No X-Origin: parity with RAG 0.2.0.
+        _sid = get_session_id()
+        _rid = get_request_id()
+        if _sid and _sid != "-":
+            headers['X-Session-Id'] = _sid
+        if _rid and _rid != "-":
+            headers['X-Request-Id'] = _rid
 
         for attempt in range(self.max_retries):
             try:
