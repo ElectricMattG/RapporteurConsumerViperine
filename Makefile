@@ -81,7 +81,7 @@ test:
 	pytest
 
 .PHONY: cov
-cov: | install
+cov:
 	@echo "$(YELLOW)$(BOLD)Running tests with coverage$(RESET)"
 	pytest --cov=src --cov-report=term-missing --cov-report=html:htmlcov
 

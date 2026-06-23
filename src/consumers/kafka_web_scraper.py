@@ -2035,7 +2035,7 @@ class KafkaWebScraperConsumer(Base):
                 self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='success', duration=_pub_duration)
                 self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics: request_id={request_id}")
+            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics")
 
         except Exception as e:
             # instrumentation - messages_published_total
@@ -2119,7 +2119,7 @@ class KafkaWebScraperConsumer(Base):
             if self.telemetry_enabled:
                 self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"📤 Published failed URL for summary attempt: request_id={request_id}")
+            self._logger.info("📤 Published failed URL for summary attempt")
 
         except Exception as e:
             # instrumentation - messages_published_total

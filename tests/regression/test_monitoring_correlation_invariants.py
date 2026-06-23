@@ -18,6 +18,8 @@ import logging
 
 import pytest
 
+pytestmark = pytest.mark.regression
+
 # ── Forbidden label names (story §"Logging Convention") ───────────────────────
 
 _FORBIDDEN_LABELS = frozenset({"session_id", "request_id", "origin"})
