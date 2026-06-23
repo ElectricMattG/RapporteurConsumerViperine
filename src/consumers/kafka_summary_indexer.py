@@ -97,6 +97,10 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../clients'))
 from embedding_client import EmbeddingServiceClient
 
+from utils.correlation import (bind_correlation_ids,
+                               install_correlation_record_factory,
+                               reset_correlation_ids)
+
 # Sessions idle longer than this (seconds) are force-aggregated by the sweeper.
 SESSION_IDLE_TIMEOUT: int = int(os.getenv('SESSION_IDLE_TIMEOUT', '120'))
 
@@ -106,6 +110,7 @@ class KafkaSummaryIndexerConsumer(Base):
 
     def __init__(self):
         """Initialize the Kafka summary indexer consumer"""
+        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaSummaryIndexerConsumer")
 
@@ -750,6 +755,10 @@ class KafkaSummaryIndexerConsumer(Base):
 
     async def _process_message(self, message_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Process a single summary-completed message"""
+        _tokens = bind_correlation_ids(
+            message_data.get('session_id'),
+            message_data.get('request_id'),
+        )
         try:
             # Extract message fields
             request_id = message_data.get('request_id')
@@ -980,6 +989,8 @@ class KafkaSummaryIndexerConsumer(Base):
                 ).observe(embed_duration)
 
             return None
+        finally:
+            reset_correlation_ids(_tokens)
 
     def _check_idle_sessions(self) -> None:
         """
@@ -1047,14 +1058,18 @@ class KafkaSummaryIndexerConsumer(Base):
                     self._logger.error(f"   ❌ Sweeper: failed to update state file: {save_err}")
                     continue
 
-                self._publish_session_complete(
-                    session_id,
-                    state.get('received_count', 0),
-                    failed=state.get('failed', []),
-                    request_id=request_id,
-                    origin=origin,
-                )
-                self._aggregate_to_combined_index(request_id)
+                _sweep_tokens = bind_correlation_ids(session_id, request_id)
+                try:
+                    self._publish_session_complete(
+                        session_id,
+                        state.get('received_count', 0),
+                        failed=state.get('failed', []),
+                        request_id=request_id,
+                        origin=origin,
+                    )
+                    self._aggregate_to_combined_index(request_id)
+                finally:
+                    reset_correlation_ids(_sweep_tokens)
 
         except Exception as e:
             self._logger.error(f"❌ Error in idle session sweeper: {e}", exc_info=True)
