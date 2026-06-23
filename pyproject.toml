@@ -10,7 +10,7 @@ env_files = ["tests/.env"]
 python_files = ["test_*.py", "*_tests.py"]
 testpaths = ["tests"]
 timeout = 30
-pythonpath = ["src", "src/consumers", "src/utils"]
+pythonpath = [".", "src", "src/consumers", "src/utils"]
 addopts = ["--tb=short"]
 filterwarnings = [
     "ignore::DeprecationWarning:pythonjsonlogger.*",

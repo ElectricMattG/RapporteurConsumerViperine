@@ -76,7 +76,7 @@ install: requirements.txt dev-requirements.txt
 
 
 .PHONY: test
-test: | install
+test:
 	@echo "$(YELLOW)$(BOLD)Running tests$(RESET)"
 	pytest
 
