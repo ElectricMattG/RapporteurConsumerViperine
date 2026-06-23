@@ -61,8 +61,12 @@ class CustomJsonFormatter(jsonlogger.JsonFormatter):
 
         # Add standard fields
         log_record['consumer_id'] = self.consumer_id
-        if self.session_id:
-            log_record['session_id'] = self.session_id
+
+        # Dynamic correlation IDs — read from record attributes stamped by
+        # install_correlation_record_factory() so every log line carries the
+        # IDs bound for the current message, not the static value from __init__.
+        log_record['session_id'] = getattr(record, 'session_id', '-')
+        log_record['request_id'] = getattr(record, 'request_id', '-')
 
         # Add trace_id if not present
         if 'trace_id' not in log_record:
@@ -116,7 +120,7 @@ def configure_logging(
         )
     else:
         formatter = logging.Formatter(
-            '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+            '%(asctime)s - %(name)s - %(levelname)s - session_id=%(session_id)s request_id=%(request_id)s - %(message)s'
         )
 
     # Console handler
