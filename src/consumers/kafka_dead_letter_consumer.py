@@ -66,6 +66,9 @@ src_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(src_dir))
 
 from config_handler import Base
+from utils.correlation import (bind_correlation_ids,
+                               install_correlation_record_factory,
+                               reset_correlation_ids)
 
 
 class KafkaDeadLetterConsumer(Base):
@@ -73,6 +76,7 @@ class KafkaDeadLetterConsumer(Base):
 
     def __init__(self):
         """Initialize the dead letter queue consumer"""
+        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaDeadLetterConsumer")
 
@@ -268,6 +272,7 @@ class KafkaDeadLetterConsumer(Base):
         failed_stage = message_data.get('failed_stage', 'unknown')
         request_id = message_data.get('request_id', 'unknown')
         session_id = message_data.get('session_id', 'unknown')
+        _tokens = bind_correlation_ids(session_id, request_id)
         origin = message_data.get('origin', 'unknown')
         error = message_data.get('error', 'Unknown error')
         timestamp = message_data.get('timestamp', datetime.now().isoformat())
@@ -350,6 +355,7 @@ class KafkaDeadLetterConsumer(Base):
             ).observe(dlq_duration)
 
         self._logger.info("=" * 80)
+        reset_correlation_ids(_tokens)
 
     async def consume_messages(self):
         """Main consumer loop"""

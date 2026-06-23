@@ -51,6 +51,10 @@ from bs4 import BeautifulSoup
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from PyPDF2 import PdfReader
 
+from utils.correlation import (bind_correlation_ids,
+                               install_correlation_record_factory,
+                               reset_correlation_ids)
+
 # Telemetry imports
 try:
     from src.monitoring import (CacheMetricsCollector, KafkaMetricsWrapper,
@@ -119,6 +123,7 @@ class KafkaWebScraperConsumer(Base):
 
     def __init__(self):
         """Initialize the Kafka consumer"""
+        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaWebScraperConsumer")
 
@@ -368,6 +373,7 @@ class KafkaWebScraperConsumer(Base):
         """
         session_id = message_data.get('session_id', 'unknown')
         request_id = message_data.get('request_id')  # opaque UUID from RAG; RAG is the only minter
+        _tokens = bind_correlation_ids(session_id, request_id)
         origin = message_data.get('origin')           # opaque pass-through; diagnostic only
         url_index = message_data.get('url_index', 0)
         total_urls = message_data.get('total_urls', message_data.get('total_requests', 1))
@@ -720,6 +726,8 @@ class KafkaWebScraperConsumer(Base):
         except Exception as e:
             result['error'] = str(e)
             self._logger.error(f"❌ Error processing message: {e}")
+        finally:
+            reset_correlation_ids(_tokens)
 
         self._logger.info("=" * 80)
         return result

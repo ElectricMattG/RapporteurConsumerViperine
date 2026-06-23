@@ -77,6 +77,9 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from config_handler import Base
+from utils.correlation import (bind_correlation_ids,
+                               install_correlation_record_factory,
+                               reset_correlation_ids)
 from utils.index_adapter import transform_qa_index_to_chunks
 
 
@@ -95,6 +98,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
     def __init__(self):
         """Initialize the index aggregator consumer."""
+        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaIndexAggregatorConsumer")
 
@@ -487,6 +491,7 @@ class KafkaIndexAggregatorConsumer(Base):
 
             session_id = message_data.get('session_id', 'unknown')
             request_id = message_data.get('request_id', 'unknown')
+            _tokens = bind_correlation_ids(session_id, request_id)
             origin = message_data.get('origin')
             index_type = message_data.get('index_type')  # NEW: 'summaries' or None (for chunks/QA)
             signal = message_data.get('signal')  # Session complete signal from test script
@@ -678,6 +683,10 @@ class KafkaIndexAggregatorConsumer(Base):
                 self.metrics.increment_failures(self.input_topic, ErrorCategory.UNKNOWN)
             import traceback
             traceback.print_exc()
+        finally:
+            # Reset only if bind succeeded (i.e. JSON decode didn't raise before the bind call)
+            if '_tokens' in dir():
+                reset_correlation_ids(_tokens)
 
     def _check_and_aggregate_if_ready(self, session_id: str):
         """Check if all three pipelines are complete, then aggregate and upload.
