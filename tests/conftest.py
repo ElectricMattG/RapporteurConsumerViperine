@@ -8,13 +8,43 @@ from __future__ import annotations
 
 import json
 import sys
+import uuid
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+# ── Correlation ID fixtures (Phase 6 consolidation) ───────────────────────────
+# Static UUIDs so test-run grep output is deterministic.
 
-# ── anyio backend (pin to asyncio; keeps trio out of CI unless explicitly wanted)
+_SESSION_UUID = "11111111-1111-4111-8111-111111111111"
+_REQUEST_UUID = "22222222-2222-4222-8222-222222222222"
+
+
+@pytest.fixture
+def session_uuid() -> str:
+    return _SESSION_UUID
+
+
+@pytest.fixture
+def request_uuid() -> str:
+    return _REQUEST_UUID
+
+
+@pytest.fixture
+def correlation_triple(session_uuid, request_uuid):
+    return {"session_id": session_uuid, "request_id": request_uuid, "origin": "frontend"}
+
+
+@pytest.fixture
+def direct_correlation_triple():
+    return {
+        "session_id": str(uuid.uuid4()),
+        "request_id": str(uuid.uuid4()),
+        "origin": "direct",
+    }
+
+
 @pytest.fixture
 def anyio_backend():
     return "asyncio"

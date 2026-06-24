@@ -66,6 +66,7 @@ src_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(src_dir))
 
 from config_handler import Base
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 
 class KafkaDeadLetterConsumer(Base):
@@ -81,7 +82,7 @@ class KafkaDeadLetterConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"dead_letter_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )
@@ -268,6 +269,8 @@ class KafkaDeadLetterConsumer(Base):
         failed_stage = message_data.get('failed_stage', 'unknown')
         request_id = message_data.get('request_id', 'unknown')
         session_id = message_data.get('session_id', 'unknown')
+        _tokens = bind_correlation_ids(session_id, request_id)
+        origin = message_data.get('origin', 'unknown')
         error = message_data.get('error', 'Unknown error')
         timestamp = message_data.get('timestamp', datetime.now().isoformat())
         origin_topic = message_data.get('origin_topic') or message_data.get('source_topic', 'unknown')
@@ -276,6 +279,7 @@ class KafkaDeadLetterConsumer(Base):
         self._logger.info("⚠️  PIPELINE FAILURE DETECTED")
         self._logger.info(f"   Request ID: {request_id}")
         self._logger.info(f"   Session ID: {session_id}")
+        self._logger.info(f"   Origin:     {origin}")
         self._logger.info(f"   Failed Stage: {failed_stage}")
         self._logger.info(f"   Error: {error[:200]}...")
         self._logger.info(f"   Timestamp: {timestamp}")
@@ -348,6 +352,7 @@ class KafkaDeadLetterConsumer(Base):
             ).observe(dlq_duration)
 
         self._logger.info("=" * 80)
+        reset_correlation_ids(_tokens)
 
     async def consume_messages(self):
         """Main consumer loop"""

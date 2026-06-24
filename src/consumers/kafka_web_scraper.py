@@ -41,6 +41,7 @@ import random
 import signal
 import sys
 import time
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -49,6 +50,8 @@ import requests
 from bs4 import BeautifulSoup
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from PyPDF2 import PdfReader
+
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 # Telemetry imports
 try:
@@ -145,7 +148,7 @@ class KafkaWebScraperConsumer(Base):
 
             # Configure structured logging
             configure_logging(
-                format='json',
+                format='text',
                 level=os.getenv('LOG_LEVEL', 'INFO'),
                 consumer_id=consumer_id
             )
@@ -366,16 +369,31 @@ class KafkaWebScraperConsumer(Base):
             Processing result dictionary
         """
         session_id = message_data.get('session_id', 'unknown')
-        request_id = message_data.get('request_id', f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        request_id = message_data.get('request_id')  # opaque UUID from RAG; RAG is the only minter
+        _tokens = bind_correlation_ids(session_id, request_id)
+        origin = message_data.get('origin')           # opaque pass-through; diagnostic only
+        url_index = message_data.get('url_index', 0)
+        total_urls = message_data.get('total_urls', message_data.get('total_requests', 1))
         query_id = message_data.get('query_id', 'default')
         uri = message_data.get('uri')
         title = message_data.get('title', 'Untitled')
         context = message_data.get('context', [])
 
+        # Derive a per-URL cache handle to avoid directory collision when N URLs share
+        # one request_id. This handle is used ONLY for the local cache path;
+        # the wire request_id is never modified — RAG's resolver is the only minter.
+        if request_id:
+            request_handle = f"{request_id}_url_{url_index:03d}"
+        else:
+            request_handle = str(uuid.uuid4())
+            self._logger.warning("Inbound message missing request_id; using uuid4 for cache dir only")
+
         self._logger.info("=" * 80)
         self._logger.info(f"🔄 Processing message")
         self._logger.info(f"   Session ID: {session_id}")
         self._logger.info(f"   Request ID: {request_id}")
+        self._logger.info(f"   Origin: {origin}")
+        self._logger.info(f"   URL index: {url_index}/{total_urls}")
         self._logger.info(f"   URI: {uri}")
         self._logger.info(f"   Title: {title}")
         self._logger.info(f"   Context lines: {len(context)}")
@@ -394,8 +412,9 @@ class KafkaWebScraperConsumer(Base):
             'error': None
         }
 
-        # Create request-specific directory
-        request_dir = self.cache_dir / request_id
+        # Create request-specific directory — keyed on request_handle (per-URL) not
+        # request_id (shared across all URLs in one request) to avoid path collision.
+        request_dir = self.cache_dir / request_handle
         request_dir.mkdir(parents=True, exist_ok=True)
         output_file = request_dir / "extracted_linked_text.jsonl"
 
@@ -424,7 +443,10 @@ class KafkaWebScraperConsumer(Base):
 
             if is_youtube:
                 self._logger.info("📹 Detected YouTube URL - attempting transcript extraction...")
-                transcript_result = self._extract_youtube_transcript(final_url, request_dir, session_id, request_id, uri, title, message_data)
+                transcript_result = self._extract_youtube_transcript(
+                    final_url, request_dir, session_id, request_id, uri, title, message_data,
+                    origin=origin, url_index=url_index, total_urls=total_urls,
+                )
                 print(f"TRANSCRIPT: {transcript_result}")
 
                 if transcript_result['success']:
@@ -484,6 +506,9 @@ class KafkaWebScraperConsumer(Base):
                             'extracted_at': datetime.now().isoformat(),
                             'session_id': session_id,
                             'request_id': request_id,
+                            'origin': origin,
+                            'url_index': url_index,
+                            'total_urls': total_urls,
                             'extraction_method': 'cloudscraper'
                         }
                         if 'total_requests' in message_data:
@@ -539,6 +564,9 @@ class KafkaWebScraperConsumer(Base):
                             'extracted_at': datetime.now().isoformat(),
                             'session_id': session_id,
                             'request_id': request_id,
+                            'origin': origin,
+                            'url_index': url_index,
+                            'total_urls': total_urls,
                             'extraction_method': 'playwright'
                         }
                         if 'total_requests' in message_data:
@@ -631,6 +659,9 @@ class KafkaWebScraperConsumer(Base):
                             'extracted_at': datetime.now().isoformat(),
                             'session_id': session_id,
                             'request_id': request_id,
+                            'origin': origin,
+                            'url_index': url_index,
+                            'total_urls': total_urls,
                             'query_id': result.get('query_id', 'default'),
                             'extraction_method': 'pdf_extraction' if is_pdf else 'curl_cffi'
                         }
@@ -668,7 +699,11 @@ class KafkaWebScraperConsumer(Base):
                         self._create_failure_document(request_dir, final_url, error_msg, response.status_code, session_id, request_id)
 
                         # Still attempt to generate summary from URL and title
-                        self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id, result.get('query_id', 'default'))
+                        self._publish_failed_url_for_summary(
+                            final_url, uri, title, context, error_msg,
+                            session_id, request_id, result.get('query_id', 'default'),
+                            origin=origin, url_index=url_index, total_urls=total_urls,
+                        )
 
                 except Exception as e:
                     error_msg = f"Error fetching URL: {str(e)}"
@@ -679,11 +714,17 @@ class KafkaWebScraperConsumer(Base):
                     self._create_failure_document(request_dir, final_url, error_msg, None, session_id, request_id)
 
                     # Still attempt to generate summary from URL and title
-                    self._publish_failed_url_for_summary(final_url, uri, title, context, error_msg, session_id, request_id, result.get('query_id', 'default'))
+                    self._publish_failed_url_for_summary(
+                        final_url, uri, title, context, error_msg,
+                        session_id, request_id, result.get('query_id', 'default'),
+                        origin=origin, url_index=url_index, total_urls=total_urls,
+                    )
 
         except Exception as e:
             result['error'] = str(e)
             self._logger.error(f"❌ Error processing message: {e}")
+        finally:
+            reset_correlation_ids(_tokens)
 
         self._logger.info("=" * 80)
         return result
@@ -696,7 +737,10 @@ class KafkaWebScraperConsumer(Base):
         request_id: str,
         original_uri: str,
         title: str,
-        message_data: Dict
+        message_data: Dict,
+        origin: Optional[str] = None,
+        url_index: int = 0,
+        total_urls: int = 1,
     ) -> Dict[str, Any]:
         """
         Extract YouTube video transcript using youtube-transcript-api.
@@ -708,6 +752,10 @@ class KafkaWebScraperConsumer(Base):
             request_id: Request ID
             original_uri: Original URI from the message
             title: Video title
+            message_data: Original Kafka message payload
+            origin: Opaque origin field from inbound message (pass-through)
+            url_index: Per-URL ordinal within the request (0-based)
+            total_urls: Total URLs in the request
 
         Returns:
             Dict with 'success', 'error', and optionally 'extraction_result'
@@ -836,6 +884,9 @@ class KafkaWebScraperConsumer(Base):
                 'extracted_at': datetime.now().isoformat(),
                 'session_id': session_id,
                 'request_id': request_id,
+                'origin': origin,
+                'url_index': url_index,
+                'total_urls': total_urls,
                 'query_id': message_data.get('query_id', 'default'),
                 'extraction_method': 'youtube_transcript_api'
             }
@@ -1921,11 +1972,19 @@ class KafkaWebScraperConsumer(Base):
         try:
             request_id = extraction_result.get('request_id', 'unknown')
             session_id = extraction_result.get('session_id', 'unknown')
+            url_index = extraction_result.get('url_index', 0)
+
+            # Kafka message key: request_id:NNN for N-way partition distribution now that
+            # request_id is shared across all URLs of one request.
+            kafka_key = f"{request_id}:{url_index:03d}".encode('utf-8')
 
             # Prepare message
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
+                'origin': extraction_result.get('origin'),
+                'url_index': url_index,
+                'total_urls': extraction_result.get('total_urls', 1),
                 'extracted_content': {
                     'url': extraction_result.get('url'),
                     'text': extraction_result.get('text'),
@@ -1938,7 +1997,7 @@ class KafkaWebScraperConsumer(Base):
             query_id = extraction_result.get('query_id') or extraction_result.get('metadata', {}).get('query_id', 'default')
             message['query_id'] = query_id
 
-            # Pass through total_requests for aggregator
+            # Pass through total_requests for aggregator (backward compat)
             if 'total_requests' in extraction_result:
                 message['total_requests'] = extraction_result['total_requests']
 
@@ -1951,7 +2010,7 @@ class KafkaWebScraperConsumer(Base):
             # 1. Summarization topic - AI will generate high-quality summary
             self.producer.produce(
                 topic=self.summarise_document_topic,
-                key=request_id.encode('utf-8'),
+                key=kafka_key,
                 value=message_bytes,
                 callback=self._delivery_callback
             )
@@ -1959,7 +2018,7 @@ class KafkaWebScraperConsumer(Base):
             # 2. Direct chunking topic (kept for backwards compatibility)
             self.producer.produce(
                 topic=self.output_topic,
-                key=request_id.encode('utf-8'),
+                key=kafka_key,
                 value=message_bytes,
                 callback=self._delivery_callback
             )
@@ -1973,7 +2032,7 @@ class KafkaWebScraperConsumer(Base):
                 self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='success', duration=_pub_duration)
                 self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics: request_id={request_id}")
+            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics")
 
         except Exception as e:
             # instrumentation - messages_published_total
@@ -1985,7 +2044,10 @@ class KafkaWebScraperConsumer(Base):
 
     def _publish_failed_url_for_summary(self, url: str, original_url: str, title: str,
                                        context: List[str], error_msg: str,
-                                       session_id: str, request_id: str, query_id: str = 'default'):
+                                       session_id: str, request_id: str, query_id: str = 'default',
+                                       origin: Optional[str] = None,
+                                       url_index: int = 0,
+                                       total_urls: int = 1):
         """
         Publish failed URL to Kafka for LLM summary generation attempt.
 
@@ -2001,13 +2063,21 @@ class KafkaWebScraperConsumer(Base):
             session_id: Session identifier
             request_id: Request identifier
             query_id: The query identifier for multi-index support
+            origin: Opaque origin field from inbound message (pass-through)
+            url_index: Per-URL ordinal within the request (0-based)
+            total_urls: Total URLs in the request
         """
         try:
+            kafka_key = f"{request_id}:{url_index:03d}".encode('utf-8') if request_id else b'unknown'
+
             # Don't pass any extracted text - just the URL and metadata
             # Gemini will access the URL directly using web grounding
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
+                'origin': origin,
+                'url_index': url_index,
+                'total_urls': total_urls,
                 'extraction_failed': True,
                 'query_id': query_id,
                 'extracted_content': {
@@ -2033,7 +2103,7 @@ class KafkaWebScraperConsumer(Base):
             _pub_start = time.time()
             self.producer.produce(
                 topic=self.output_topic,
-                key=request_id.encode('utf-8'),
+                key=kafka_key,
                 value=message_bytes,
                 callback=self._delivery_callback
             )
@@ -2046,7 +2116,7 @@ class KafkaWebScraperConsumer(Base):
             if self.telemetry_enabled:
                 self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"📤 Published failed URL for summary attempt: request_id={request_id}")
+            self._logger.info("📤 Published failed URL for summary attempt")
 
         except Exception as e:
             # instrumentation - messages_published_total

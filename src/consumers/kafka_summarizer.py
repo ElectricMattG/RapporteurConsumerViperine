@@ -39,6 +39,8 @@ from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
+
 # Telemetry imports with fallback
 try:
     from src.monitoring import (KafkaMetricsWrapper, MetricsServer,
@@ -101,7 +103,7 @@ class KafkaSummarizerConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"summarizer_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )
@@ -240,8 +242,9 @@ class KafkaSummarizerConsumer(Base):
             self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'viperine.summary-completed'
             self.dead_letter_topic = self._app_config.get('summarizer.dead_letter_topic') or 'viperine.dead-letter-queue'
 
-            # Session state tracking for summary indexer
-            self.session_counts = {}  # {session_id: {count: int, total: int}}
+            # Per-request aggregation counter — keyed on request_id (the per-query UUID),
+            # NOT session_id (the chat-tab UUID shared across many requests).
+            self.request_counts = {}  # {request_id: {count: int, total: int}}
 
             # Cache configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
@@ -303,6 +306,10 @@ class KafkaSummarizerConsumer(Base):
         """
         session_id = message_data.get('session_id', 'unknown')
         request_id = message_data.get('request_id', f"req_{datetime.now().strftime('%Y%m%d_%H%M%S')}")
+        _tokens = bind_correlation_ids(session_id, request_id)
+        origin = message_data.get('origin')       # opaque pass-through; diagnostic only
+        url_index = message_data.get('url_index', 0)
+        total_urls = message_data.get('total_urls', message_data.get('total_requests', 1))
         query_id = message_data.get('query_id', 'default')  # Read query_id for propagation
         extracted_content = message_data.get('extracted_content', {})
 
@@ -540,6 +547,9 @@ class KafkaSummarizerConsumer(Base):
             await self._publish_summary_completed(
                 request_id=request_id,
                 session_id=session_id,
+                origin=origin,
+                url_index=url_index,
+                total_urls=total_urls,
                 document_id=None,
                 source_url=url,
                 summary_file=summary_file_path,
@@ -552,6 +562,9 @@ class KafkaSummarizerConsumer(Base):
                 await self._publish_summary_for_chunking(
                     request_id=request_id,
                     session_id=session_id,
+                    origin=origin,
+                    url_index=url_index,
+                    total_urls=total_urls,
                     url=url,
                     summary_text=summary_result.get('markdown_summary', ''),
                     metadata=metadata,
@@ -565,6 +578,9 @@ class KafkaSummarizerConsumer(Base):
             await self._publish_summary_completed(
                 request_id=request_id,
                 session_id=session_id,
+                origin=origin,
+                url_index=url_index,
+                total_urls=total_urls,
                 document_id=None,
                 source_url=url,
                 summary_file=None,
@@ -575,6 +591,7 @@ class KafkaSummarizerConsumer(Base):
                 stage='summarizer',
                 session_id=session_id,
                 request_id=request_id,
+                origin=origin,
                 query_id=query_id,
                 url=url,
                 exc=_last_exc,
@@ -582,6 +599,7 @@ class KafkaSummarizerConsumer(Base):
                 attempts=_attempt,
             )
 
+        reset_correlation_ids(_tokens)
         self._logger.info("=" * 80)
         return result
 
@@ -594,7 +612,10 @@ class KafkaSummarizerConsumer(Base):
         metadata: Dict,
         title: str,
         summary_metadata: Dict,
-        language: str = 'en'
+        language: str = 'en',
+        origin: str | None = None,
+        url_index: int = 0,
+        total_urls: int = 1,
     ):
         """
         Publish summary content to content-extracted topic for chunking.
@@ -648,6 +669,9 @@ class KafkaSummarizerConsumer(Base):
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
+                'origin': origin,
+                'url_index': url_index,
+                'total_urls': total_urls,
                 'extracted_content': {
                     'url': url,
                     'text': summary_text,  # Use summary text for chunking
@@ -708,6 +732,9 @@ class KafkaSummarizerConsumer(Base):
         summary_file: str | None,
         message_data: Dict,
         status: str = 'success',
+        origin: str | None = None,
+        url_index: int = 0,
+        total_urls: int = 1,
     ):
         """
         Publish summary-completed message for Summary Indexer.
@@ -716,24 +743,29 @@ class KafkaSummarizerConsumer(Base):
         indexer session count can always reach its total and aggregate.
 
         Args:
-            request_id:   Request identifier
-            session_id:   Session identifier
+            request_id:   Request identifier (per-query UUID — aggregation key)
+            session_id:   Session identifier (chat-tab UUID — opaque pass-through)
             document_id:  Ignored (generated here from source_url + timestamp)
             source_url:   Source URL
             summary_file: Path to saved summary file, or None on hard failure
-            message_data: Original message data (to extract total_requests)
+            message_data: Original message data (to extract total_urls fallback)
             status:       'success' | 'degraded' | 'failed'
+            origin:       Opaque origin field from inbound message (pass-through)
+            url_index:    Per-URL ordinal within the request (0-based)
+            total_urls:   Total URLs in the request
         """
         try:
-            # Get or initialize session count
-            if session_id not in self.session_counts:
-                total_requests = message_data.get('total_requests', 1)
-                self.session_counts[session_id] = {'count': 0, 'total': total_requests}
+            # Per-request aggregation — keyed on request_id, not session_id.
+            # A chat session (session_id) may contain many requests; conflating
+            # them would mix counts from different queries into one indexer bucket.
+            if request_id not in self.request_counts:
+                total = total_urls or message_data.get('total_urls') or message_data.get('total_requests', 1)
+                self.request_counts[request_id] = {'count': 0, 'total': total}
 
             # Increment count
-            self.session_counts[session_id]['count'] += 1
-            current_count = self.session_counts[session_id]['count']
-            total_requests = self.session_counts[session_id]['total']
+            self.request_counts[request_id]['count'] += 1
+            current_count = self.request_counts[request_id]['count']
+            total_requests = self.request_counts[request_id]['total']
 
             # Build timestamp-based document_id unique per research event.
             # dedup_key (md5 of normalized URL) is the deduplication handle;
@@ -748,6 +780,9 @@ class KafkaSummarizerConsumer(Base):
             message = {
                 'request_id': request_id,
                 'session_id': session_id,
+                'origin': origin,
+                'url_index': url_index,
+                'total_urls': total_urls,
                 'document_id': new_document_id,
                 'dedup_key': dedup_key,
                 'source_url': source_url,
@@ -758,11 +793,13 @@ class KafkaSummarizerConsumer(Base):
                 'completed_at': datetime.now(timezone.utc).isoformat(),
             }
 
-            # Publish to summary-completed topic
+            # Publish to summary-completed topic.
+            # Key on request_id (per-query) for partition uniqueness — a single
+            # chat session could otherwise hotspot all its URLs to one partition.
             _pub_start = time.time()
             self.producer.produce(
                 topic=self.summary_completed_topic,
-                key=session_id.encode('utf-8'),
+                key=request_id.encode('utf-8'),
                 value=json.dumps(message).encode('utf-8'),
                 callback=self._delivery_callback
             )
@@ -808,6 +845,7 @@ class KafkaSummarizerConsumer(Base):
         classification,  # FailureClassification
         attempts: int,
         first_attempt_at: str | None = None,
+        origin: str | None = None,
     ):
         """Publish a failure record to the dead-letter-queue topic."""
         try:
@@ -817,6 +855,7 @@ class KafkaSummarizerConsumer(Base):
                 'category': classification.category if classification else 'unknown',
                 'session_id': session_id,
                 'request_id': request_id,
+                'origin': origin,
                 'query_id': query_id,
                 'url': url,
                 'error_class': type(exc).__name__,
@@ -831,7 +870,7 @@ class KafkaSummarizerConsumer(Base):
             _pub_start = time.time()
             self.producer.produce(
                 topic=self.dead_letter_topic,
-                key=session_id.encode('utf-8'),
+                key=request_id.encode('utf-8') if request_id else session_id.encode('utf-8'),
                 value=json.dumps(record).encode('utf-8'),
                 callback=self._delivery_callback,
             )

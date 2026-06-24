@@ -49,7 +49,7 @@ from dotenv import load_dotenv
 # Load environment variables from .env file
 load_dotenv()
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 from azure.storage.blob import BlobServiceClient, ContentSettings
 from confluent_kafka import Consumer, KafkaError, KafkaException
@@ -77,6 +77,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from config_handler import Base
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 from utils.index_adapter import transform_qa_index_to_chunks
 
 
@@ -103,7 +104,7 @@ class KafkaIndexAggregatorConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"index_aggregator_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )
@@ -221,6 +222,10 @@ class KafkaIndexAggregatorConsumer(Base):
         self.session_last_activity: Dict[str, float] = {}
         self.session_total_requests: Dict[str, int] = {}  # Expected total requests per session
         self.session_query_id: Dict[str, str] = {}  # Track query_id per session for index naming
+        # Correlation pass-through — stored until upload so any future notification can replay them.
+        # session_origins keyed on session_id; overwritten on each signal (idempotent).
+        self.session_origins: Dict[str, Optional[str]] = {}         # wire origin field
+        self.session_browser_session_ids: Dict[str, Optional[str]] = {}  # session_id for origin="frontend" only
 
         # Pipeline completion tracking - all three must complete before aggregation
         self.session_chunks_complete: Dict[str, bool] = defaultdict(bool)
@@ -483,11 +488,18 @@ class KafkaIndexAggregatorConsumer(Base):
 
             session_id = message_data.get('session_id', 'unknown')
             request_id = message_data.get('request_id', 'unknown')
+            _tokens = bind_correlation_ids(session_id, request_id)
+            origin = message_data.get('origin')
             index_type = message_data.get('index_type')  # NEW: 'summaries' or None (for chunks/QA)
             signal = message_data.get('signal')  # Session complete signal from test script
 
             # Update last activity timestamp
             self.session_last_activity[session_id] = time.time()
+
+            # Store correlation fields — keyed on session_id so any aggregation path can read them
+            self.session_origins[session_id] = origin
+            if origin == 'frontend':
+                self.session_browser_session_ids[session_id] = session_id
 
             # Ignore session-complete signals from test scripts (these don't have data, just signals)
             if signal == 'session_complete':
@@ -668,6 +680,10 @@ class KafkaIndexAggregatorConsumer(Base):
                 self.metrics.increment_failures(self.input_topic, ErrorCategory.UNKNOWN)
             import traceback
             traceback.print_exc()
+        finally:
+            # Reset only if bind succeeded (i.e. JSON decode didn't raise before the bind call)
+            if '_tokens' in dir():
+                reset_correlation_ids(_tokens)
 
     def _check_and_aggregate_if_ready(self, session_id: str):
         """Check if all three pipelines are complete, then aggregate and upload.

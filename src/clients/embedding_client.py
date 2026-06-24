@@ -14,6 +14,8 @@ from typing import List, Optional, Tuple, Union
 import httpx
 import numpy as np
 
+from utils.correlation import get_request_id, get_session_id
+
 # Import base configuration and logging
 try:
     # Try relative import first (when used as a package)
@@ -147,6 +149,16 @@ class EmbeddingServiceClient(Base):
         headers = {}
         if self.api_key:
             headers['X-API-Key'] = self.api_key
+
+        # Propagate correlation IDs from the current async context.
+        # Sentinel "-" means unbound — omit entirely so the embedding service
+        # never sees "X-Session-Id: -". No X-Origin: parity with RAG 0.2.0.
+        _sid = get_session_id()
+        _rid = get_request_id()
+        if _sid and _sid != "-":
+            headers['X-Session-Id'] = _sid
+        if _rid and _rid != "-":
+            headers['X-Request-Id'] = _rid
 
         for attempt in range(self.max_retries):
             try:

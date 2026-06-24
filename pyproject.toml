@@ -10,8 +10,11 @@ env_files = ["tests/.env"]
 python_files = ["test_*.py", "*_tests.py"]
 testpaths = ["tests"]
 timeout = 30
-pythonpath = ["src", "src/consumers", "src/utils"]
+pythonpath = [".", "src", "src/clients", "src/consumers", "src/utils"]
 addopts = ["--tb=short"]
+markers = [
+    "regression: story-mandated invariant tests (run with: pytest -m regression)",
+]
 filterwarnings = [
     "ignore::DeprecationWarning:pythonjsonlogger.*",
 ]

@@ -50,7 +50,7 @@ COPY version .
 
 # Make sure scripts are in PATH
 ENV PATH=/root/.local/bin:$PATH
-ENV PYTHONPATH=/app
+ENV PYTHONPATH=/app:/app/src
 
 # Install Playwright browsers (|| true allows build to continue if optional fonts fail)
 RUN playwright install chromium && \

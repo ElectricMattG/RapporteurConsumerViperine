@@ -1,7 +1,7 @@
 image:
   registry: 192.168.1.3:5000
   repository: rapporteur-consumer-viperine
-  tag: 0.0.1
+  tag: 0.2.0
   pullPolicy: Always
 
 # No imagePullSecrets — local insecure registry needs no auth

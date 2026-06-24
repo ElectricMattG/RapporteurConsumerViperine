@@ -22,6 +22,11 @@ import pytest
 
 pytestmark = pytest.mark.anyio
 
+# ── UUID fixtures (Phase 2 — replaces legacy query_* strings) ─────────────────
+
+_SESSION_UUID = "11111111-1111-4111-8111-111111111111"
+_REQUEST_UUID = "22222222-2222-4222-8222-222222222222"
+
 
 # ── Factory ────────────────────────────────────────────────────────────────────
 
@@ -33,7 +38,7 @@ def _make_summarizer(mock_producer):
     inst.producer = mock_producer
     inst.summary_completed_topic = "viperine.summary-completed"
     inst.dead_letter_topic = "viperine.dead-letter-queue"
-    inst.session_counts = {}
+    inst.request_counts = {}  # Phase 2: keyed on request_id
     inst.telemetry_enabled = False
     inst._logger = logging.getLogger("test.summarizer")
     inst.model_name = "test-model"
@@ -48,8 +53,8 @@ class TestPayloadSchema:
     async def test_required_fields_present(self, mock_producer):
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_abc",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/page",
             summary_file="/tmp/summary.jsonl",
@@ -62,7 +67,7 @@ class TestPayloadSchema:
         value_bytes = call_kwargs[1]["value"] if call_kwargs[1] else call_kwargs[0][1]
         msg = json.loads(value_bytes)
 
-        for field in ("request_id", "session_id", "document_id", "dedup_key",
+        for field in ("request_id", "session_id", "origin", "document_id", "dedup_key",
                       "source_url", "summary_file", "status",
                       "current_count", "total_requests", "completed_at"):
             assert field in msg, f"Missing field: {field}"
@@ -70,8 +75,8 @@ class TestPayloadSchema:
     async def test_document_id_format_req_prefix(self, mock_producer):
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_abc",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/page",
             summary_file="/tmp/summary.jsonl",
@@ -86,8 +91,8 @@ class TestPayloadSchema:
         import re
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_abc",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/page",
             summary_file="/tmp/summary.jsonl",
@@ -102,12 +107,14 @@ class TestPayloadSchema:
 
     async def test_status_field_propagated(self, mock_producer):
         s = _make_summarizer(mock_producer)
-        for status in ("success", "degraded", "failed"):
+        for i, status in enumerate(("success", "degraded", "failed")):
             mock_producer.produced.clear()
             mock_producer.produce.reset_mock()
+            # Each call uses a distinct request_id to avoid shared counter state
+            req_id = f"33333333-3333-4333-8333-{i:012d}"
             await s._publish_summary_completed(
-                request_id="req_001",
-                session_id=f"query_{status}",
+                request_id=req_id,
+                session_id=_SESSION_UUID,
                 document_id=None,
                 source_url="https://example.com/s",
                 summary_file=None,
@@ -127,8 +134,8 @@ class TestTerminalEvent:
     async def test_called_once_for_success(self, mock_producer):
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_te1",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/te",
             summary_file="/tmp/ok.jsonl",
@@ -140,8 +147,8 @@ class TestTerminalEvent:
     async def test_called_once_for_degraded(self, mock_producer):
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_te2",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/te",
             summary_file="/tmp/deg.jsonl",
@@ -153,8 +160,8 @@ class TestTerminalEvent:
     async def test_called_once_for_failed(self, mock_producer):
         s = _make_summarizer(mock_producer)
         await s._publish_summary_completed(
-            request_id="req_001",
-            session_id="query_te3",
+            request_id=_REQUEST_UUID,
+            session_id=_SESSION_UUID,
             document_id=None,
             source_url="https://example.com/te",
             summary_file=None,
@@ -163,20 +170,21 @@ class TestTerminalEvent:
         )
         assert mock_producer.produce.call_count == 1
 
-    async def test_session_count_increments(self, mock_producer):
+    async def test_request_count_increments(self, mock_producer):
+        """Per-request counter must be keyed on request_id, not session_id."""
         s = _make_summarizer(mock_producer)
-        session_id = "query_count1"
         for i in range(3):
+            # Same request_id — simulates 3 URLs from one request completing sequentially
             await s._publish_summary_completed(
-                request_id=f"req_{i:03d}",
-                session_id=session_id,
+                request_id=_REQUEST_UUID,
+                session_id=_SESSION_UUID,
                 document_id=None,
                 source_url=f"https://example.com/page{i}",
                 summary_file="/tmp/f.jsonl",
                 message_data={"total_requests": 5},
                 status="success",
             )
-        assert s.session_counts[session_id]["count"] == 3
+        assert s.request_counts[_REQUEST_UUID]["count"] == 3
 
 
 # ── TestDlqPublish ────────────────────────────────────────────────────────────
@@ -192,9 +200,9 @@ class TestDlqPublish:
 
         await s._publish_to_dlq(
             stage="summarizer",
-            session_id="query_dlq1",
-            request_id="req_dlq001",
-            query_id="query_dlq1",
+            session_id=_SESSION_UUID,
+            request_id=_REQUEST_UUID,
+            query_id="default",
             url="https://example.com/fail",
             exc=exc,
             classification=cl,
@@ -213,9 +221,9 @@ class TestDlqPublish:
 
         await s._publish_to_dlq(
             stage="summarizer",
-            session_id="query_dlq2",
-            request_id="req_dlq002",
-            query_id="query_dlq2",
+            session_id=_SESSION_UUID,
+            request_id=_REQUEST_UUID,
+            query_id="default",
             url="https://example.com/timeout",
             exc=exc,
             classification=cl,
@@ -225,7 +233,7 @@ class TestDlqPublish:
         value_bytes = mock_producer.produce.call_args[1]["value"]
         record = json.loads(value_bytes)
 
-        for field in ("stage", "category", "session_id", "request_id",
+        for field in ("stage", "category", "session_id", "request_id", "origin",
                       "url", "error_class", "error_message",
                       "occurred_at", "attempts", "retryable"):
             assert field in record, f"DLQ schema missing field: {field}"
@@ -238,9 +246,9 @@ class TestDlqPublish:
 
         await s._publish_to_dlq(
             stage="summarizer",
-            session_id="query_dlq3",
-            request_id="req_dlq003",
-            query_id="query_dlq3",
+            session_id=_SESSION_UUID,
+            request_id=_REQUEST_UUID,
+            query_id="default",
             url="https://example.com/bad",
             exc=exc,
             classification=cl,
@@ -260,9 +268,9 @@ class TestDlqPublish:
 
         await s._publish_to_dlq(
             stage="summarizer",
-            session_id="query_dlq4",
-            request_id="req_dlq004",
-            query_id="query_dlq4",
+            session_id=_SESSION_UUID,
+            request_id=_REQUEST_UUID,
+            query_id="default",
             url="https://example.com/g",
             exc=exc,
             classification=cl,
