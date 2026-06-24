@@ -198,6 +198,38 @@ class TestSummaryIndexerForwardsCorrelationToEmbed:
         assert "x-session-id" not in captured[0].headers
         assert captured[0].headers.get("x-request-id") == _REQUEST_UUID
 
+    async def test_process_message_with_missing_request_id_returns_none_no_embed(
+        self, make_indexer, tmp_path
+    ):
+        """Missing request_id → early return with descriptive log, no crash,
+        no embedding call.  Guards the fix for BUG_INDEXER_NULL_REQUEST_ID."""
+        captured: List[httpx.Request] = []
+        client = _make_real_embedding_client(captured)
+        idx = make_indexer(embedding_client=client)
+
+        summary_file = _write_summary_file(tmp_path, _SESSION_UUID, "no_request")
+        msg = _build_message(_SESSION_UUID, None, summary_file)
+
+        result = await idx._process_message(msg)
+
+        assert result is None
+        assert len(captured) == 0, "No embedding call must be made when request_id is absent"
+
+    async def test_process_message_with_both_ids_missing_returns_none_no_embed(
+        self, make_indexer, tmp_path
+    ):
+        """Both IDs missing → same early-return path; no TypeError."""
+        captured: List[httpx.Request] = []
+        client = _make_real_embedding_client(captured)
+        idx = make_indexer(embedding_client=client)
+
+        msg = _build_message(None, None, "/nonexistent/summary.json")
+
+        result = await idx._process_message(msg)
+
+        assert result is None
+        assert len(captured) == 0
+
 
 # ── TestProcessMessageResetsContextVar ───────────────────────────────────────
 

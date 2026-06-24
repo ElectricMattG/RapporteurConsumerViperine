@@ -362,6 +362,11 @@ class KafkaSummaryIndexerConsumer(Base):
 
     def _get_request_dir(self, request_id: str) -> Path:
         """Get directory for per-request files (state, session index JSONL)."""
+        if not request_id:
+            raise ValueError(
+                f"_get_request_dir called with request_id={request_id!r}; "
+                "request_id must be a non-empty string."
+            )
         request_dir = self.cache_dir / request_id
         request_dir.mkdir(parents=True, exist_ok=True)
         return request_dir
@@ -793,6 +798,17 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info(f"   Status: {status}")
             self._logger.info(f"   Progress: {url_index + 1}/{total_urls}")
             self._logger.info(f"   Summary file: {summary_file}")
+
+            # Guard: request_id is the primary key for all on-disk state.
+            # A missing request_id cannot be processed; log a clear, actionable
+            # error rather than crashing with a cryptic TypeError inside pathlib.
+            if not request_id:
+                self._logger.error(
+                    f"\u274c Received message without request_id — cannot process "
+                    f"(session_id={session_id!r}, document_id={document_id!r}). "
+                    f"Message will be dropped. Investigate the upstream producer."
+                )
+                return None
 
             # Load per-request state (keyed on request_id, not session_id)
             state = self._load_request_state(request_id)
