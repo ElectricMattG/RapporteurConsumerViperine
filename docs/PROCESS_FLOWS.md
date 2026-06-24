@@ -301,7 +301,7 @@ sequenceDiagram
     SI->>FS: Release lock
 
     SI->>K: reload-index\n{action, new_summaries, total_summaries, index_file}
-    SI->>K: viperine.frontend-message\n{type, session_id, new_summaries_count, total_summaries_count}
+    SI->>K: viperine.frontend-message\n{type, session_id, request_id, origin, new_summaries_count, total_summaries_count}
 
     alt Session complete (received_count >= total_requests)
         SI->>K: viperine.session-complete\n{session_id, summary_index_file, total_summaries, index_type}
@@ -573,3 +573,25 @@ sequenceDiagram
 The folder-switch thread and the main poll thread share `self.combined_index_file`. Python's GIL makes the `self.combined_index_file = new_path` assignment atomic, so there is no window where the main thread reads a partially-updated path.
 
 The `fcntl.LOCK_EX` call in `_aggregate_session_into_combined()` always resolves symlinks to the real file before acquiring the lock, so the lock file correctly sibling-targets the new index file after a switch.
+
+---
+
+## Correlation ID propagation
+
+**Story:** [Phase_Plan_Story_VIPERINE_SESSION_IDs.md](Phase_Plan_Story_VIPERINE_SESSION_IDs.md)
+
+Every Kafka message in the Viperine pipeline carries three correlation fields as top-level payload keys:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `session_id` | UUIDv4 string | Chat-tab identifier — opaque pass-through; the BFF uses this to route SSE events to the correct browser bucket. |
+| `request_id` | UUIDv4 string | Per-query identifier — Viperine's internal aggregation key. All N per-URL messages for a single analyst query share the same `request_id`. |
+| `origin` | string (`"frontend"` or `"direct"`) | Diagnostic field set by the RAG resolver. Pass-through only; never used for routing inside Viperine. |
+
+**Two-name discipline:** `session_id` is the chat-tab UUID (shared across many requests); `request_id` is the per-query UUID (Viperine's aggregation unit). Viperine's internal state (`request_states`, on-disk `cache/summaries/<request_id>/`) is keyed on `request_id`. The wire `session_id` remains opaque.
+
+**Outbound HTTP propagation:** `KafkaSummaryIndexerConsumer` forwards `X-Session-Id` and `X-Request-Id` HTTP headers to the embedding service on every `POST /embeddings` call. `origin` is diagnostic-only and does **not** travel as an HTTP header (mirrors RAG 0.2.0 contract).
+
+**Logging convention:** Every consumer installs `install_correlation_record_factory()` at startup, which stamps every `logging.LogRecord` with `session_id` and `request_id` attributes from the active ContextVar. JSON log lines carry these as structured fields; text log lines use the canonical prefix `session_id=… request_id=… `.
+
+**Cardinality invariant:** `session_id`, `request_id`, and `origin` are **never** Prometheus metric label values. They live in logs only. The regression suite (`pytest -m regression`) enforces this boundary.
