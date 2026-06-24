@@ -249,7 +249,7 @@ azure_login: ## Login to Azure
 # ──────────────────────────────────────────────────────────────────────────────
 REGISTRY      ?= 192.168.1.3:5000
 K8S_IMAGE     ?= rapporteur-consumer-viperine
-K8S_VERSION   ?= 0.0.1
+K8S_VERSION   ?= 0.2.0
 K8S_NS        ?= consumers
 HELM_CHART    ?= ./helm/rapporteur-consumer-group
 RELEASE_NAME  ?= viperine
@@ -354,7 +354,8 @@ k8s_install: ## Helm install/upgrade $(RELEASE_NAME) into namespace $(K8S_NS)
 
 
 .PHONY: k8s_rollout
-k8s_rollout: ## Nvidia-safe rollout: scale→0, purge stuck pods, helm upgrade (workaround for k3s/containerd nvidia-runtime)
+k8s_rollout: ## Nvidia-safe rollout: force-clean, scale→0, purge stuck pods, helm upgrade
+	$(MAKE) k8s_force_clean
 	@echo "$(YELLOW)$(BOLD)[1/3] Scaling down all $(RELEASE_NAME) deployments to 0...$(RESET)"
 	@kubectl -n $(K8S_NS) scale deploy -l consumer-group=$(RELEASE_NAME) --replicas=0
 	@echo "Waiting 15s for graceful shutdown..."
@@ -376,7 +377,29 @@ k8s_rollout: ## Nvidia-safe rollout: scale→0, purge stuck pods, helm upgrade (
 
 
 .PHONY: k8s_deploy
-k8s_deploy: k8s_build k8s_push k8s_rollout k8s_status ## Full release pipeline: build → push → safe-rollout → status
+k8s_deploy: ## Full release pipeline: force-clean → build → push → rollout → ghost-clean loop → status
+	@# Pre-deploy: kill any pre-existing ghosts so the build slot is clean
+	$(MAKE) k8s_force_clean
+	$(MAKE) k8s_build K8S_VERSION=$(K8S_VERSION)
+	$(MAKE) k8s_push K8S_VERSION=$(K8S_VERSION)
+	@# k8s_rollout does scale→0 + force-delete + helm upgrade
+	$(MAKE) k8s_rollout K8S_VERSION=$(K8S_VERSION)
+	@# Ghost-clean loop: poll each deployment's rollout every 15 s;
+	@# run force_clean each time it stalls to kill any ghost that appears
+	@# during the 5-way concurrent rolling update.
+	@echo "$(YELLOW)Post-rollout: ghost-clean loop — polling rollouts (max 10 × 15 s)...$(RESET)"
+	@for i in 1 2 3 4 5 6 7 8 9 10; do \
+	  ALL_READY=1; \
+	  for d in $$(kubectl -n $(K8S_NS) get deploy -l consumer-group=$(RELEASE_NAME) -o name); do \
+	    kubectl -n $(K8S_NS) rollout status $$d --timeout=15s >/dev/null 2>&1 || ALL_READY=0; \
+	  done; \
+	  if [ "$$ALL_READY" = 1 ]; then \
+	    echo "$(GREEN)All $(RELEASE_NAME) deployments ready (loop iteration $$i).$(RESET)"; break; \
+	  fi; \
+	  echo "$(YELLOW)Rollout still in progress — running force_clean (attempt $$i)...$(RESET)"; \
+	  $(MAKE) --no-print-directory k8s_force_clean; \
+	done
+	$(MAKE) k8s_status
 
 
 .PHONY: k8s_status
@@ -426,6 +449,75 @@ k8s_uninstall: ## Uninstall the helm release (leaves namespace and secrets intac
 	@helm uninstall $(RELEASE_NAME) -n $(K8S_NS) || true
 	@echo "$(GREEN)Done. Namespace $(K8S_NS) and secrets preserved.$(RESET)"
 	@echo "To delete the namespace: kubectl delete ns $(K8S_NS)"
+
+
+.PHONY: k8s_cache_purge
+k8s_cache_purge: ## DESTRUCTIVE — wipe per-session cache dirs stranded by the session_id → request_id rekey
+	@echo "$(YELLOW)$(BOLD)Purging legacy per-session cache dirs on the hostPath PV...$(RESET)"
+	@sudo rm -rf /mnt/workspace_2/$(RELEASE_NAME)-cache/summaries/query_*
+	@sudo rm -rf /mnt/workspace_2/$(RELEASE_NAME)-cache/web_scrapes/req_*
+	@echo "$(GREEN)$(BOLD)Cache purged. Safe to deploy 0.2.0.$(RESET)"
+
+
+.PHONY: k8s_force_clean
+k8s_force_clean: ## Safely clear nvidia-runtime ghosts: force-delete Terminating pods + kill ONLY orphaned consumer procs
+	@echo "$(YELLOW)Step 1/3 — force-deleting Terminating pods in $(K8S_NS) (consumer-group=$(RELEASE_NAME))...$(RESET)"
+	@TERM_PODS=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) --no-headers 2>/dev/null \
+	  | awk '/Terminating/{print $$1}'); \
+	  if [ -n "$$TERM_PODS" ]; then \
+	    echo "$$TERM_PODS" | xargs kubectl -n $(K8S_NS) delete pod --force --grace-period=0; \
+	    echo "$(GREEN)Terminating pods force-deleted.$(RESET)"; \
+	  else \
+	    echo "No Terminating pods found."; \
+	  fi
+	@echo "$(YELLOW)Step 2/3 — killing orphaned consumer processes (k8s is source of truth)...$(RESET)"
+	@K8S_CIDS=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) \
+	    -o jsonpath='{.items[*].status.containerStatuses[*].containerID}' 2>/dev/null \
+	    | tr ' ' '\n' | sed 's|containerd://||g' | grep -v '^$$'); \
+	  FOUND=0; \
+	  for pid in $$(pgrep -f '[p]ython.*src/consumers/kafka_' 2>/dev/null); do \
+	    cid=$$(sudo grep -oE '[0-9a-f]{64}' /proc/$$pid/cgroup 2>/dev/null | head -1); \
+	    if [ -n "$$cid" ] && echo "$$K8S_CIDS" | grep -q "$$cid"; then \
+	      echo "  preserve live pid $$pid (container $$(echo $$cid | cut -c1-12) in k8s Running pod)"; \
+	    else \
+	      echo "  kill ghost  pid $$pid (not in any k8s pod — nvidia-runtime ghost)"; \
+	      sudo kill -9 $$pid 2>/dev/null || true; FOUND=1; \
+	    fi; \
+	  done; \
+	  [ "$$FOUND" = 1 ] && echo "$(GREEN)Ghost consumer processes killed.$(RESET)" || echo "No ghost consumer processes found."
+	@echo "$(YELLOW)Step 3/4 — killing ghost containerd containers (Running but not in any k8s pod)...$(RESET)"
+	@K8S_CIDS_SHORT=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) \
+	    -o jsonpath='{.items[*].status.containerStatuses[*].containerID}' 2>/dev/null \
+	    | tr ' ' '\n' | sed 's|containerd://||g' | cut -c1-12 | grep -v '^$$'); \
+	  FOUND=0; \
+	  for full_cid in $$(sudo crictl ps --no-trunc 2>/dev/null | grep $(RELEASE_NAME) | awk '{print $$1}'); do \
+	    short=$$(echo "$$full_cid" | cut -c1-12); \
+	    if echo "$$K8S_CIDS_SHORT" | grep -q "$$short"; then \
+	      echo "  preserve $$short (tracked by k8s)"; \
+	    else \
+	      echo "  killing ghost container $$short — cgroup-kill all pids + force-rm..."; \
+	      for pid in $$(sudo grep -rl "$$full_cid" /proc/*/cgroup 2>/dev/null | sed 's|/proc/||;s|/cgroup||'); do \
+	        echo "    kill -9 pid $$pid"; \
+	        sudo kill -9 "$$pid" 2>/dev/null || true; \
+	      done; \
+	      sudo crictl rm -f "$$full_cid" 2>/dev/null || true; \
+	      FOUND=1; \
+	    fi; \
+	  done; \
+	  [ "$$FOUND" = 1 ] && echo "$(GREEN)Ghost containers killed and removed.$(RESET)" || echo "No ghost containers found."
+	@echo "$(YELLOW)Step 4/4 — containerd state for $(RELEASE_NAME):$(RESET)"
+	@sudo crictl ps 2>/dev/null | grep $(RELEASE_NAME) || echo "No running $(RELEASE_NAME) containers in containerd."
+	@echo "$(GREEN)k8s_force_clean complete.$(RESET)"
+
+
+.PHONY: k8s_recover
+k8s_recover: k8s_force_clean ## Nvidia-runtime workaround: clear ghosts, wait for Running pods, then tail logs
+	@echo "$(YELLOW)Waiting for $(RELEASE_NAME) deployments to report Running pods...$(RESET)"
+	@for d in $$(kubectl -n $(K8S_NS) get deploy -l consumer-group=$(RELEASE_NAME) -o name); do \
+	  kubectl -n $(K8S_NS) rollout status $$d --timeout=120s || true; \
+	done
+	@echo "$(GREEN)$(RELEASE_NAME) recovered. Tailing logs:$(RESET)"
+	@$(MAKE) --no-print-directory k8s_logs
 
 
 # ──────────────────────────────────────────────────────────────────────────────

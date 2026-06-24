@@ -77,9 +77,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
 
 from config_handler import Base
-from utils.correlation import (bind_correlation_ids,
-                               install_correlation_record_factory,
-                               reset_correlation_ids)
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 from utils.index_adapter import transform_qa_index_to_chunks
 
 
@@ -98,7 +96,6 @@ class KafkaIndexAggregatorConsumer(Base):
 
     def __init__(self):
         """Initialize the index aggregator consumer."""
-        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaIndexAggregatorConsumer")
 
@@ -107,7 +104,7 @@ class KafkaIndexAggregatorConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"index_aggregator_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )

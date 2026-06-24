@@ -24,7 +24,9 @@ from pyconfs import Configuration
 # config dict (expand as needed)
 defaults = {
     "logging": {
-        "format": "| %(asctime)s | %(levelname)s - %(name)-10s - %(message)s",
+        # Include session_id / request_id stamped by install_correlation_record_factory().
+        # The values render as '-' when no correlation context is bound (startup / idle / background threads).
+        "format": "| %(asctime)s | %(levelname)s - %(name)-10s - session_id=%(session_id)s request_id=%(request_id)s - %(message)s",
         "level": 10,
         "output_full_path": "./logs/logfile.log",
     },
@@ -395,6 +397,16 @@ class CustConf(Configuration):
         Args:
             name: The name of the logger.
         """
+        # Install the correlation LogRecord factory BEFORE any handler is added.
+        # Without this the format string `session_id=%(session_id)s` would
+        # raise KeyError because LogRecords would not carry those attributes.
+        # The factory is idempotent — safe to call from every Base subclass.
+        try:
+            from utils.correlation import install_correlation_record_factory
+        except ImportError:  # pragma: no cover — fallback when running as src.*
+            from src.utils.correlation import \
+                install_correlation_record_factory
+        install_correlation_record_factory()
 
         root_logger = logging.getLogger(name)  # type: ignore[attr]
         root_logger.handlers = []

@@ -51,9 +51,7 @@ from bs4 import BeautifulSoup
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 from PyPDF2 import PdfReader
 
-from utils.correlation import (bind_correlation_ids,
-                               install_correlation_record_factory,
-                               reset_correlation_ids)
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 # Telemetry imports
 try:
@@ -123,7 +121,6 @@ class KafkaWebScraperConsumer(Base):
 
     def __init__(self):
         """Initialize the Kafka consumer"""
-        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaWebScraperConsumer")
 
@@ -151,7 +148,7 @@ class KafkaWebScraperConsumer(Base):
 
             # Configure structured logging
             configure_logging(
-                format='json',
+                format='text',
                 level=os.getenv('LOG_LEVEL', 'INFO'),
                 consumer_id=consumer_id
             )

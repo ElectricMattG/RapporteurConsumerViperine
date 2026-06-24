@@ -5,5 +5,5 @@ description: >
   shared `consumers` namespace. Multiple groups can coexist; all resources
   are prefixed with {{ .Release.Name }} to avoid collisions.
 type: application
-version: 0.1.0
-appVersion: "0.0.1"
+version: 0.2.0
+appVersion: "0.2.0"

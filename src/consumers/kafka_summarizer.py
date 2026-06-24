@@ -39,9 +39,7 @@ from typing import Any, Dict, Optional
 
 from confluent_kafka import Consumer, KafkaError, KafkaException, Producer
 
-from utils.correlation import (bind_correlation_ids,
-                               install_correlation_record_factory,
-                               reset_correlation_ids)
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 # Telemetry imports with fallback
 try:
@@ -87,7 +85,6 @@ class KafkaSummarizerConsumer(Base):
 
     def __init__(self):
         """Initialize the Kafka summarizer consumer"""
-        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaSummarizerConsumer")
 
@@ -106,7 +103,7 @@ class KafkaSummarizerConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"summarizer_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )

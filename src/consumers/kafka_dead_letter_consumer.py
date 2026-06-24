@@ -66,9 +66,7 @@ src_dir = Path(__file__).parent.parent
 sys.path.insert(0, str(src_dir))
 
 from config_handler import Base
-from utils.correlation import (bind_correlation_ids,
-                               install_correlation_record_factory,
-                               reset_correlation_ids)
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 
 class KafkaDeadLetterConsumer(Base):
@@ -76,7 +74,6 @@ class KafkaDeadLetterConsumer(Base):
 
     def __init__(self):
         """Initialize the dead letter queue consumer"""
-        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaDeadLetterConsumer")
 
@@ -85,7 +82,7 @@ class KafkaDeadLetterConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"dead_letter_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )

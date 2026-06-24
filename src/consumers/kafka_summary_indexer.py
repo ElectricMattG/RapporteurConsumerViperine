@@ -97,9 +97,7 @@ except ImportError:
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '../clients'))
 from embedding_client import EmbeddingServiceClient
 
-from utils.correlation import (bind_correlation_ids,
-                               install_correlation_record_factory,
-                               reset_correlation_ids)
+from utils.correlation import bind_correlation_ids, reset_correlation_ids
 
 # Sessions idle longer than this (seconds) are force-aggregated by the sweeper.
 SESSION_IDLE_TIMEOUT: int = int(os.getenv('SESSION_IDLE_TIMEOUT', '120'))
@@ -110,7 +108,6 @@ class KafkaSummaryIndexerConsumer(Base):
 
     def __init__(self):
         """Initialize the Kafka summary indexer consumer"""
-        install_correlation_record_factory()
         super().__init__()
         self._logger.info("Initializing KafkaSummaryIndexerConsumer")
 
@@ -122,7 +119,7 @@ class KafkaSummaryIndexerConsumer(Base):
         if self.telemetry_enabled:
             consumer_id = f"summary_indexer_{os.getpid()}"
             configure_logging(
-                format='json',
+                format='text',
                 level='INFO',
                 consumer_id=consumer_id
             )
