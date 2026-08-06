@@ -242,6 +242,46 @@ class KafkaSummarizerConsumer(Base):
             self.summary_completed_topic = self._app_config.get('summarizer.summary_completed_topic') or 'viperine.summary-completed'
             self.dead_letter_topic = self._app_config.get('summarizer.dead_letter_topic') or 'viperine.dead-letter-queue'
 
+            # 2026-08-01: DECISION HISTORY on extraction-failed + Gemini-fallback-
+            # summary-succeeded documents (do not re-litigate without re-reading this):
+            #   1. Originally: fan out the fallback summary to Gaboon for chunking/QA.
+            #   2. Reverted: flag as 'requires_mirror' DLQ instead - reasoning was that
+            #      an LLM web-grounded paraphrase lacks the exact facts/fine semantic
+            #      detail real scraped content has, so chunking it would silently
+            #      degrade Q&A quality.
+            #   3. FINAL DECISION: made this a CONFIG FLAG instead of picking one path
+            #      permanently - 'chunk' (default) fans the fallback summary out for
+            #      chunking/QA same as successful extraction (some facts beat zero
+            #      coverage, and many blocked sites are paywalled/account-gated
+            #      regardless, so mirroring wouldn't even get past THAT wall);
+            #      'mirror_log' instead publishes a 'requires_mirror' DLQ record so
+            #      recon can route these to manual site-mirroring. See
+            #      _publish_summary_for_chunking / _publish_requires_mirror_dlq.
+            self.fallback_extraction_strategy = (
+                self._app_config.get('summarizer.fallback_extraction_strategy') or 'chunk'
+            )
+            if self.fallback_extraction_strategy not in ('chunk', 'mirror_log'):
+                self._logger.warning(
+                    f"   ⚠️ Unknown summarizer.fallback_extraction_strategy "
+                    f"'{self.fallback_extraction_strategy}' - defaulting to 'chunk'"
+                )
+                self.fallback_extraction_strategy = 'chunk'
+
+            # Same config key + parsing pattern as kafka_web_scraper.py's
+            # additional_output_topics - only used by the 'chunk' strategy above.
+            additional_topics_raw = (
+                os.getenv('KAFKA_ADDITIONAL_OUTPUT_TOPICS')
+                or self._app_config.get('kafka.additional_output_topics')
+                or []
+            )
+            if isinstance(additional_topics_raw, str):
+                self.additional_output_topics = [t.strip() for t in additional_topics_raw.split(',') if t.strip()]
+            else:
+                self.additional_output_topics = list(additional_topics_raw)
+            if self.additional_output_topics:
+                self._logger.info(f"   Additional fan-out topics (fallback-for-chunking path): {self.additional_output_topics}")
+            self._logger.info(f"   Fallback extraction strategy: {self.fallback_extraction_strategy}")
+
             # Per-request aggregation counter — keyed on request_id (the per-query UUID),
             # NOT session_id (the chat-tab UUID shared across many requests).
             self.request_counts = {}  # {request_id: {count: int, total: int}}
@@ -317,6 +357,32 @@ class KafkaSummarizerConsumer(Base):
         text = extracted_content.get('text', '')
         metadata = extracted_content.get('metadata', {})
         extraction_failed = message_data.get('extraction_failed', False)  # Check if extraction failed
+
+        # ── Self-loop guard ──────────────────────────────────────────────────
+        # 2026-08-01: _publish_summary_for_chunking republishes fallback
+        # summaries onto viperine.content-extracted (so a Viperine-side chunker
+        # can pick them up in the full pipeline) - but in the slim pipeline that
+        # is ALSO this consumer's OWN input topic. Without this guard the
+        # summarizer re-consumes its own fallback summary as a fresh document
+        # and summarizes the summary: a wasted LLM call plus duplicate
+        # summary-completed events and duplicate index rows PER fallback doc
+        # (observed live as double-processing while tracing). The republished
+        # message is tagged content_source='gemini_summary' - skip it here.
+        if metadata.get('content_source') == 'gemini_summary':
+            self._logger.info(
+                f"⏭️  Skipping already-summarized fallback content for {url} "
+                "(content_source=gemini_summary - avoiding summary-of-summary self-loop)"
+            )
+            reset_correlation_ids(_tokens)
+            return {
+                'session_id': session_id,
+                'request_id': request_id,
+                'url': url,
+                'timestamp': datetime.now().isoformat(),
+                'success': True,
+                'skipped': 'already_summarized_fallback',
+                'error': None,
+            }
 
         # Ensure query_id is in metadata for downstream propagation
         if query_id and query_id != 'default':
@@ -556,22 +622,37 @@ class KafkaSummarizerConsumer(Base):
                 message_data=message_data,
                 status='degraded' if result.get('degraded') else 'success',
             )
-            # Publish for chunking if extraction originally failed
+            # Publish for chunking if extraction originally failed - strategy is
+            # config-driven (see self.fallback_extraction_strategy in __init__).
             if extraction_failed and summary_result:
-                self._logger.info("   🔄 Extraction failed but summary succeeded - publishing summary for chunking")
-                await self._publish_summary_for_chunking(
-                    request_id=request_id,
-                    session_id=session_id,
-                    origin=origin,
-                    url_index=url_index,
-                    total_urls=total_urls,
-                    url=url,
-                    summary_text=summary_result.get('markdown_summary', ''),
-                    metadata=metadata,
-                    title=metadata.get('title', 'Untitled'),
-                    summary_metadata=summary_result.get('metadata', {}),
-                    language=metadata.get('language') or 'en',
-                )
+                if self.fallback_extraction_strategy == 'mirror_log':
+                    self._logger.warning(
+                        "   🪞 Extraction failed; Gemini web-grounding summary succeeded but is "
+                        "low-fidelity (no real scraped content) - flagging as requires_mirror "
+                        "instead of chunking it into the Q&A pipeline"
+                    )
+                    await self._publish_requires_mirror_dlq(
+                        session_id=session_id,
+                        request_id=request_id,
+                        origin=origin,
+                        query_id=query_id,
+                        url=url,
+                    )
+                else:
+                    self._logger.info("   🔄 Extraction failed but summary succeeded - publishing summary for chunking")
+                    await self._publish_summary_for_chunking(
+                        request_id=request_id,
+                        session_id=session_id,
+                        origin=origin,
+                        url_index=url_index,
+                        total_urls=total_urls,
+                        url=url,
+                        summary_text=summary_result.get('markdown_summary', ''),
+                        metadata=metadata,
+                        title=metadata.get('title', 'Untitled'),
+                        summary_metadata=summary_result.get('metadata', {}),
+                        language=metadata.get('language') or 'en',
+                    )
         else:
             # Hard failure after all retries — publish failed terminal event
             result['error'] = str(_last_exc)
@@ -621,8 +702,11 @@ class KafkaSummarizerConsumer(Base):
         Publish summary content to content-extracted topic for chunking.
 
         This is used when extraction fails (403/404) but summary generation succeeds
-        via Gemini web grounding. By publishing the summary, we ensure it gets chunked
-        and embedded, providing 100% coverage even when direct scraping fails.
+        via Gemini web grounding, AND self.fallback_extraction_strategy == 'chunk'
+        (the default - see __init__ for the config flag and full decision history).
+        By publishing the summary, we ensure it gets chunked and embedded, providing
+        broader coverage even when direct scraping fails, at the cost of lower
+        fidelity (LLM-paraphrased content, not the real page text).
 
         Args:
             request_id: Request identifier
@@ -699,6 +783,18 @@ class KafkaSummarizerConsumer(Base):
                 callback=self._delivery_callback
             )
 
+            # 2026-08-01: fan out to Gaboon's chunker (and any other additional
+            # output topics) the SAME way web-scraper's successful-extraction path
+            # does - see additional_output_topics loading in __init__ for why this
+            # was missing and what it silently broke.
+            for extra_topic in self.additional_output_topics:
+                self.producer.produce(
+                    topic=extra_topic,
+                    key=request_id.encode('utf-8'),
+                    value=message_bytes,
+                    callback=self._delivery_callback
+                )
+
             # Flush to ensure delivery
             self.producer.poll(0)
             _pub_duration = time.time() - _pub_start
@@ -706,8 +802,11 @@ class KafkaSummarizerConsumer(Base):
             # instrumentation - messages_published_total
             if self.telemetry_enabled:
                 self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
+                for extra_topic in self.additional_output_topics:
+                    self.kafka_metrics.record_publish(topic=extra_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"   📤 Published summary to '{self.output_topic}' for chunking")
+            _all_topics = ', '.join([f"'{self.output_topic}'"] + [f"'{t}'" for t in self.additional_output_topics])
+            self._logger.info(f"   📤 Published summary to {_all_topics} for chunking")
             self._logger.info(f"   📊 Summary length: {len(summary_text)} characters")
             self._logger.info(f"   🏷️  Data lineage: gemini_web_grounding_summary")
 
@@ -722,6 +821,70 @@ class KafkaSummarizerConsumer(Base):
             # Track DLQ metric for failed publish
             if self.telemetry_enabled:
                 self.metrics.increment_dead_letter(self.output_topic, 'publish_failed')
+
+    async def _publish_requires_mirror_dlq(
+        self,
+        session_id: str,
+        request_id: str,
+        url: str,
+        origin: str | None = None,
+        query_id: str | None = None,
+    ):
+        """Flag a scrape-blocked URL as requiring a site mirror.
+
+        Used when self.fallback_extraction_strategy == 'mirror_log' (opt-in via
+        config; default strategy is 'chunk' - see _publish_summary_for_chunking
+        and the decision-history comment in __init__). Publishes a
+        'requires_mirror' DLQ record so recon can route these to manual
+        site-mirroring instead of treating them as a completed document.
+
+        Note: a summary WAS still generated and persisted via
+        _publish_summary_completed (so the summary index/UI can show something),
+        but the underlying content_source is 'requires_mirror', not chunked/Q&A'd.
+        """
+        try:
+            now = datetime.now(timezone.utc).isoformat()
+            record = {
+                'stage': 'summarizer',
+                'category': 'requires_mirror',
+                'session_id': session_id,
+                'request_id': request_id,
+                'origin': origin,
+                'query_id': query_id,
+                'url': url,
+                'error_class': 'ExtractionBlocked',
+                'error_message': (
+                    'Web-scraper extraction failed (likely bot-blocked); Gemini '
+                    'web-grounding summary succeeded but is low-fidelity and was '
+                    'NOT chunked into the Q&A pipeline - site requires mirroring '
+                    'for full-fidelity re-scrape.'
+                ),
+                'occurred_at': now,
+                'attempts': 1,
+                'retryable': False,
+                'degraded': True,
+                'first_attempt_at': now,
+                'last_attempt_at': now,
+            }
+            _pub_start = time.time()
+            self.producer.produce(
+                topic=self.dead_letter_topic,
+                key=request_id.encode('utf-8') if request_id else session_id.encode('utf-8'),
+                value=json.dumps(record).encode('utf-8'),
+                callback=self._delivery_callback,
+            )
+            self.producer.poll(0)
+            _pub_duration = time.time() - _pub_start
+
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.dead_letter_topic, result='success', duration=_pub_duration)
+                self.metrics.increment_dead_letter(self.dead_letter_topic, 'requires_mirror')
+
+            self._logger.info(f"   📨 Published DLQ record: stage=summarizer category=requires_mirror url={url}")
+        except Exception as e:
+            if self.telemetry_enabled:
+                self.kafka_metrics.record_publish(topic=self.dead_letter_topic, result='error', duration=0)
+            self._logger.error(f"   ❌ Error publishing requires_mirror DLQ record: {e}")
 
     async def _publish_summary_completed(
         self,

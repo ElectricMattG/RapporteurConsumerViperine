@@ -44,6 +44,8 @@ COPY --from=builder /root/.local /root/.local
 
 # Copy application code
 COPY src/ ./src/
+COPY scripts/ ./scripts/
+COPY migrations/ ./migrations/
 COPY setup.py .
 COPY pyproject.toml .
 COPY version .
@@ -57,7 +59,7 @@ RUN playwright install chromium && \
     (playwright install-deps chromium || true)
 
 # Create cache directories
-RUN mkdir -p /app/cache/web_scrapes /app/cache/session_backups /app/cache/archive /app/cache/indices
+RUN mkdir -p /app/cache/web_scrapes /app/cache/session_backups /app/cache/archive /app/cache/indices /app/logs
 
 # Health check endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

@@ -7,18 +7,52 @@ image:
 # No imagePullSecrets — local insecure registry needs no auth
 imagePullSecrets: []
 
+# 2026-08-02: "baby viper" minimal mode. When true:
+#   - ONLY webScraper and deadLetterConsumer are deployed (summarizer and
+#     summaryIndexer deployments are removed by helm upgrade, so no LLM
+#     summarization cost can be incurred).
+#   - The web-scraper (via WEB_SCRAPER_MINIMAL_MODE in the ConfigMap)
+#     publishes ONLY to config.additionalOutputTopics (i.e. Gaboon) -
+#     viperine.summarise-document and viperine.content-extracted receive
+#     NOTHING, so no unconsumed backlog accumulates while the summarizer
+#     is gone.
+# Use case: chunk/Q&A-only backfills of URLs that already have summaries.
+# Deploy with:    make k8s_deploy K8S_VERSION=<v> MINIMAL_MODE=true
+# Restore full:   make k8s_deploy K8S_VERSION=<v>   (MINIMAL_MODE defaults false)
+minimalMode: false
+
 kafka:
   bootstrapServers: kafka-headless.kafka.svc.cluster.local:9092
+
+# Postgres dual-write (summary-indexer only). The secret is pre-created
+# cluster-wide (see Makefile k8s_prereqs) with a `dsn` key — the SAME secret
+# Gaboon's index-aggregator uses, since both write to the same instance.
+# Referenced as `optional: true` — if absent, PostgresSummaryClient falls back
+# to its own config defaults and disables itself gracefully rather than crashing.
+postgres:
+  enabled: true
+  secretName: gaboon-postgres-secret
+  secretKey: dsn
 
 # Shared non-secret configuration mounted as a ConfigMap and injected via envFrom.
 # Any value here can be overridden per-consumer in consumers.<name>.env.
 config:
   logLevel: INFO
   gcpProjectId: rapporteurclients
-  gcpLocation: us-central1
+  # 2026-08-01: switched to global - gemini-3.5-flash (2.5-series is being
+  # deprecated) is ONLY available via the global endpoint right now, 404s
+  # on regional us-central1. The earlier global->us-central1 revert was
+  # specifically to escape gemini-2.5-pro's exhausted regional-adjacent
+  # Dynamic Shared Quota pool - not a blanket ban on global; re-evaluate if
+  # 3.5-flash shows quota contention under sustained load.
+  gcpLocation: global
   embeddingServiceUrl: http://embedding-service-serve-svc.default.svc.cluster.local:8000
   activeIndexFolder: x_indices_merged
   summarizerLlmProvider: gemini
+  # Parallel-branch fan-out: other consumer groups (e.g. Gaboon's chunker) reuse
+  # the SAME scraped content via this extra topic, no second scrape triggered.
+  # Comma-separated; empty string disables fan-out.
+  additionalOutputTopics: "gaboon.content-extracted"
 
 persistence:
   enabled: true

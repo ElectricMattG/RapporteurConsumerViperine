@@ -253,6 +253,10 @@ K8S_VERSION   ?= 0.2.0
 K8S_NS        ?= consumers
 HELM_CHART    ?= ./helm/rapporteur-consumer-group
 RELEASE_NAME  ?= viperine
+# "baby viper" minimal mode: MINIMAL_MODE=true deploys ONLY webScraper +
+# deadLetterConsumer, and the scraper publishes ONLY to Gaboon's topic
+# (no summarization cost, no viperine-topic backlog). See values.yaml.
+MINIMAL_MODE  ?= false
 DOCKER_BUILD_ENV ?= DOCKER_BUILDKIT=0
 
 # Kafka broker (exec target: pod/container in the kafka namespace)
@@ -346,10 +350,11 @@ k8s_push: ## Push image to local registry
 
 .PHONY: k8s_install
 k8s_install: ## Helm install/upgrade $(RELEASE_NAME) into namespace $(K8S_NS)
-	@echo "$(YELLOW)$(BOLD)Deploying $(RELEASE_NAME) via Helm...$(RESET)"
+	@echo "$(YELLOW)$(BOLD)Deploying $(RELEASE_NAME) via Helm (minimalMode=$(MINIMAL_MODE))...$(RESET)"
 	@helm upgrade --install $(RELEASE_NAME) $(HELM_CHART) \
 		--namespace $(K8S_NS) --create-namespace \
-		--set image.tag=$(K8S_VERSION)
+		--set image.tag=$(K8S_VERSION) \
+		--set minimalMode=$(MINIMAL_MODE)
 	@echo "$(GREEN)$(BOLD)Release $(RELEASE_NAME) installed.$(RESET)"
 
 
@@ -369,10 +374,11 @@ k8s_rollout: ## Nvidia-safe rollout: force-clean, scale→0, purge stuck pods, h
 	else \
 		echo "$(GREEN)✓ All pods terminated cleanly.$(RESET)"; \
 	fi
-	@echo "$(YELLOW)$(BOLD)[2/3] Upgrading helm release $(RELEASE_NAME)...$(RESET)"
+	@echo "$(YELLOW)$(BOLD)[2/3] Upgrading helm release $(RELEASE_NAME) (minimalMode=$(MINIMAL_MODE))...$(RESET)"
 	@helm upgrade --install $(RELEASE_NAME) $(HELM_CHART) \
 		--namespace $(K8S_NS) --create-namespace \
-		--set image.tag=$(K8S_VERSION)
+		--set image.tag=$(K8S_VERSION) \
+		--set minimalMode=$(MINIMAL_MODE)
 	@echo "$(GREEN)$(BOLD)[3/3] Helm upgrade complete — pods starting fresh.$(RESET)"
 
 
@@ -471,7 +477,14 @@ k8s_force_clean: ## Safely clear nvidia-runtime ghosts: force-delete Terminating
 	    echo "No Terminating pods found."; \
 	  fi
 	@echo "$(YELLOW)Step 2/3 — killing orphaned consumer processes (k8s is source of truth)...$(RESET)"
-	@K8S_CIDS=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) \
+	@# 2026-08-01: preserve-list MUST cover ALL pods in the namespace, not just
+	@# this release's (-l consumer-group=$(RELEASE_NAME)) - the pgrep pattern
+	@# below matches BOTH Gaboon's AND Viperine's consumer processes (both run
+	@# python src/consumers/kafka_*.py), so a release-scoped preserve-list made
+	@# this step SIGKILL the OTHER consumer group's healthy pods (observed live:
+	@# viperine-web-scraper exit 137 + CrashLoopBackOff every time Gaboon's
+	@# force_clean ran).
+	@K8S_CIDS=$$(kubectl -n $(K8S_NS) get pods \
 	    -o jsonpath='{.items[*].status.containerStatuses[*].containerID}' 2>/dev/null \
 	    | tr ' ' '\n' | sed 's|containerd://||g' | grep -v '^$$'); \
 	  FOUND=0; \
@@ -486,6 +499,13 @@ k8s_force_clean: ## Safely clear nvidia-runtime ghosts: force-delete Terminating
 	  done; \
 	  [ "$$FOUND" = 1 ] && echo "$(GREEN)Ghost consumer processes killed.$(RESET)" || echo "No ghost consumer processes found."
 	@echo "$(YELLOW)Step 3/4 — killing ghost containerd containers (Running but not in any k8s pod)...$(RESET)"
+	@# 2026-08-01: two race-guards added after this step SIGKILLed a legitimate,
+	@# freshly-restarted web-scraper container (exit 137 -> CrashLoopBackOff):
+	@# a container that starts BETWEEN the k8s snapshot below and the kill loop
+	@# shows up in crictl but not in the (stale) snapshot and got misidentified
+	@# as a ghost. Guard 1: skip containers younger than ~1 min (k8s API lags on
+	@# brand-new containers; real nvidia-runtime ghosts persist for minutes).
+	@# Guard 2: re-fetch a FRESH k8s snapshot immediately before each kill.
 	@K8S_CIDS_SHORT=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) \
 	    -o jsonpath='{.items[*].status.containerStatuses[*].containerID}' 2>/dev/null \
 	    | tr ' ' '\n' | sed 's|containerd://||g' | cut -c1-12 | grep -v '^$$'); \
@@ -494,14 +514,23 @@ k8s_force_clean: ## Safely clear nvidia-runtime ghosts: force-delete Terminating
 	    short=$$(echo "$$full_cid" | cut -c1-12); \
 	    if echo "$$K8S_CIDS_SHORT" | grep -q "$$short"; then \
 	      echo "  preserve $$short (tracked by k8s)"; \
+	    elif sudo crictl ps --no-trunc 2>/dev/null | grep "$$full_cid" | grep -qE '(Less than a second|About a minute|[0-9]+ seconds?) ago'; then \
+	      echo "  preserve $$short (just started — k8s API may not track it yet; real ghosts persist for minutes)"; \
 	    else \
-	      echo "  killing ghost container $$short — cgroup-kill all pids + force-rm..."; \
-	      for pid in $$(sudo grep -rl "$$full_cid" /proc/*/cgroup 2>/dev/null | sed 's|/proc/||;s|/cgroup||'); do \
-	        echo "    kill -9 pid $$pid"; \
-	        sudo kill -9 "$$pid" 2>/dev/null || true; \
-	      done; \
-	      sudo crictl rm -f "$$full_cid" 2>/dev/null || true; \
-	      FOUND=1; \
+	      FRESH_CIDS=$$(kubectl -n $(K8S_NS) get pods -l consumer-group=$(RELEASE_NAME) \
+	        -o jsonpath='{.items[*].status.containerStatuses[*].containerID}' 2>/dev/null \
+	        | tr ' ' '\n' | sed 's|containerd://||g' | cut -c1-12 | grep -v '^$$'); \
+	      if echo "$$FRESH_CIDS" | grep -q "$$short"; then \
+	        echo "  preserve $$short (appeared in k8s between snapshot and kill — race avoided)"; \
+	      else \
+	        echo "  killing ghost container $$short — cgroup-kill all pids + force-rm..."; \
+	        for pid in $$(sudo grep -rl "$$full_cid" /proc/*/cgroup 2>/dev/null | sed 's|/proc/||;s|/cgroup||'); do \
+	          echo "    kill -9 pid $$pid"; \
+	          sudo kill -9 "$$pid" 2>/dev/null || true; \
+	        done; \
+	        sudo crictl rm -f "$$full_cid" 2>/dev/null || true; \
+	        FOUND=1; \
+	      fi; \
 	    fi; \
 	  done; \
 	  [ "$$FOUND" = 1 ] && echo "$(GREEN)Ghost containers killed and removed.$(RESET)" || echo "No ghost containers found."

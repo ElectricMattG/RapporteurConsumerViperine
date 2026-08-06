@@ -12,6 +12,7 @@ import os
 import random
 import re
 import sys
+import threading
 import time
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +28,95 @@ except ImportError:
     # Fallback import path
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
     from config_handler import Base
+
+
+# Process-wide throttle on Gemini network calls, shared across ALL
+# GeminiLLMClient instances AND all event loops/threads in this process.
+#
+# 2026-08-01 history - three broken generations of this throttle, do NOT
+# regress to any of them:
+#   1. Instance-level primitives: silent no-op when a caller constructs a
+#      fresh client per message (as Gaboon's PDFQAGenerator does).
+#   2. Module-level asyncio.Semaphore/asyncio.Lock: crashed with
+#      "<Semaphore ...> is bound to a different event loop" when consumers
+#      process messages via run_in_executor -> asyncio.run(), so MULTIPLE
+#      event loops in different threads are live CONCURRENTLY.
+#   3. Recreate-the-asyncio-primitive-on-loop-change: no crash, but a
+#      silent no-op ACROSS loops (each concurrent loop got its own fresh
+#      semaphore) - observed live as 15 simultaneous Vertex AI requests
+#      despite max_concurrent_requests=1.
+#
+# asyncio primitives fundamentally cannot coordinate across event loops, so
+# this uses *threading* primitives (which coordinate across threads and
+# therefore across loops) acquired via short non-blocking attempts +
+# cooperative asyncio.sleep polling - the calling event loop is never
+# blocked.
+class _GeminiThrottle:
+    """Cross-loop, cross-thread concurrency cap + requests-per-minute limiter.
+
+    - Concurrency: at most ``max_concurrent`` Gemini calls in flight at once,
+      process-wide, no matter how many event loops/threads are running.
+    - Rate: request STARTS are spaced ``time_period / rpm`` seconds apart
+      (evenly distributing the RPM budget), regardless of how fast
+      individual calls complete. A concurrency cap alone does NOT stop
+      Vertex AI 429s - fast-completing calls can still blow through the
+      per-minute quota.
+    """
+
+    def __init__(self, max_concurrent: int, rpm: float, time_period: float = 60.0):
+        self._sem = threading.Semaphore(max_concurrent)
+        self._rate_lock = threading.Lock()
+        self._interval = time_period / rpm if rpm > 0 else 0.0
+        self._next_allowed_time = 0.0
+
+    async def _acquire_sem(self) -> None:
+        # Non-blocking try + cooperative poll: never blocks the event loop,
+        # and threading.Semaphore state is shared across all loops/threads.
+        while not self._sem.acquire(blocking=False):
+            await asyncio.sleep(0.1)
+
+    async def _await_rate_slot(self) -> None:
+        while True:
+            with self._rate_lock:
+                now = time.monotonic()
+                if now + 0.001 >= self._next_allowed_time:
+                    self._next_allowed_time = max(now, self._next_allowed_time) + self._interval
+                    return
+                wait = self._next_allowed_time - now
+            # Sleep OUTSIDE the lock so other waiters/loops aren't stalled by
+            # our wait; re-check on wake (another waiter may have claimed the
+            # slot first - loop until we win one).
+            await asyncio.sleep(wait)
+
+    async def __aenter__(self) -> "_GeminiThrottle":
+        await self._acquire_sem()
+        try:
+            await self._await_rate_slot()
+        except BaseException:
+            self._sem.release()
+            raise
+        return self
+
+    async def __aexit__(self, *exc_info: object) -> None:
+        self._sem.release()
+
+
+_gemini_throttle: Optional["_GeminiThrottle"] = None
+_gemini_throttle_guard = threading.Lock()
+
+
+def _get_gemini_throttle(max_concurrent: int, rpm: float) -> "_GeminiThrottle":
+    """Return the process-wide Gemini throttle (first-caller-wins on sizing).
+
+    Created once, lazily, under a plain threading.Lock (safe to call from any
+    thread/event loop). Config should be consistent within a process, so a
+    later caller requesting different sizing keeps the existing throttle.
+    """
+    global _gemini_throttle
+    with _gemini_throttle_guard:
+        if _gemini_throttle is None:
+            _gemini_throttle = _GeminiThrottle(max_concurrent=max_concurrent, rpm=rpm)
+        return _gemini_throttle
 
 
 class GeminiLLMClient(Base):
@@ -63,6 +153,20 @@ class GeminiLLMClient(Base):
 
         # Gemini-specific settings
         self.timeout = self._app_config.get('gemini.timeout') or 60
+
+        # Process-wide concurrency cap (see module-level _GeminiThrottle
+        # docstring for why this can't be an instance attribute). Falls back
+        # to the pre-existing (previously unused) summarizer.max_concurrent_requests
+        # config key if the new gemini.* key isn't set, for backward compatibility.
+        self.max_concurrent_requests = (
+            self._app_config.get('gemini.max_concurrent_requests')
+            or self._app_config.get('summarizer.max_concurrent_requests')
+            or 1
+        )
+        # Process-wide requests-per-minute cap (see _GeminiThrottle docstring -
+        # a concurrency cap alone does not stop 429s since fast-completing
+        # calls can still exceed RPM even at low concurrency).
+        self.rate_limit_rpm = self._app_config.get('gemini.rate_limit_rpm') or 20
 
         # ── Per-stage model overrides (V17) ──────────────────────────
         # Reads bboa.models dict: {"event_detection": "gemini-2.5-pro", ...}
@@ -233,14 +337,32 @@ class GeminiLLMClient(Base):
                 effective_model = self._stage_models.get(stage, self.model_name) if stage else self.model_name
 
                 loop = asyncio.get_event_loop()
-                response = await loop.run_in_executor(
-                    None,  # Use default ThreadPoolExecutor
-                    lambda: self.client.models.generate_content(
-                        model=effective_model,
-                        contents=prompt,
-                        config=config
-                    )
+                throttle = _get_gemini_throttle(
+                    self.max_concurrent_requests, self.rate_limit_rpm
                 )
+                async with throttle:
+                    # Throttle = process-wide concurrency cap + RPM spacing,
+                    # coordinated across ALL event loops/threads via threading
+                    # primitives (see _GeminiThrottle above for the history of
+                    # why asyncio primitives silently failed here).
+                    # 2026-07-31: self.timeout was previously read from config but
+                    # NEVER actually enforced on the call (cosmetic-only, only used
+                    # in a log line) - a genuinely hung Vertex AI request could block
+                    # forever. Combined with the process-wide throttle above, enough
+                    # hung requests would permanently exhaust all concurrency slots and
+                    # deadlock the ENTIRE process. wait_for ensures the slot is
+                    # always released even if the underlying blocking call never returns.
+                    response = await asyncio.wait_for(
+                        loop.run_in_executor(
+                            None,  # Use default ThreadPoolExecutor
+                            lambda: self.client.models.generate_content(
+                                model=effective_model,
+                                contents=prompt,
+                                config=config
+                            )
+                        ),
+                        timeout=self.timeout,
+                    )
 
                 # ── Token usage tracking (Phase U8) ──────────
                 input_tokens = 0
@@ -346,6 +468,27 @@ class GeminiLLMClient(Base):
 
             except Exception as e:
                 error_str = str(e)
+
+                # Timeout (self.timeout, enforced via asyncio.wait_for above): treat
+                # like a rate-limit hit - retry with backoff rather than failing
+                # immediately, since a slow/hung Vertex AI request is transient.
+                if isinstance(e, TimeoutError):
+                    if attempt < max_retries - 1:
+                        delay = min(base_delay * (2 ** attempt), max_delay)
+                        jitter = random.uniform(0, delay * 0.25)
+                        total_delay = delay + jitter
+                        self._logger.warning(
+                            f"⏳ Gemini call exceeded timeout ({self.timeout}s), retrying in "
+                            f"{total_delay:.1f}s (attempt {attempt + 1}/{max_retries})"
+                        )
+                        await asyncio.sleep(total_delay)
+                        continue
+                    else:
+                        self._logger.error(
+                            f"❌ Gemini call timed out after {max_retries} attempts "
+                            f"({self.timeout}s each): {e}"
+                        )
+                        raise
 
                 # Check if it's a rate limit error (429)
                 if '429' in error_str or 'RESOURCE_EXHAUSTED' in error_str:

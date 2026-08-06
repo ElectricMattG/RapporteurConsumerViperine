@@ -34,7 +34,12 @@ defaults = {
         # GCP Gemini configuration. Provider-scoped: NEVER mix with openai.* keys.
         "project_id": "rapporteurclients",  # Set via PROJECT_ID env var or config
         "location": "global",  # GCP region for Vertex AI
-        "model_name": "gemini-2.5-pro",  # Fast model with good performance
+        "model_name": "gemini-3.5-flash",  # 2026-08-01: switched from gemini-2.5-flash -
+        # 2.5-series models are being deprecated soon; gemini-3.5-flash is the
+        # current-gen replacement. Confirmed live: only available via the
+        # "global" endpoint (404s on regional us-central1) - see gcpLocation
+        # in helm/values.yaml, must be "global" for this model to resolve.
+        # 5-call burst test passed cleanly before switching.
         "timeout": 600,  # Request timeout for Gemini API
         "api_key": None,  # Set via GOOGLE_API_KEY env var or config (for direct API, not Vertex AI)
         # Generation parameters (Gemini-specific; do NOT read openai.* values).
@@ -42,6 +47,29 @@ defaults = {
         "temperature": 0.5,
         "top_p": 0.9,
         "max_output_tokens": 65000,
+        # Process-wide cap on concurrent Gemini network calls (see llm_gcp_client.py
+        # _get_gemini_semaphore). 2026-07-31: added alongside the fan-out 429
+        # quota-exhaustion fix. Falls back to summarizer.max_concurrent_requests
+        # if unset there instead.
+        # Reduced 3 -> 1: this project's Vertex AI quota is shared across
+        # Viperine's summarizer AND Gaboon's qa_generator/qa_embedder - "3 per
+        # service" still added up to enough aggregate concurrent load to keep
+        # hitting 429 RESOURCE_EXHAUSTED even with per-service throttling.
+        # 2026-08-01: raised 1 -> 5 after switching to gemini-3.5-flash, which
+        # has materially more quota headroom than the exhausted 2.5-pro (5-call
+        # burst test on global endpoint passed cleanly at 1s spacing). Monitor
+        # for 429s under real sustained load and back off if they reappear.
+        "max_concurrent_requests": 5,
+        # 2026-08-01: a concurrency cap alone does not stop 429s (fast calls
+        # can still exceed requests-per-minute even at low concurrency) - see
+        # _GeminiThrottle in llm_gcp_client.py. The 1 RPM figure below was
+        # tuned for gemini-2.5-pro's exhausted 5 RPM project quota; raised to
+        # 30 after switching to gemini-3.5-flash, which showed materially
+        # more headroom (5-call burst test passed cleanly). Shared,
+        # UNCOORDINATED, across 3 separate processes (Gaboon qa_generator,
+        # Gaboon document_chunker, Viperine summarizer) - monitor for 429s
+        # under real sustained load and back off if they reappear.
+        "rate_limit_rpm": 30,
     },
     "embedding_service": {
         # Embedding service configuration
@@ -149,6 +177,22 @@ defaults = {
         "input_topic": "viperine.web-scrape-requests",  # Topic to consume messages from (web scraper input)
         "output_topic": "viperine.content-extracted",   # Topic to publish extracted content to (chunker & summarizer input)
         "summarise_document_topic": "viperine.summarise-document",  # Topic for AI summarization (web scraper → summarizer)
+        # Additional fan-out topics (parallel-branch pattern): other consumer groups
+        # (e.g. Gaboon's chunker) subscribe here to reuse the SAME scraped content
+        # without triggering a second scrape. Empty by default; override via
+        # KAFKA_ADDITIONAL_OUTPUT_TOPICS (comma-separated) or this list, e.g.
+        # ["gaboon.content-extracted"].
+        "additional_output_topics": [],
+        # 2026-08-02: "baby viper" minimal mode - when true, the web-scraper
+        # publishes ONLY to additional_output_topics (i.e. Gaboon), skipping
+        # viperine.summarise-document AND viperine.content-extracted entirely.
+        # Used for chunk/Q&A-only backfills where re-running summarization
+        # would burn LLM budget on documents that already have summaries, and
+        # where publishing to viperine topics with the summarizer/indexer
+        # scaled down would just accumulate an unconsumed backlog. Set via
+        # WEB_SCRAPER_MINIMAL_MODE env var (Helm: minimalMode=true) which also
+        # disables every Viperine consumer except webScraper+deadLetterConsumer.
+        "minimal_mode": False,
 
         # Security configuration (optional)
         "security_protocol": "PLAINTEXT",  # PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL
@@ -166,6 +210,16 @@ defaults = {
         "max_concurrent_requests": 1,  # Max concurrent LLM API requests (rate limiting for 429 errors)
         "cost_per_1k_input_tokens": 0.00125,   # Gemini 2.5 Pro: $1.25 per 1M input tokens
         "cost_per_1k_output_tokens": 0.01,      # Gemini 2.5 Pro: $10.00 per 1M output tokens
+        # 2026-08-01: how to handle documents where web-scraper extraction failed
+        # but the Gemini web-grounding fallback still produced a summary. 'chunk'
+        # (default) fans the low-fidelity summary out for chunking/Q&A same as a
+        # real extraction - some facts beat zero coverage, and many blocked sites
+        # are paywalled/account-gated anyway (mirroring wouldn't get past that
+        # either). 'mirror_log' instead publishes a 'requires_mirror' DLQ record
+        # so recon can route these to manual site-mirroring. See
+        # kafka_summarizer.py's _publish_summary_for_chunking /
+        # _publish_requires_mirror_dlq for the full decision history.
+        "fallback_extraction_strategy": "mirror-log",  # 'chunk' or 'mirror_log'
     },
     "chunker": {
         # Document chunker consumer configuration
@@ -256,6 +310,26 @@ defaults = {
         "input_topic": "viperine.dead-letter-queue",  # Topic to consume failed messages from
         "output_directory": "cache/failures",  # Directory for failure logs
     },
+    "postgres": {
+        # Dual-write target for the summary-indexer. Writes into the REAL shared
+        # corpus_summaries table (NOT a separate research_summaries table - see
+        # migrations/*.sql). Shares the same Postgres instance as Gaboon's
+        # index-aggregator ("Postgres when Viperine and Gaboon work hand-in-hand").
+        "enabled": True,
+        "dsn": None,  # Set via POSTGRES_DSN / DATABASE_URL env var, e.g. postgresql://user:pass@host:5432/db
+        "tenant_id": "default",
+        "corpus": "x_indices_merged",
+        "host": "localhost",
+        "port": 5432,
+        "database": "rapporteur",
+        "user": "rapporteur",
+        "password": None,  # Set via POSTGRES_PASSWORD env var
+        "pool_min_size": 2,
+        "pool_max_size": 10,
+        "command_timeout": 30.0,
+        "connect_timeout": 10.0,
+        "embedding_dim": 384,  # all-MiniLM-L6-v2
+    },
     "qa_generation": {
         # Core LLM settings
         "llm_url": "http://localhost:8001",
@@ -336,6 +410,10 @@ defaults = {
         "max_urls_per_message": 50,  # Maximum URLs to extract per message
         "retry_attempts": 3,  # Number of retry attempts for failed requests
         "retry_delay": 2.0,  # Delay between retries in seconds
+        # 2026-07-31: added so scrape failures (result['success']=False, and
+        # unhandled exceptions in the consume loop) get a DLQ record instead
+        # of being silently dropped - see kafka_web_scraper.py _publish_to_dlq.
+        "dead_letter_topic": "viperine.dead-letter-queue",
 
         # URL resolution
         "follow_redirects": True,  # Follow HTTP redirects
@@ -417,9 +495,9 @@ class CustConf(Configuration):
         )
         root_logger.addHandler(root_handler)
 
-        file_handler = logging.FileHandler(
-            self._app_config.get("logging.output_full_path")
-        )
+        log_path = self._app_config.get("logging.output_full_path")
+        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        file_handler = logging.FileHandler(log_path)
         file_handler.setFormatter(
             logging.Formatter(fmt=self._app_config.get("logging.format"))
         )

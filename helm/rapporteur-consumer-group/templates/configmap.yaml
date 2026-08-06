@@ -19,6 +19,13 @@ data:
   # Embedding service
   EMBEDDING_SERVICE_URL: {{ .Values.config.embeddingServiceUrl | quote }}
 
+  # Parallel-branch fan-out (shared web-scraper → other consumer groups)
+  KAFKA_ADDITIONAL_OUTPUT_TOPICS: {{ .Values.config.additionalOutputTopics | default "" | quote }}
+
+  # Baby-viper minimal mode (see values.yaml minimalMode) - web-scraper
+  # publishes ONLY to the additional fan-out topics when "true".
+  WEB_SCRAPER_MINIMAL_MODE: {{ .Values.minimalMode | default false | quote }}
+
   # Index / search
   ACTIVE_INDEX_FOLDER: {{ .Values.config.activeIndexFolder | quote }}
 

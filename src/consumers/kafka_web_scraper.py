@@ -42,7 +42,7 @@ import signal
 import sys
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -114,6 +114,12 @@ except ImportError:
     from components.document_websearcher import DocumentWebSearcher
     from components.url_resolver import URLResolver
     from config_handler import Base
+
+
+try:
+    from ._failure_taxonomy import classify_error
+except ImportError:
+    from _failure_taxonomy import classify_error
 
 
 class KafkaWebScraperConsumer(Base):
@@ -237,10 +243,50 @@ class KafkaWebScraperConsumer(Base):
             self.output_topic = self._app_config.get('kafka.output_topic') or 'viperine.content-extracted'
             self.summarise_document_topic = self._app_config.get('kafka.summarise_document_topic') or 'viperine.summarise-document'
 
+            # Additional fan-out topics (parallel-branch pattern): other consumer
+            # groups (e.g. Gaboon's chunker) can consume the SAME extracted content
+            # without a second scrape. Config value may be a list (config.py default)
+            # or a comma-separated string (env var KAFKA_ADDITIONAL_OUTPUT_TOPICS).
+            # NOTE: self._app_config.get('kafka.additional_output_topics') alone never
+            # reflects the env var — pyconfs does not merge KAFKA_ADDITIONAL_OUTPUT_TOPICS
+            # into this nested key, so read the env var directly first (same pattern
+            # as KAFKA_SASL_USERNAME/KAFKA_SASL_PASSWORD above), falling back to the
+            # static config default.
+            additional_topics_raw = (
+                os.getenv('KAFKA_ADDITIONAL_OUTPUT_TOPICS')
+                or self._app_config.get('kafka.additional_output_topics')
+                or []
+            )
+            if isinstance(additional_topics_raw, str):
+                self.additional_output_topics = [t.strip() for t in additional_topics_raw.split(',') if t.strip()]
+            else:
+                self.additional_output_topics = list(additional_topics_raw)
+
+            # 2026-08-02: "baby viper" minimal mode - publish ONLY to the
+            # additional fan-out topics (Gaboon), skipping summarise-document
+            # and content-extracted. Protects LLM budget during chunk/Q&A-only
+            # backfills (no summarizer re-runs) and prevents unconsumed backlog
+            # on viperine topics while summarizer/summary-indexer are scaled
+            # down (Helm minimalMode=true removes those deployments).
+            _mm_raw = os.getenv('WEB_SCRAPER_MINIMAL_MODE')
+            if _mm_raw is not None:
+                self.minimal_mode = _mm_raw.strip().lower() in ('1', 'true', 'yes')
+            else:
+                self.minimal_mode = bool(self._app_config.get('web_scraper.minimal_mode') or False)
+            if self.minimal_mode and not self.additional_output_topics:
+                # Nothing to publish to at all - almost certainly a misconfig.
+                raise ValueError(
+                    "WEB_SCRAPER_MINIMAL_MODE is enabled but no additional_output_topics "
+                    "are configured - every scrape would be silently discarded. Set "
+                    "KAFKA_ADDITIONAL_OUTPUT_TOPICS (e.g. 'gaboon.content-extracted') "
+                    "or disable minimal mode."
+                )
+
             # Web scraper configuration
             self.cache_dir = Path(self._app_config.get('web_scraper.cache_dir') or './cache/web_scrapes')
             self.max_urls_per_message = self._app_config.get('web_scraper.max_urls_per_message') or 50
             self.extract_markdown = self._app_config.get('web_scraper.extract_markdown') or False
+            self.dead_letter_topic = self._app_config.get('web_scraper.dead_letter_topic') or 'viperine.dead-letter-queue'
 
             # Create cache directory
             self.cache_dir.mkdir(parents=True, exist_ok=True)
@@ -250,6 +296,14 @@ class KafkaWebScraperConsumer(Base):
             self._logger.info(f"   Consumer group: {self.kafka_config['group.id']}")
             self._logger.info(f"   Input topic: {self.input_topic}")
             self._logger.info(f"   Output topic: {self.output_topic}")
+            if self.additional_output_topics:
+                self._logger.info(f"   Additional fan-out topics: {self.additional_output_topics}")
+            if self.minimal_mode:
+                self._logger.warning(
+                    f"   🐍 BABY VIPER (minimal mode): publishing ONLY to "
+                    f"{self.additional_output_topics} - summarise-document and "
+                    f"content-extracted are SKIPPED (no summarization will occur)"
+                )
             self._logger.info(f"   Cache directory: {self.cache_dir}")
             self._logger.info(f"   Extract markdown: {self.extract_markdown}")
 
@@ -699,11 +753,15 @@ class KafkaWebScraperConsumer(Base):
                         self._create_failure_document(request_dir, final_url, error_msg, response.status_code, session_id, request_id)
 
                         # Still attempt to generate summary from URL and title
-                        self._publish_failed_url_for_summary(
-                            final_url, uri, title, context, error_msg,
-                            session_id, request_id, result.get('query_id', 'default'),
-                            origin=origin, url_index=url_index, total_urls=total_urls,
-                        )
+                        # (skipped in baby-viper minimal mode: no summarizer is
+                        # running to consume it - failure still reaches the DLQ
+                        # via the consume loop's _publish_to_dlq routing)
+                        if not self.minimal_mode:
+                            self._publish_failed_url_for_summary(
+                                final_url, uri, title, context, error_msg,
+                                session_id, request_id, result.get('query_id', 'default'),
+                                origin=origin, url_index=url_index, total_urls=total_urls,
+                            )
 
                 except Exception as e:
                     error_msg = f"Error fetching URL: {str(e)}"
@@ -714,11 +772,13 @@ class KafkaWebScraperConsumer(Base):
                     self._create_failure_document(request_dir, final_url, error_msg, None, session_id, request_id)
 
                     # Still attempt to generate summary from URL and title
-                    self._publish_failed_url_for_summary(
-                        final_url, uri, title, context, error_msg,
-                        session_id, request_id, result.get('query_id', 'default'),
-                        origin=origin, url_index=url_index, total_urls=total_urls,
-                    )
+                    # (skipped in baby-viper minimal mode - see above)
+                    if not self.minimal_mode:
+                        self._publish_failed_url_for_summary(
+                            final_url, uri, title, context, error_msg,
+                            session_id, request_id, result.get('query_id', 'default'),
+                            origin=origin, url_index=url_index, total_urls=total_urls,
+                        )
 
         except Exception as e:
             result['error'] = str(e)
@@ -2005,23 +2065,35 @@ class KafkaWebScraperConsumer(Base):
             message_bytes = json.dumps(message, ensure_ascii=False).encode('utf-8')
 
             # Publish to BOTH topics to ensure always-on summarization
+            # (baby-viper minimal mode publishes ONLY to additional fan-out topics)
             _pub_start = time.time()
 
-            # 1. Summarization topic - AI will generate high-quality summary
-            self.producer.produce(
-                topic=self.summarise_document_topic,
-                key=kafka_key,
-                value=message_bytes,
-                callback=self._delivery_callback
-            )
+            if not self.minimal_mode:
+                # 1. Summarization topic - AI will generate high-quality summary
+                self.producer.produce(
+                    topic=self.summarise_document_topic,
+                    key=kafka_key,
+                    value=message_bytes,
+                    callback=self._delivery_callback
+                )
 
-            # 2. Direct chunking topic (kept for backwards compatibility)
-            self.producer.produce(
-                topic=self.output_topic,
-                key=kafka_key,
-                value=message_bytes,
-                callback=self._delivery_callback
-            )
+                # 2. Direct chunking topic (kept for backwards compatibility)
+                self.producer.produce(
+                    topic=self.output_topic,
+                    key=kafka_key,
+                    value=message_bytes,
+                    callback=self._delivery_callback
+                )
+
+            # 3. Additional fan-out topics (parallel-branch pattern) — e.g. Gaboon's
+            # chunker consuming the SAME extracted content, no re-scrape required.
+            for extra_topic in self.additional_output_topics:
+                self.producer.produce(
+                    topic=extra_topic,
+                    key=kafka_key,
+                    value=message_bytes,
+                    callback=self._delivery_callback
+                )
 
             # Flush to ensure delivery
             self.producer.poll(0)
@@ -2029,10 +2101,17 @@ class KafkaWebScraperConsumer(Base):
 
             # instrumentation - messages_published_total
             if self.telemetry_enabled:
-                self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='success', duration=_pub_duration)
-                self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
+                if not self.minimal_mode:
+                    self.kafka_metrics.record_publish(topic=self.summarise_document_topic, result='success', duration=_pub_duration)
+                    self.kafka_metrics.record_publish(topic=self.output_topic, result='success', duration=_pub_duration)
+                for extra_topic in self.additional_output_topics:
+                    self.kafka_metrics.record_publish(topic=extra_topic, result='success', duration=_pub_duration)
 
-            self._logger.info(f"📤 Published to '{self.summarise_document_topic}' and '{self.output_topic}' topics")
+            if self.minimal_mode:
+                _all_topics = ', '.join(f"'{t}'" for t in self.additional_output_topics)
+            else:
+                _all_topics = ', '.join([f"'{self.summarise_document_topic}'", f"'{self.output_topic}'"] + [f"'{t}'" for t in self.additional_output_topics])
+            self._logger.info(f"📤 Published to {_all_topics} topics")
 
         except Exception as e:
             # instrumentation - messages_published_total
@@ -2152,6 +2231,59 @@ class KafkaWebScraperConsumer(Base):
             self._logger.error(f"❌ Message delivery failed: {err}")
         else:
             self._logger.debug(f"✅ Message delivered to {msg.topic()} [{msg.partition()}]")
+
+    def _publish_to_dlq(
+        self,
+        message_data: Dict,
+        error: Exception | str,
+        attempts: int = 1,
+    ):
+        """Publish a scrape failure to the dead-letter-queue topic.
+
+        Covers BOTH failure paths that previously dropped messages silently:
+        result['success']=False returned by _process_message, and an
+        unhandled exception escaping _process_message entirely. Without
+        this, a URL that fails to scrape produces no summary, no chunks, no
+        QA pairs, AND no DLQ record - completely invisible to any recon.
+        """
+        if not self.producer:
+            return
+        try:
+            exc = error if isinstance(error, Exception) else Exception(str(error))
+            classification = classify_error(exc)
+            now = datetime.now(timezone.utc).isoformat()
+            record = {
+                'stage': 'web_scraper',
+                'category': classification.category if classification else 'unknown',
+                'session_id': message_data.get('session_id', 'unknown'),
+                'request_id': message_data.get('request_id'),
+                'origin': message_data.get('origin'),
+                'query_id': message_data.get('query_id', 'default'),
+                'url': message_data.get('uri'),
+                'error_class': type(exc).__name__,
+                'error_message': str(exc),
+                'occurred_at': now,
+                'attempts': attempts,
+                'retryable': classification.retryable if classification else False,
+                'degraded': classification.degrade if classification else False,
+                'first_attempt_at': now,
+                'last_attempt_at': now,
+            }
+            request_id = record['request_id'] or record['session_id']
+            self.producer.produce(
+                topic=self.dead_letter_topic,
+                key=request_id.encode('utf-8'),
+                value=json.dumps(record).encode('utf-8'),
+                callback=self._delivery_callback,
+            )
+            self.producer.poll(0)
+            self._logger.info(
+                f"   📨 Published DLQ record: stage=web_scraper category={record['category']} url={record['url']}"
+            )
+            if self.telemetry_enabled:
+                self.metrics.increment_dead_letter(self.dead_letter_topic, record['category'])
+        except Exception as e:
+            self._logger.error(f"   ❌ Error publishing to DLQ: {e}")
 
     def start(self):
         """Start the Kafka consumer"""
@@ -2320,6 +2452,11 @@ class KafkaWebScraperConsumer(Base):
                             self._logger.info(f"✅ Successfully processed message for session {result['session_id']}")
                         else:
                             self._logger.warning(f"⚠️ Message processing completed with errors: {result['error']}")
+                            # Previously this warning was the ONLY trace of a failed
+                            # scrape - no DLQ record, no summary, no chunks, no QA
+                            # pairs anywhere. Publish it so recon/manual-intervention
+                            # tooling can actually see these instead of silent drops.
+                            self._publish_to_dlq(message_data, result.get('error', 'Unknown scrape failure'))
 
                     finally:
                         # Decrement messages in flight after processing completes
@@ -2328,6 +2465,9 @@ class KafkaWebScraperConsumer(Base):
 
                 except Exception as e:
                     self._logger.error(f"❌ Error processing message: {e}")
+                    # Same silent-drop gap as above, but for exceptions that escape
+                    # _process_message entirely (never even produced a result dict).
+                    self._publish_to_dlq(message_data, e)
                     # Make sure to decrement if we're tracking
                     if self.telemetry_enabled:
                         try:

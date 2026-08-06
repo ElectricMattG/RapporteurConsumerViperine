@@ -23,6 +23,9 @@ playwright  # JavaScript rendering for hard-to-scrape sites
 cloudscraper  # Cloudflare bypass
 # Azure Storage
 azure-storage-blob
+# Postgres dual-write (summary-indexer)
+asyncpg
+pgvector
 # Telemetry and monitoring
 prometheus-client  # Prometheus metrics exporter
 psutil  # System resource monitoring

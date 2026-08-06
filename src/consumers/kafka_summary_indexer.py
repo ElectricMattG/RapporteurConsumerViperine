@@ -86,10 +86,12 @@ except ImportError:
 
 # Import components
 try:
+    from ..clients.postgres_summary_client import PostgresSummaryClient
     from ..config_handler import Base
     from ..utils.url_normalize import normalize_url
 except ImportError:
     sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+    from clients.postgres_summary_client import PostgresSummaryClient
     from config_handler import Base
     from utils.url_normalize import normalize_url
 
@@ -113,6 +115,10 @@ class KafkaSummaryIndexerConsumer(Base):
 
         # Load configuration
         self._load_config()
+
+        # Postgres dual-write (redundant, queryable copy alongside the flat file).
+        # Construction never raises: PostgresSummaryClient disables itself on failure.
+        self.postgres_client = PostgresSummaryClient()
 
         # Initialize telemetry components if available
         self.telemetry_enabled = TELEMETRY_AVAILABLE
@@ -579,6 +585,7 @@ class KafkaSummaryIndexerConsumer(Base):
         try:
             existing_doc_ids: set = set()
             existing_dedup_keys: set = set()
+            new_entries_full: List[Dict[str, Any]] = []
             import hashlib as _hashlib
 
             if self.combined_index_file.exists():
@@ -650,6 +657,7 @@ class KafkaSummaryIndexerConsumer(Base):
                                     'url': entry.get('source_url', ''),
                                     'title': entry.get('doc_metadata', {}).get('title', 'Untitled')
                                 })
+                                new_entries_full.append(entry)
 
                             except json.JSONDecodeError as e:
                                 self._logger.warning(f"   ⚠️ Invalid JSON in session index: {e}")
@@ -659,6 +667,12 @@ class KafkaSummaryIndexerConsumer(Base):
             self._logger.info(f"      New entries: {new_count}")
             self._logger.info(f"      Duplicates skipped: {duplicate_count}")
             self._logger.info(f"      Total documents: {len(existing_doc_ids)}")
+
+            # Dual-write new entries to Postgres (redundant, queryable copy
+            # alongside the flat file). Never raises: a Postgres outage must
+            # not block flat-file indexing.
+            if new_entries_full:
+                self.postgres_client.upsert_summaries(new_entries_full)
 
             # Publish notifications if new summaries were added
             if new_count > 0:
@@ -1237,6 +1251,10 @@ class KafkaSummaryIndexerConsumer(Base):
             if self.producer:
                 self.producer.flush()
                 self._logger.info("✅ Producer flushed")
+            try:
+                self.postgres_client.close()
+            except Exception as e:
+                self._logger.warning(f"⚠️ Error closing Postgres client: {e}")
 
     def run(self):
         """Run the consumer"""

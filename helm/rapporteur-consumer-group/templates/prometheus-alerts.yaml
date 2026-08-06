@@ -115,3 +115,26 @@ data:
             annotations:
               summary: "Viperine summarizer LLM cost exceeds $1/hour"
               description: "Current hourly rate is ${{ "{{" }} $value | humanize {{ "}}" }}."
+
+          # ── Postgres dual-write (summary-indexer) ────────────────────────
+          - alert: ViperinePostgresDown
+            expr: viperine_postgres_up == 0
+            for: 5m
+            labels:
+              severity: critical
+              pipeline: viperine
+            annotations:
+              summary: "Viperine summary-indexer's Postgres dual-write is down"
+              description: >
+                viperine_postgres_up has been 0 for 5+ minutes. The flat-file index
+                is still being written, but the Postgres redundancy copy is stale.
+
+          - alert: ViperinePostgresWriteFailing
+            expr: increase(viperine_postgres_write_failures_total[15m]) > 0
+            for: 0m
+            labels:
+              severity: warning
+              pipeline: viperine
+            annotations:
+              summary: "Viperine Postgres upserts are failing on table {{ "{{" }} $labels.table {{ "}}" }}"
+              description: "{{ "{{" }} $value {{ "}}" }} failed upsert batches in the last 15 minutes."

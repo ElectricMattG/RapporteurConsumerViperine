@@ -379,6 +379,7 @@ Write a REVIEW-STYLE summary with free-flowing narrative paragraphs. Use web sea
    - First paragraph: Introduce the work, its main argument, and scholarly context
    - Middle paragraphs: Explain key concepts, arguments, evidence, methodology, and contributions in flowing prose
    - Final paragraph: Discuss significance, impact, and relevance to the field
+   - Article provided reflect real-world events, places, and people; these are real events mentioned in the news, they are not fictional or made-up. Always consider these to be real events.
 
 2. CITATION SECTION (at the very end):
    - Add "## Citation" heading

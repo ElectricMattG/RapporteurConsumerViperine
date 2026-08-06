@@ -1,5 +1,8 @@
 {{- range $name, $config := .Values.consumers }}
-{{- if $config.enabled }}
+{{- /* baby-viper minimal mode: only the web-scraper (does the actual work)
+       and the dead-letter consumer (drains the DLQ topic the scraper still
+       publishes failures to) survive; everything else is removed. */}}
+{{- if and $config.enabled (or (not $.Values.minimalMode) (has $name (list "webScraper" "deadLetterConsumer"))) }}
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -58,6 +61,14 @@ spec:
         {{- if $.Values.gcpCredentials.enabled }}
         - name: GOOGLE_APPLICATION_CREDENTIALS
           value: {{ $.Values.gcpCredentials.mountPath }}/{{ $.Values.gcpCredentials.fileName }}
+        {{- end }}
+        {{- if $.Values.postgres.enabled }}
+        - name: POSTGRES_DSN
+          valueFrom:
+            secretKeyRef:
+              name: {{ $.Values.postgres.secretName }}
+              key: {{ $.Values.postgres.secretKey }}
+              optional: true
         {{- end }}
         {{- if $.Values.azureStorage.enabled }}
         - name: AZURE_STORAGE_CONNECTION_STRING

@@ -1,5 +1,6 @@
 {{- range $name, $config := .Values.consumers }}
-{{- if $config.enabled }}
+{{- /* keep in lockstep with deployment.yaml's baby-viper minimal-mode gate */}}
+{{- if and $config.enabled (or (not $.Values.minimalMode) (has $name (list "webScraper" "deadLetterConsumer"))) }}
 ---
 apiVersion: v1
 kind: Service
