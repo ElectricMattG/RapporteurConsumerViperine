@@ -13,7 +13,10 @@ Live-I/O methods (Playwright, HTTP, cloudscraper) are intentionally skipped.
 """
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -70,6 +73,50 @@ class TestIsExtractionValid:
         assert scraper._is_extraction_valid(" ".join(["w"] * 20)) is True
         assert scraper._is_extraction_valid("too few") is False
 
+
+class TestYouTubeTranscriptFailure:
+    def test_transcript_failure_returns_failure_without_page_fallback(self, tmp_path):
+        scraper = _make_scraper()
+        scraper.cache_dir = Path(tmp_path)
+        scraper._resolve_redirects = lambda url: url
+        scraper._extract_youtube_transcript = lambda *args, **kwargs: {
+            "success": False,
+            "error": "Transcript API blocked the request",
+        }
+        scraper._extract_with_playwright = lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("YouTube transcript failures must not fall back to Playwright")
+        )
+
+        result = asyncio.run(scraper._process_message({
+            "uri": "https://www.youtube.com/watch?v=VLCosBKRUxk",
+            "title": "Video",
+            "session_id": "session-1",
+            "request_id": "request-1",
+        }))
+
+        assert result["success"] is False
+        assert "Transcript API blocked" in result["error"]
+
+    def test_transcript_failure_dlq_record_is_published_once(self):
+        scraper = _make_scraper()
+        scraper.producer = MagicMock()
+        scraper.dead_letter_topic = "viperine.dead-letter-queue"
+        scraper.telemetry_enabled = False
+
+        scraper._publish_to_dlq(
+            {
+                "session_id": "session-1",
+                "request_id": "request-1",
+                "query_id": "query-1",
+                "uri": "https://www.youtube.com/watch?v=VLCosBKRUxk",
+            },
+            "YouTube transcript extraction failed: Transcript API blocked the request",
+        )
+
+        scraper.producer.produce.assert_called_once()
+        record = json.loads(scraper.producer.produce.call_args.kwargs["value"])
+        assert record["category"] == "youtube_transcript"
+        assert "YouTube transcript extraction failed" in record["error_message"]
 
 # ── _check_content_quality ──────────────────────────────────────────────────────
 
@@ -130,6 +177,25 @@ class TestIsCloudflareBotPage:
     def test_short_single_indicator_not_flagged(self):
         scraper = _make_scraper()
         assert scraper._is_cloudflare_bot_page("cloudflare powered site", "Site") is False
+
+
+# ── _is_youtube_blocked_page ───────────────────────────────────────────────────
+
+class TestIsYouTubeBlockedPage:
+    def test_private_video_is_blocked(self):
+        scraper = _make_scraper()
+        assert scraper._is_youtube_blocked_page("This video is private", "YouTube") is True
+
+    def test_bot_challenge_is_blocked(self):
+        scraper = _make_scraper()
+        assert scraper._is_youtube_blocked_page(
+            "Sign in to confirm you're not a bot", "YouTube"
+        ) is True
+
+    def test_real_video_page_is_not_blocked(self):
+        scraper = _make_scraper()
+        text = "A real video page with the title, channel, description, and player controls. " * 5
+        assert scraper._is_youtube_blocked_page(text, "Actual video title") is False
 
 
 # ── _extract_full_text_content ──────────────────────────────────────────────────

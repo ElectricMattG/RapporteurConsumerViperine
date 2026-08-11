@@ -515,7 +515,17 @@ class KafkaWebScraperConsumer(Base):
                     return result
                 else:
                     self._logger.warning(f"   ⚠️ YouTube transcript extraction failed: {transcript_result['error']}")
-                    self._logger.info("   📄 Falling back to standard web scraping...")
+                    error_message = (
+                        "YouTube transcript extraction failed: "
+                        f"{transcript_result['error']}"
+                    )
+                    self._logger.warning(
+                        "   📨 Sending YouTube URL to the dead-letter queue; "
+                        "skipping page fallback"
+                    )
+                    result['error'] = error_message
+                    result['extraction_method'] = 'youtube_transcript_api'
+                    return result
 
             # Step 3: Extract content directly from the resolved URL (non-YouTube or fallback)
             self._logger.info("📍 Step 3: Extracting content from resolved URL...")
@@ -599,10 +609,12 @@ class KafkaWebScraperConsumer(Base):
 
                         # Check if this is actually a Cloudflare bot page
                         page_title = metadata.get('title', '')
-                        if self._is_cloudflare_bot_page(text_content, page_title):
+                        if self._is_cloudflare_bot_page(text_content, page_title) or (
+                            is_youtube and self._is_youtube_blocked_page(text_content, page_title)
+                        ):
                             self._logger.warning(f"   🤖 Detected Cloudflare bot page - extraction blocked")
                             extraction_attempts.append("playwright: Cloudflare bot page detected")
-                            raise Exception("Playwright extracted Cloudflare challenge page, not actual content")
+                            raise Exception("Playwright extracted a blocked YouTube page, not actual content")
 
                         # Validate extracted content
                         if not self._is_extraction_valid(text_content):
@@ -843,6 +855,12 @@ class KafkaWebScraperConsumer(Base):
             import json
             import subprocess
 
+            # Sender-provided metadata (e.g. mirror-ingest send_viperine_urls.py
+            # resolves title/channel/upload_date before publishing). Used as
+            # the fallback when the local yt-dlp lookup fails, so citation
+            # metadata is never left as 'Unknown' when the producer knew it.
+            inbound_meta = message_data.get('source_metadata') or {}
+
             try:
                 result = subprocess.run(
                     ['yt-dlp', '--dump-json', '--no-download', youtube_url],
@@ -866,17 +884,17 @@ class KafkaWebScraperConsumer(Base):
 
                     self._logger.info(f"   ✅ Retrieved metadata: {title} by {channel}")
                 else:
-                    self._logger.warning(f"   ⚠️ yt-dlp metadata fetch failed, using basic metadata")
-                    channel = 'Unknown'
-                    upload_date = ''
+                    self._logger.warning(f"   ⚠️ yt-dlp metadata fetch failed, using inbound/basic metadata")
+                    channel = inbound_meta.get('channel') or 'Unknown'
+                    upload_date = inbound_meta.get('upload_date') or ''
                     duration = 0
                     view_count = 0
                     description = ''
             except Exception as e:
                 self._logger.warning(f"   ⚠️ Could not fetch yt-dlp metadata: {e}")
                 title = title or 'YouTube Video'
-                channel = 'Unknown'
-                upload_date = ''
+                channel = inbound_meta.get('channel') or 'Unknown'
+                upload_date = inbound_meta.get('upload_date') or ''
                 duration = 0
                 view_count = 0
                 description = ''
@@ -1111,6 +1129,22 @@ class KafkaWebScraperConsumer(Base):
                 return True
 
         return False
+
+    def _is_youtube_blocked_page(self, text_content: str, title: str) -> bool:
+        """Reject YouTube challenge, sign-in, and unavailable-video pages."""
+        combined = f"{title}\n{text_content}".lower()
+        indicators = (
+            "sign in to confirm you're not a bot",
+            "sign in to confirm you\u2019re not a bot",
+            "this video is private",
+            "video unavailable",
+            "this content isn't available",
+            "this content isn\u2019t available",
+            "confirm you\u2019re not a bot",
+            "confirm you're not a bot",
+            "captcha",
+        )
+        return any(indicator in combined for indicator in indicators)
 
     def _extract_pdf_text(self, pdf_content: bytes, url: str) -> tuple[str, Dict]:
         """
@@ -2251,10 +2285,13 @@ class KafkaWebScraperConsumer(Base):
         try:
             exc = error if isinstance(error, Exception) else Exception(str(error))
             classification = classify_error(exc)
+            is_youtube_transcript_failure = 'youtube transcript extraction failed' in str(exc).lower()
             now = datetime.now(timezone.utc).isoformat()
             record = {
                 'stage': 'web_scraper',
-                'category': classification.category if classification else 'unknown',
+                'category': 'youtube_transcript' if is_youtube_transcript_failure else (
+                    classification.category if classification else 'unknown'
+                ),
                 'session_id': message_data.get('session_id', 'unknown'),
                 'request_id': message_data.get('request_id'),
                 'origin': message_data.get('origin'),
@@ -2264,8 +2301,12 @@ class KafkaWebScraperConsumer(Base):
                 'error_message': str(exc),
                 'occurred_at': now,
                 'attempts': attempts,
-                'retryable': classification.retryable if classification else False,
-                'degraded': classification.degrade if classification else False,
+                'retryable': False if is_youtube_transcript_failure else (
+                    classification.retryable if classification else False
+                ),
+                'degraded': False if is_youtube_transcript_failure else (
+                    classification.degrade if classification else False
+                ),
                 'first_attempt_at': now,
                 'last_attempt_at': now,
             }

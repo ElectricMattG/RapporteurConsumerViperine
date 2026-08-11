@@ -19,6 +19,7 @@ google-genai
 openai
 tiktoken  # Token counting for OpenAI models
 youtube-transcript-api
+yt-dlp
 playwright  # JavaScript rendering for hard-to-scrape sites
 cloudscraper  # Cloudflare bypass
 # Azure Storage
